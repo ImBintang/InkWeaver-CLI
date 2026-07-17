@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Project-specific: tool output persistence
+.task_outputs/
+.transcripts/
+
+# OS
+Thumbs.db
+.DS_Store

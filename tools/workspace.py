@@ -1,0 +1,178 @@
+"""工作区 CRUD + 小说导入"""
+
+import re
+import shutil
+from pathlib import Path
+
+# 工作区名称允许的字符：字母、数字、中文、下划线、横线、点
+_VALID_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff.-]+$")
+
+
+def _validate_name(name: str) -> str | None:
+    """校验工作区名称，非法时返回错误信息"""
+    if not name or not _VALID_NAME_RE.match(name):
+        return "错误：工作区名称包含非法字符"
+    return None
+
+
+def list_workspaces(workspaces_dir: Path) -> str:
+    """列出所有工作区"""
+    if not workspaces_dir.exists():
+        return "尚无工作区。"
+    entries = sorted([d.name for d in workspaces_dir.iterdir() if d.is_dir()])
+    if not entries:
+        return "尚无工作区。"
+    lines = ["工作区列表："]
+    for i, name in enumerate(entries, 1):
+        lines.append(f"  {i}. {name}")
+    return "\n".join(lines)
+
+
+def switch_workspace(workspaces_dir: Path, name: str) -> Path | None:
+    """切换工作区，返回 Path 或 None（不存在/非法）"""
+    if not _VALID_NAME_RE.match(name):
+        return None
+    target = workspaces_dir / name
+    if not target.exists() or not target.is_dir():
+        return None
+    return target
+
+
+def create_workspace(workspaces_dir: Path, name: str) -> Path | None:
+    """创建工作区目录结构，返回 Path 或 None（名称非法/已存在）"""
+    if not _VALID_NAME_RE.match(name):
+        return None
+    target = workspaces_dir / name
+    if target.exists():
+        return None
+    target.mkdir(parents=True)
+    (target / "document").mkdir(exist_ok=True)
+    (target / "session").mkdir(exist_ok=True)
+    return target
+
+
+def update_workspace(old_path: Path, new_name: str) -> Path | str:
+    """重命名工作区"""
+    err = _validate_name(new_name)
+    if err:
+        return err
+    parent = old_path.parent
+    new_path = parent / new_name
+    if new_path.exists():
+        return f"错误：工作区「{new_name}」已存在"
+    old_path.rename(new_path)
+    return new_path
+
+
+def delete_workspace(workspace_path: Path) -> bool:
+    """删除工作区"""
+    try:
+        shutil.rmtree(workspace_path)
+        return True
+    except OSError:
+        return False
+
+
+# ---- 小说导入 ----
+
+CHAPTER_PATTERNS = [
+    re.compile(r"第[零一二三四五六七八九十百千万\d]+[章回节部卷]"),    # 第X章/回/节/部/卷
+    re.compile(r"Chapter\s+\d+", re.IGNORECASE),                      # Chapter X
+    re.compile(r"^(?:序章|序言|尾声|楔子|番外|后记|前言|引子)$"),     # 特殊章节标记
+]
+
+
+def _find_chapter_title(line: str) -> str | None:
+    """检测一行是否为章节标题，是则返回标题文本"""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    for pattern in CHAPTER_PATTERNS:
+        if pattern.match(stripped):
+            return stripped
+    return None
+
+
+def import_novel(workspace_path: Path, file_path: str) -> str:
+    """导入小说，按章节拆分
+
+    返回格式: "成功导入 12 章" 或 "错误：..."
+    """
+    src = Path(file_path)
+    if not src.exists():
+        return f"错误：文件不存在 - {file_path}"
+
+    doc_dir = workspace_path / "document"
+
+    # 检查是否已有章节
+    existing = sorted(doc_dir.glob("c*.md")) if doc_dir.exists() else []
+    if existing:
+        return "错误：工作区已有章节，请先确认是否删除后重新导入"
+
+    # 自动检测编码：优先 utf-8，fallback 到 gb18030
+    encodings = ["utf-8", "gb18030", "gbk"]
+    text = None
+    for enc in encodings:
+        try:
+            text = src.read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    if text is None:
+        return "错误：无法识别文件编码（尝试 utf-8 / gb18030 均失败）"
+    lines = text.splitlines()
+
+    # 按章节标题拆分
+    chapters = []  # [(title, [content_lines])]
+    current_title = None
+    current_lines = []
+
+    for line in lines:
+        title = _find_chapter_title(line)
+        if title:
+            if current_title is not None:
+                chapters.append((current_title, current_lines))
+            current_title = title
+            current_lines = []
+        else:
+            if current_title is not None:
+                current_lines.append(line)
+
+    if current_title is not None:
+        chapters.append((current_title, current_lines))
+
+    if not chapters:
+        return "错误：未找到任何章节标题（第X章/Chapter X）"
+
+    # 写入文件
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    for i, (title, content_lines) in enumerate(chapters, 1):
+        content = title + "\n" + "\n".join(content_lines)
+        # 去除首尾空行
+        content = content.strip() + "\n"
+        file_name = f"c{i:03d}.md"
+        (doc_dir / file_name).write_text(content, encoding="utf-8")
+
+    return f"成功导入 {len(chapters)} 章"
+
+
+def check_novel_file(file_path: str) -> str | None:
+    """检查小说文件是否有章节（用于 import 前的校验）"""
+    src = Path(file_path)
+    if not src.exists():
+        return "文件不存在"
+    encodings = ["utf-8", "gb18030", "gbk"]
+    for enc in encodings:
+        try:
+            text = src.read_text(encoding=enc)
+            for line in text.splitlines():
+                if _find_chapter_title(line):
+                    return None
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return "未找到章节标题"
+
+
+def get_workspace_name(workspace_path: Path) -> str:
+    return workspace_path.name
