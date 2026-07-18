@@ -95,6 +95,21 @@ class CLI:
         sys.stdout.flush()
         self._log("THINK", msg)
 
+    def print_reasoning(self, text: str):
+        """打印模型的完整思考过程"""
+        if not text or not text.strip():
+            return
+        sys.stdout.write("\033[2m")  # 暗淡色
+        print(f"\n{'─' * 40}")
+        print(" 思考过程")
+        print(f"{'─' * 40}")
+        for line in text.strip().split("\n"):
+            print(f" {line}")
+        print(f"{'─' * 40}")
+        sys.stdout.write("\033[22m")  # 恢复正常
+        sys.stdout.flush()
+        self._log("REASON", text[:2000])
+
     def print_tool_call(self, tool_name: str, brief: str):
         """工具调用 — 当前行输出工具名+说明，不换行"""
         self._current_tool_line = f"{tool_name} {brief}"

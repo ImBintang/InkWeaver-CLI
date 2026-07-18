@@ -3,10 +3,17 @@
 import json
 from pathlib import Path
 
+import tiktoken
+
+
+# 使用 cl100k_base 编码（OpenAI GPT-4 标准，中文估算相对准确）
+_ENCODER = tiktoken.get_encoding("cl100k_base")
+
 
 def estimate_tokens(messages: list) -> int:
-    """字符估算 Token 数"""
-    return len(json.dumps(messages, default=str)) // 4
+    """使用 tiktoken 估算 token 数"""
+    text = json.dumps(messages, default=str, ensure_ascii=False)
+    return len(_ENCODER.encode(text))
 
 
 class ContextManager:
@@ -38,7 +45,7 @@ class ContextManager:
         ]
 
         if self.tracked_chapters:
-            chapters_str = "，".join(f"第{cid}章 {t}" for cid, t in self.tracked_chapters)
+            chapters_str = "，".join(t for _, t in self.tracked_chapters)
             lines.append(f"已有章节：{chapters_str}")
         else:
             lines.append("已有章节：无")

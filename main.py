@@ -126,22 +126,25 @@ _HELP_TEXT = """可用指令：
   章节管理：
     /import -p <path>     导入小说文件（按章节拆分）
     /show -n <num>        展示指定章节内容
+    /chapters [-N]        列出最新N章的章节号和标题（默认50）
+    /export               合并所有章节为 txt（需确认覆盖）
 
   Agent：
     /clear                清空对话上下文
     /context              查看上下文占用与组成
     /compact              主动压缩上下文
+    /token                查询本会话累计 token 用量
 
   系统：
     /help                 显示本帮助
     /exit                 退出程序（或输入 exit）"""
 
 
-def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dict):
-    """处理 CLI 指令"""
+def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dict) -> bool:
+    """处理 CLI 指令，返回 False 表示请求退出"""
     parts = cmd.strip().split()
     if not parts:
-        return
+        return True
 
     command = parts[0].lower()
     cli.log_cli(cmd)
@@ -256,6 +259,39 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         from tools.chapter import show_chapter
         cli.print_info(show_chapter(jianzhi.workspace, num))
 
+    elif command == "chapters":
+        if jianzhi is None:
+            cli.print_info("请先进入一个工作区")
+            return
+        n_str = _get_flag_value(parts, "-N")
+        if n_str is None:
+            # 尝试从 parts[1] 获取（不带 -N 的情况）
+            n_str = parts[1] if len(parts) > 1 else None
+        try:
+            n = int(n_str) if n_str else 50
+        except ValueError:
+            cli.print_info("用法：/chapters [-N]（N 为正整数，默认50）")
+            return
+        if n <= 0:
+            cli.print_info("错误：N 必须为正整数")
+            return
+        cli.print_info(workspace_tools.list_latest_chapters(jianzhi.workspace, n))
+
+    elif command == "export":
+        if jianzhi is None:
+            cli.print_info("请先进入一个工作区")
+            return
+        # 检查是否已有同名 txt 文件
+        txt_path = jianzhi.workspace / f"{jianzhi.workspace.name}.txt"
+        if txt_path.exists():
+            cli.print_info(f"文件 {txt_path.name} 已存在，确认覆盖？(y/N)")
+            confirm = input().strip().lower()
+            if confirm != "y":
+                cli.print_info("已取消导出。")
+                return
+        result = workspace_tools.export_novel(jianzhi.workspace)
+        cli.print_info(result)
+
     # ---- Agent 相关 ----
     elif command == "clear":
         if jianzhi is None:
@@ -275,11 +311,22 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
             return
         jianzhi.compact_history()
 
+    elif command == "token":
+        if jianzhi is None:
+            cli.print_info("请先进入一个工作区")
+            return
+        cli.print_info(jianzhi.token_report())
+
     elif command == "help":
         cli.print_info(_HELP_TEXT)
 
+    elif command == "exit":
+        return False
+
     else:
         cli.print_info(f"未知指令：/{command}，输入 /help 查看可用指令")
+
+    return True
 
 
 def _get_flag_value(parts: list[str], flag: str) -> str | None:
@@ -343,7 +390,8 @@ def main():
             break
 
         if is_cmd:
-            handle_command(text, cli, jianzhi, config)
+            if not handle_command(text, cli, jianzhi, config):
+                break
             # 如果指令切换了工作区，重建 Agent
             name = config.get("workspace", {}).get("last", "")
             if name and (jianzhi is None or jianzhi.workspace.name != name):

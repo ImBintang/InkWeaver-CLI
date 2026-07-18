@@ -27,6 +27,8 @@ class JianzhiAgent:
         self.skills = SkillRegistry(skills_dir)
         self.messages: list = []
         self._last_usage = {}
+        # Token 累计统计
+        self._token_accum = {"input": 0, "output": 0, "total": 0}
 
         self.system_prompt = self._build_system_prompt()
         self.tool_defs = self._build_tool_defs()
@@ -244,33 +246,35 @@ class JianzhiAgent:
 
     # ---- 消息归一化 ----
     def _normalize_messages(self, messages: list) -> list:
-        """清理消息列表（参照 s02 normalize_messages）"""
+        """清理消息列表（OpenAI 格式）"""
         cleaned = []
         for msg in messages:
             clean = {"role": msg["role"]}
+            # 复制 content（string 或 None）
             content = msg.get("content")
-            if isinstance(content, str):
+            if content is not None:
                 clean["content"] = content
-            elif isinstance(content, list):
-                clean["content"] = [
-                    {k: v for k, v in block.items() if not k.startswith("_")}
-                    for block in content
-                    if isinstance(block, dict)
-                ]
-            else:
-                clean["content"] = content or ""
+            # 保留 tool_calls（仅 assistant 消息有）
+            if "tool_calls" in msg:
+                clean["tool_calls"] = msg["tool_calls"]
+            # 保留 tool_call_id（仅 tool 消息有）
+            if "tool_call_id" in msg:
+                clean["tool_call_id"] = msg["tool_call_id"]
             cleaned.append(clean)
 
-        # 合并同角色连续消息
+        # 合并同角色连续消息（仅合并 content 文本）
         if not cleaned:
             return cleaned
         merged = [cleaned[0]]
         for msg in cleaned[1:]:
-            if msg["role"] == merged[-1]["role"]:
+            if msg["role"] == merged[-1]["role"] and "tool_calls" not in msg and "tool_call_id" not in msg:
                 prev = merged[-1]
-                prev_c = prev["content"] if isinstance(prev["content"], list) else [{"type": "text", "text": str(prev["content"])}]
-                curr_c = msg["content"] if isinstance(msg["content"], list) else [{"type": "text", "text": str(msg["content"])}]
-                prev["content"] = prev_c + curr_c
+                prev_c = prev.get("content") or ""
+                curr_c = msg.get("content") or ""
+                if prev_c and curr_c:
+                    prev["content"] = prev_c + "\n" + curr_c
+                elif curr_c:
+                    prev["content"] = curr_c
             else:
                 merged.append(msg)
         return merged
@@ -281,18 +285,60 @@ class JianzhiAgent:
         self.messages.append({"role": "user", "content": user_input})
         self.messages = agent_loop(self, self.messages)
 
-        # 打印最终输出
-        last_msg = self.messages[-1]
-        if last_msg.get("role") == "assistant":
-            content = last_msg.get("content", "")
-            if isinstance(content, list):
-                text = "".join(
-                    b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
-                )
-            else:
-                text = str(content)
-            if text.strip():
-                self.cli.print_output(text.strip())
+        # 打印最终输出（取最后一条 assistant 的文本回复）
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                text = msg["content"].strip()
+                if text:
+                    self.cli.print_output(text)
+                break
+
+    def _accumulate_tokens(self, usage: dict):
+        """累加 token 用量并记录日志
+
+        优先使用 API 返回的 usage，缺失时用 tiktoken 估算。
+        """
+        if not usage:
+            return
+
+        # API 返回的 usage 字段（OpenAI 格式）
+        prompt_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+        completion_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+
+        if prompt_tokens is not None and completion_tokens is not None:
+            input_tokens = prompt_tokens
+            output_tokens = completion_tokens
+        else:
+            # 无法从 API 获取，用 tiktoken 估算当前消息
+            from agent.compact import estimate_tokens
+            input_tokens = estimate_tokens(self.messages)
+            output_tokens = 0
+
+        total = input_tokens + output_tokens
+        self._token_accum["input"] += input_tokens
+        self._token_accum["output"] += output_tokens
+        self._token_accum["total"] += total
+
+        # 写入日志
+        if self.cli.logger:
+            self.cli.logger.write(
+                "TOKEN",
+                f"本次: input={input_tokens}, output={output_tokens}, total={total} | "
+                f"累计: input={self._token_accum['input']}, output={self._token_accum['output']}, total={self._token_accum['total']}"
+            )
+
+    def token_report(self) -> str:
+        """/token 指令 — 返回累计 token 统计"""
+        lines = [
+            f"Token 用量统计（本次会话）：",
+            f"  输入: {self._token_accum['input']}",
+            f"  输出: {self._token_accum['output']}",
+            f"  总计: {self._token_accum['total']}",
+        ]
+        # 如果有 API 最近一次返回的 usage，也显示
+        if self._last_usage:
+            lines.append(f"  （最近一次 API: {self._last_usage}）")
+        return "\n".join(lines)
 
     def clear_context(self):
         """清空上下文（/clear 指令）"""

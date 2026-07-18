@@ -22,28 +22,32 @@ class LLMClient:
         )
         self.model = config["model"]
         self.max_tokens = config.get("output_max_tokens", 128000)
+        self.reasoning_effort = config.get("reasoning_effort", "high")
 
     def chat(self, messages: list, system_prompt: str, tools: list = None) -> dict:
-        """单次 LLM 调用
+        """单次 LLM 调用 — 原生 OpenAI 格式
 
         Args:
-            messages: 对话历史
+            messages: 对话历史（OpenAI 格式）
             system_prompt: 系统提示词
             tools: OpenAI 格式的 tool definitions
 
         Returns:
             {
-                "content": [...],      # response.choices[0].message.content 的块列表
+                "content": str | None,  # 文本回复
+                "reasoning_content": str | None,  # 思考过程
+                "tool_calls": list | None,  # OpenAI 原生 tool_calls 对象
                 "stop_reason": str,     # "tool_use" | "stop" | "max_tokens"
                 "usage": {...}          # token 用量
             }
         """
-        # system prompt 作为 system 消息插入到 messages 头部
         full_messages = [{"role": "system", "content": system_prompt}] + messages
         kwargs = dict(
             model=self.model,
             messages=full_messages,
             max_tokens=self.max_tokens,
+            extra_body={"thinking": {"type": "enabled"}},
+            reasoning_effort=self.reasoning_effort,
         )
         if tools:
             kwargs["tools"] = tools
@@ -52,18 +56,23 @@ class LLMClient:
         msg = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
 
-        # 归一化 content 为块列表
-        content_blocks = []
-        if msg.content:
-            content_blocks.append({"type": "text", "text": msg.content})
+        # 提取 reasoning_content（DeepSeek 思考过程）
+        reasoning_content = getattr(msg, "reasoning_content", None)
+
+        # 提取原生 tool_calls（OpenAI 格式）
+        tool_calls = None
         if msg.tool_calls:
-            for tc in msg.tool_calls:
-                content_blocks.append({
-                    "type": "tool_use",
+            tool_calls = [
+                {
                     "id": tc.id,
-                    "name": tc.function.name,
-                    "input": tc.function.arguments,  # JSON string
-                })
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,  # JSON string
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
 
         if finish_reason == "length":
             stop_reason = "max_tokens"
@@ -73,7 +82,9 @@ class LLMClient:
             stop_reason = "stop"
 
         return {
-            "content": content_blocks,
+            "content": msg.content,
+            "reasoning_content": reasoning_content,
+            "tool_calls": tool_calls,
             "stop_reason": stop_reason,
             "usage": dict(response.usage) if response.usage else {},
         }

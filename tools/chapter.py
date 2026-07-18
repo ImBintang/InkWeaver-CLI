@@ -7,13 +7,20 @@ from pathlib import Path
 def parse_chapter_spec(spec: str) -> list[int]:
     """解析范围表达式 "1-3,5,7-9" → [1,2,3,5,7,8,9]"""
     result = []
+    if not spec or not spec.strip():
+        return result
     parts = spec.split(",")
     for part in parts:
         part = part.strip()
+        if not part:
+            continue
         if "-" in part:
             start, end = part.split("-", 1)
             start, end = int(start.strip()), int(end.strip())
-            result.extend(range(start, end + 1))
+            if start <= end:
+                result.extend(range(start, end + 1))
+            else:
+                result.extend(range(end, start + 1))
         else:
             result.append(int(part))
     return sorted(set(result))
@@ -61,6 +68,8 @@ def chapter_list(workspace_path: Path) -> str:
 def read_chapters(workspace_path: Path, chapters: str) -> str:
     """读取指定章节正文
 
+    每章至多读入前5000字（不含章节标题）。
+
     Args:
         chapters: 范围表达式，如 "1-3,5,7-9"
 
@@ -72,12 +81,16 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
     if not nums:
         return "错误：章节号格式无效"
 
+    MAX_BODY_CHARS = 5000
+
     parts = []
     for num in nums:
         title, body = _read_chapter_file(doc_dir, num)
         if title is None:
             parts.append(f"## 第{num}章（不存在）")
         else:
+            if len(body) > MAX_BODY_CHARS:
+                body = body[:MAX_BODY_CHARS] + "\n\n...（后续内容已截断）"
             parts.append(f"## {title}\n\n{body}")
 
     return "\n\n".join(parts)

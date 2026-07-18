@@ -77,6 +77,7 @@ def delete_workspace(workspace_path: Path) -> bool:
 
 CHAPTER_PATTERNS = [
     re.compile(r"第[零一二三四五六七八九十百千万\d]+[章回节部卷]"),    # 第X章/回/节/部/卷
+    re.compile(r"^\d+[章回节部卷]"),                                   # 数字+章/回/节/部/卷，如 "345章"
     re.compile(r"Chapter\s+\d+", re.IGNORECASE),                      # Chapter X
     re.compile(r"^(?:序章|序言|尾声|楔子|番外|后记|前言|引子)$"),     # 特殊章节标记
 ]
@@ -142,7 +143,7 @@ def import_novel(workspace_path: Path, file_path: str) -> str:
         chapters.append((current_title, current_lines))
 
     if not chapters:
-        return "错误：未找到任何章节标题（第X章/Chapter X）"
+        return "错误：未找到任何章节标题。支持的格式：第X章、345章、Chapter X、序章/尾声等"
 
     # 写入文件
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -176,3 +177,70 @@ def check_novel_file(file_path: str) -> str | None:
 
 def get_workspace_name(workspace_path: Path) -> str:
     return workspace_path.name
+
+
+def list_latest_chapters(workspace_path: Path, n: int = 50) -> str:
+    """列出最新N章的章节号和标题
+
+    Args:
+        workspace_path: 工作区路径
+        n: 显示章节数，默认50
+
+    Returns:
+        格式化的章节列表
+    """
+    doc_dir = workspace_path / "document"
+    if not doc_dir.exists():
+        return "（尚无章节）"
+
+    files = sorted(doc_dir.glob("c*.md"))
+    if not files:
+        return "（尚无章节）"
+
+    # 取最新N章
+    latest = files[-n:] if n < len(files) else files
+
+    lines = []
+    for fp in latest:
+        text = fp.read_text(encoding="utf-8").strip()
+        title = text.splitlines()[0] if text else fp.stem
+        # 提取章节号
+        chapter_num = int(fp.stem.lstrip("c"))
+        lines.append(f"  第{chapter_num}章  {title}")
+
+    total = len(files)
+    shown = len(lines)
+    header = f"最新 {shown} 章（共 {total} 章）："
+    return header + "\n" + "\n".join(lines)
+
+
+def export_novel(workspace_path: Path) -> str:
+    """将工作区所有章节合并导出为 txt 文件
+
+    Returns:
+        成功/失败信息
+    """
+    doc_dir = workspace_path / "document"
+    if not doc_dir.exists():
+        return "错误：工作区没有 document 目录"
+
+    files = sorted(doc_dir.glob("c*.md"))
+    if not files:
+        return "错误：工作区尚无章节"
+
+    # 合并内容
+    parts = []
+    for fp in files:
+        text = fp.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(text)
+
+    if not parts:
+        return "错误：所有章节均为空"
+
+    # 写入文件
+    output_path = workspace_path / f"{workspace_path.name}.txt"
+    content = "\n\n".join(parts) + "\n"
+    output_path.write_text(content, encoding="utf-8")
+
+    return f"已导出 {len(files)} 章到 {output_path.name}"
