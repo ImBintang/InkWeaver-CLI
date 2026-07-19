@@ -1,0 +1,462 @@
+"""knowledge_task 工具 + KnowledgeSubagent 运行逻辑"""
+
+import json
+from pathlib import Path
+
+from api import LLMClient
+from agent.loop import agent_loop
+
+
+# Subagent 可用的工具列表
+SUBAGENT_TOOLS = [
+    "read_chapters",
+    "wiki_list",
+    "read_wiki",
+    "new_wiki",
+    "edit_wiki",
+    "read_memory",
+    "check_wiki",
+    "read_index",
+    "query_relations",
+    "agent_output",
+]
+
+
+def _build_subagent_tool_defs() -> list:
+    """构建 subagent 的 tool definitions（10 个工具）"""
+    from tools.chapter import read_chapters
+    from tools.wiki import wiki_list, read_wiki, new_wiki, edit_wiki, check_wiki
+    from tools.memory import read_memory
+    from tools.category import read_index
+    from tools.relation import query_relations
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_chapters",
+                "description": "读取指定章节的正文。支持范围表达式如 \"1-3,5,7-9\"。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "chapters": {"type": "string", "description": "章节范围"},
+                    },
+                    "required": ["chapters"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "wiki_list",
+                "description": "查看类别下的 wiki 列表（分页，每页 20 个）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "description": "类别名"},
+                        "page": {"type": "integer", "description": "页码（默认 1）"},
+                    },
+                    "required": ["category"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_wiki",
+                "description": "读取指定 wiki 文档。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "description": "类别名"},
+                        "name": {"type": "string", "description": "词条名"},
+                    },
+                    "required": ["category", "name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "new_wiki",
+                "description": "新建 wiki 文档。content为必填，否则只有frontmatter无正文。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "description": "类别名"},
+                        "name": {"type": "string", "description": "词条名"},
+                        "content": {"type": "string", "description": "正文内容（必须提供）"},
+                        "description": {"type": "string", "description": "描述（静态）"},
+                        "state": {"type": "string", "description": "状态（动态，可选）"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "标签列表"},
+                    },
+                    "required": ["category", "name", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_wiki",
+                "description": "编辑 wiki 文档。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "description": "类别名"},
+                        "name": {"type": "string", "description": "词条名"},
+                        "content": {"type": "string", "description": "新正文（None 表示不修改）"},
+                        "description": {"type": "string", "description": "新描述（None 表示不修改）"},
+                        "state": {"type": "string", "description": "新状态（None 表示不修改）"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签（None 表示不修改）"},
+                    },
+                    "required": ["category", "name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_memory",
+                "description": "读取记忆文档。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "记忆名（None 表示读取索引）"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_wiki",
+                "description": "检查 wiki 词条在指定章节中是否出现。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "词条名"},
+                        "chapters": {"type": "string", "description": "章节范围"},
+                    },
+                    "required": ["name", "chapters"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_index",
+                "description": "读取总 index 或指定类别 index。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string", "description": "类别名（None 表示总索引）"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "query_relations",
+                "description": "查询指定词条的所有关联词条。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "词条名"},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "agent_output",
+                "description": "中间轮输出。调用后直接输出文本，不打断流程。用于输出完整操作摘要。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要输出的文本"},
+                    },
+                    "required": ["text"],
+                },
+            },
+        },
+    ]
+
+
+class KnowledgeSubagent:
+    """知识提取子智能体 — 按类别执行知识提取
+
+    使用 fresh messages=[] 实现上下文隔离，共享文件系统。
+    支持审核修复模式：review_notes 提供具体的修复建议。
+    """
+
+    MAX_TURNS = 30
+
+    def __init__(self, llm: LLMClient, workspace: Path,
+                 category: str, chapters: str, entries: list,
+                 task_type: str = "new", cli=None,
+                 review_notes: str = ""):
+        """
+        Args:
+            llm: LLM 客户端实例
+            workspace: 工作区路径
+            category: 类别名（如 "人物"）
+            chapters: 章节范围表达式（如 "1-5"）
+            entries: 目标词条列表（如 ["张三", "李四"]）
+            task_type: "new" 或 "update"
+            cli: CLI 实例（用于日志记录）
+            review_notes: 审核修复建议（由 review subagent 提供，可选）
+        """
+        self.llm = llm
+        self.workspace = workspace
+        self.category = category
+        self.chapters = chapters
+        self.entries = entries
+        self.task_type = task_type
+        self.cli = cli
+        self.review_notes = review_notes
+        self.messages: list = []  # fresh，上下文隔离
+        self.tool_defs = _build_subagent_tool_defs()
+
+    def _build_system_prompt(self) -> str:
+        """构建知识提取专用 system prompt"""
+        from tools.category import read_index
+
+        # 读取类别写作规范
+        category_guide = read_index(self.workspace, self.category)
+        if category_guide.startswith("错误"):
+            category_guide = "（暂无写作规范）"
+
+        entries_str = "、".join(self.entries)
+        task_desc = "新建以下词条" if self.task_type == "new" else "更新以下词条"
+
+        # 如果存在审核修复建议，追加到 prompt
+        review_section = ""
+        if self.review_notes:
+            review_section = (
+                f"\n"
+                f"# 审核修复任务\n"
+                f"**这不是一次全新的知识提取，而是根据审核意见修复现有词条。**\n"
+                f"\n"
+                f"## 审核意见/修复建议\n"
+                f"{self.review_notes}\n"
+                f"\n"
+                f"请严格按照上述审核意见进行修复。"
+            )
+
+        return (
+            f"你是知识提取子智能体，负责从小说章节中提取知识并写入 Wiki。\n"
+            f"当前工作区：{self.workspace.name}\n"
+            f"当前目录：{self.workspace}\n"
+            f"\n"
+            f"# 当前任务\n"
+            f"类别：{self.category}\n"
+            f"涉及章节：第 {self.chapters} 章\n"
+            f"目标词条：{entries_str}\n"
+            f"操作类型：{task_desc}\n"
+            f"{review_section}\n"
+            f"\n"
+            f"# 类别写作规范\n"
+            f"{category_guide}\n"
+            f"\n"
+            f"# 工作流程\n"
+            f"1. **先用 Wiki 做 RAG**：使用 wiki_list 查看该类别下已有词条\n"
+            f"2. 使用 read_wiki 读取已有词条内容（优先复用 wiki 信息）\n"
+            f"3. **只有 wiki 信息不足时**，才用 read_chapters 读取章节原文\n"
+            f"4. 使用 new_wiki 或 edit_wiki 写入/更新词条\n"
+            f"5. 词条正文使用 [[wikilink]] 格式建立交叉引用\n"
+            f"\n"
+            f"# 规则\n"
+            f"- **禁止跳过 wiki 直接全文阅读章节**，优先用 wiki_list + read_wiki 获取已有信息\n"
+            f"- new_wiki 的 content 参数为必填！必须提供正文内容，不能为空\n"
+            f"- 本 subagent 只负责 wiki 词条创建，不处理规则文档（rules/ 由主 agent 管理）\n"
+            f"- description 字段放客观介绍（静态信息）\n"
+            f"- state 字段放近期事件带来的变化（动态信息）\n"
+            f"- **人物/势力类词条必须包含 state 字段**（见类别 index.md 定义）\n"
+            f"- 设定图鉴类不需要 state 字段\n"
+            f"- 正文中的 [[wikilink]] 指向其他词条名\n"
+            f"- 所有操作完成后，调用 agent_output 输出完整操作摘要（不要自己用文本输出，使用 agent_output 工具）"
+        )
+
+    def dispatch_tool(self, name: str, args: dict) -> str:
+        """工具分发路由"""
+        from tools.chapter import read_chapters, keywords_stat, chapter_list
+        from tools.wiki import wiki_list, read_wiki, new_wiki, edit_wiki, check_wiki
+        from tools.memory import read_memory
+        from tools.category import read_index
+        from tools.relation import query_relations
+
+        # agent_output 特殊处理：透传输出内容并记录日志
+        if name == "agent_output":
+            text = args.get("text", "")
+            self._log("SUBAGENT_OUTPUT", text)
+            return "(已结束)"
+
+        dispatch = {
+            "read_chapters": lambda **kw: read_chapters(self.workspace, **kw),
+            "wiki_list": lambda **kw: wiki_list(self.workspace, **kw),
+            "read_wiki": lambda **kw: read_wiki(self.workspace, **kw),
+            "new_wiki": lambda **kw: new_wiki(self.workspace, **kw),
+            "edit_wiki": lambda **kw: edit_wiki(self.workspace, **kw),
+            "read_memory": lambda **kw: read_memory(self.workspace, **kw),
+            "check_wiki": lambda **kw: check_wiki(self.workspace, **kw),
+            "read_index": lambda **kw: read_index(self.workspace, **kw),
+            "query_relations": lambda **kw: query_relations(self.workspace, **kw),
+        }
+
+        handler = dispatch.get(name)
+        if handler is None:
+            return f"错误：未知工具「{name}」"
+
+        try:
+            return handler(**args)
+        except Exception as e:
+            return f"错误：{e}"
+
+    def _log(self, tag: str, text: str):
+        """记录日志到 session 日志文件"""
+        if self.cli and self.cli.logger:
+            self.cli.logger.write(tag, text)
+
+    def run(self) -> str:
+        """运行 subagent，返回操作摘要"""
+        system_prompt = self._build_system_prompt()
+
+        self._log("SUBAGENT_START",
+                  f"类别={self.category}, 章节={self.chapters}, "
+                  f"词条={','.join(self.entries)}, 类型={self.task_type}")
+
+        # 构建初始 user 消息
+        entries_str = "、".join(self.entries)
+        task_desc = "新建以下词条" if self.task_type == "new" else "更新以下词条"
+        initial_msg = (
+            f"请执行知识提取任务：\n"
+            f"- 类别：{self.category}\n"
+            f"- 章节：第 {self.chapters} 章\n"
+            f"- 词条：{entries_str}\n"
+            f"- 操作：{task_desc}\n\n"
+            f"请开始工作。"
+        )
+
+        self.messages.append({"role": "user", "content": initial_msg})
+
+        # 运行 agent 循环
+        for turn in range(self.MAX_TURNS):
+            response = self.llm.chat(
+                messages=self.messages,
+                system_prompt=system_prompt,
+                tools=self.tool_defs,
+            )
+
+            # 构建 assistant 消息
+            assistant_msg = {"role": "assistant", "content": response.get("content")}
+            if response.get("tool_calls"):
+                assistant_msg["tool_calls"] = response["tool_calls"]
+            self.messages.append(assistant_msg)
+
+            # 记录 token 用量
+            if "usage" in response:
+                usage = response["usage"]
+                pt = usage.get("prompt_tokens") or usage.get("input_tokens", 0)
+                ct = usage.get("completion_tokens") or usage.get("output_tokens", 0)
+                self._log("SUBAGENT_TOKEN",
+                          f"轮次={turn+1}, input={pt}, output={ct}, total={pt+ct}")
+
+            # 检查是否完成
+            if response["stop_reason"] != "tool_use":
+                # 记录最终输出
+                final_content = response.get("content", "")
+                if final_content:
+                    self._log("SUBAGENT_OUTPUT", final_content)
+                break
+
+            # 处理 tool_calls
+            tool_results = []
+            for tc in response["tool_calls"]:
+                tc_id = tc["id"]
+                func = tc["function"]
+                tool_name = func["name"]
+
+                try:
+                    tool_input = json.loads(func["arguments"])
+                except (json.JSONDecodeError, TypeError):
+                    tool_input = {}
+
+                # 记录工具调用（agent_output 已单独记录，不再重复）
+                if tool_name != "agent_output":
+                    brief_param = str(list(tool_input.values())[0]) if tool_input else ""
+                    self._log("SUBAGENT_TOOL",
+                              f"{tool_name}({brief_param})")
+
+                result = self.dispatch_tool(tool_name, tool_input)
+
+                # 记录工具结果（agent_output 的结果是 "(已结束)"，不需要截断）
+                if tool_name == "agent_output":
+                    pass  # agent_output 的内容已在 dispatch 中通过 _log 记录
+                else:
+                    result_preview = result[:120].replace("\n", " ")
+                    self._log("SUBAGENT_RESULT", result_preview)
+
+                tool_results.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result[:5000],  # 限制工具结果长度
+                })
+
+            self.messages.extend(tool_results)
+
+        # 提取最终摘要
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                summary = msg["content"].strip()
+                self._log("SUBAGENT_END", summary[:300])
+                return summary
+
+        self._log("SUBAGENT_END", "（subagent 未返回摘要）")
+        return "（subagent 未返回摘要）"
+
+
+def run_knowledge_task(llm: LLMClient, workspace: Path,
+                      category: str, chapters: str,
+                      entries: list, task_type: str = "new",
+                      cli=None, review_notes: str = "") -> str:
+    """便捷函数：创建并运行 KnowledgeSubagent
+
+    Args:
+        llm: LLM 客户端实例
+        workspace: 工作区路径
+        category: 类别名
+        chapters: 章节范围表达式
+        entries: 目标词条列表
+        task_type: "new" 或 "update"
+        cli: CLI 实例
+        review_notes: 审核修复建议（由审核 subagent 提供，可选）
+    """
+    subagent = KnowledgeSubagent(
+        llm=llm,
+        workspace=workspace,
+        category=category,
+        chapters=chapters,
+        entries=entries,
+        task_type=task_type,
+        cli=cli,
+        review_notes=review_notes,
+    )
+    result = subagent.run()
+
+    # 记录 extraction 到 log.json
+    try:
+        from tools.diff import record_extraction
+        from tools.chapter import parse_chapter_spec
+        chapter_nums = parse_chapter_spec(chapters)
+        chapter_files = [f"c{n:03d}.md" for n in chapter_nums]
+        if task_type == "new":
+            record_extraction(workspace, chapter_files, entries, [])
+        else:
+            record_extraction(workspace, chapter_files, [], entries)
+    except Exception:
+        pass  # log 记录失败不影响主流程
+
+    return result
