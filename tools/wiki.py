@@ -19,12 +19,32 @@ def _ensure_wiki_dir(workspace: Path) -> Path:
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """解析 YAML frontmatter，返回 (meta, body)"""
+    """解析 YAML frontmatter，返回 (meta, body)
+
+    自动清理重复的 frontmatter 块：
+    如果文件开头有多组 ---...--- 块，只取最后一组作为有效 frontmatter。
+    正文中的 ---（如 Markdown 水平线）不会被误判为 frontmatter。
+    """
+    # 统一换行符
+    text = text.replace("\r\n", "\n")
+
+    # 第一层：匹配文件开头的第一组 frontmatter --- ... ---
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
     if not match:
         return {}, text.strip()
+
+    fm_content = match.group(1).strip()
+    body = match.group(2).strip()
+
+    # 第二层：检查 body 是否以另一组 frontmatter 开头（重复 frontmatter）
+    # 如果是，丢弃第一组，用第二组
+    body_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", body, re.DOTALL)
+    if body_match:
+        fm_content = body_match.group(1).strip()
+        body = body_match.group(2).strip()
+
     meta = {}
-    for line in match.group(1).strip().splitlines():
+    for line in fm_content.splitlines():
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
@@ -34,7 +54,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
         if value.startswith("[") and value.endswith("]"):
             value = [v.strip() for v in value[1:-1].split(",") if v.strip()]
         meta[key] = value
-    return meta, match.group(2).strip()
+    return meta, body
 
 
 def _build_frontmatter(meta: dict) -> str:
@@ -245,6 +265,114 @@ def check_wiki(workspace: Path, name: str, chapters: str) -> str:
         return f"词条「{name}」出现在第 {found} 章"
     else:
         return f"词条「{name}」未出现在指定章节中"
+
+
+def check_wiki_yaml(workspace: Path, category: str = "",
+                    name: str = "") -> str:
+    """检查 wiki 文档的 YAML 结构完整性
+
+    检查项目：
+    - frontmatter 是否存在（以 --- 开头）
+    - frontmatter 是否恰好一组（不允许多组重复）
+    - 正文内容是否为空/None
+    - 正文是否包含符合类别的基本章节结构
+
+    Args:
+        workspace: 工作区路径
+        category: 类别名（为空则检查所有类别）
+        name: 词条名（为空则检查该类别的所有词条）
+
+    Returns:
+        格式化的检查报告
+    """
+    root = _wiki_root(workspace)
+    if not root.exists():
+        return "错误：wiki 目录不存在"
+
+    # 收集要检查的文件列表
+    files_to_check: list[Path] = []
+    if category:
+        cat_dir = root / category
+        if not cat_dir.exists():
+            return f"错误：类别「{category}」不存在"
+        if name:
+            fp = cat_dir / f"{name}.md"
+            if not fp.exists():
+                return f"错误：词条「{name}」不存在"
+            files_to_check.append(fp)
+        else:
+            files_to_check = sorted(cat_dir.glob("*.md"))
+            files_to_check = [f for f in files_to_check if f.name != "index.md"]
+            if not files_to_check:
+                return f"类别「{category}」下暂无词条"
+    else:
+        # 所有类别
+        for cat_dir in sorted(root.iterdir()):
+            if cat_dir.is_dir():
+                for fp in sorted(cat_dir.glob("*.md")):
+                    if fp.name != "index.md":
+                        files_to_check.append(fp)
+
+    if not files_to_check:
+        return "未找到任何 wiki 词条"
+
+    # 逐文件检查
+    report_lines = []
+    issue_count = 0
+    ok_count = 0
+
+    for fp in files_to_check:
+        relative = fp.relative_to(root)
+        text = fp.read_text(encoding="utf-8")
+        issues = []
+
+        # 1. 检查 frontmatter 结构（只检测文件开头的 ---，不把正文水平线误判）
+        frontmatter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
+        if not frontmatter_match:
+            issues.append("❌ 缺少标准 frontmatter（不以 --- 开头和结尾）")
+        else:
+            # 检查 body 开头是否紧跟着另一组 frontmatter
+            body_text = frontmatter_match.group(2)
+            if re.match(r"^\s*---\s*\n", body_text):
+                issues.append("❌ frontmatter 重复（文件开头有多组 --- 块）")
+
+        # 2. 检查正文
+        meta, body = _parse_frontmatter(text)
+        if not body or body.strip() in ("", "None"):
+            issues.append("❌ 正文为空")
+        else:
+            # 3. 检查正文长度（至少有一些实质性内容）
+            if len(body.strip()) < 20:
+                issues.append(f"⚠️ 正文过短（仅 {len(body.strip())} 字符）")
+
+            # 4. 检查正文是否包含章节标题（有 ## 才算是结构化内容）
+            if not re.search(r"^##\s+\S", body, re.MULTILINE):
+                issues.append("⚠️ 正文缺少 Markdown 章节标题（##）")
+
+        # 5. 检查必要字段
+        cat_name = relative.parts[0]
+        if meta:
+            if "type" not in meta:
+                issues.append("⚠️ frontmatter 缺少 type 字段")
+            if "title" not in meta:
+                issues.append("⚠️ frontmatter 缺少 title 字段")
+            if "updated" not in meta:
+                issues.append("⚠️ frontmatter 缺少 updated 字段")
+
+        # 输出
+        if issues:
+            issue_count += 1
+            report_lines.append(f"\n[{relative}]")
+            for issue in issues:
+                report_lines.append(f"  {issue}")
+        else:
+            ok_count += 1
+
+    # 汇总
+    summary = f"\n---\n检查完毕：共 {len(files_to_check)} 个词条，通过 {ok_count} 个，异常 {issue_count} 个。"
+    report_lines.append(summary)
+
+    return "\n".join(report_lines)
 
 
 def _category_to_type(category: str) -> str:
