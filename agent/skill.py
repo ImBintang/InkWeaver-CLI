@@ -28,7 +28,7 @@ class SkillRegistry:
     def _load_all(self):
         if not self.skills_dir.exists():
             return
-        for path in sorted(self.skills_dir.rglob("SKILL.md")):
+        for path in sorted(self.skills_dir.rglob("*.skill.md")):
             meta, body = self._parse_frontmatter(path.read_text(encoding="utf-8"))
             name = meta.get("name", path.parent.name)
             description = meta.get("description", "No description")

@@ -18,6 +18,8 @@ WRITE_TOOLS = {
     "new_rule", "edit_rule", "delete_rule",
     "knowledge_task",
     "edit_index",
+    "new_plot", "edit_plot", "end_plot", "delete_plot",
+    "plot_task",
 }
 
 # 模式切换工具（需用户确认后才放行）

@@ -43,17 +43,29 @@ def read_memory(workspace: Path, name: str = None) -> str:
     """
     root = _memory_root(workspace)
     if not root.exists():
-        return "（memory 目录不存在）"
+        return "（memory 目录不存在，暂无记忆数据。可先用 list_memories 确认是否有记忆，或使用 read_memory(None) 查看索引）"
 
     if name is None or name.upper() == "MEMORY":
         fp = root / MEMORY_INDEX
         if not fp.exists():
-            return "（记忆索引不存在）"
+            # 自动扫描生成索引
+            memories = sorted([f.stem for f in root.glob("*.md") if f.name != MEMORY_INDEX])
+            if not memories:
+                return "（暂无记忆文档）"
+            lines = ["# 记忆索引\n"]
+            for m in memories:
+                lines.append(f"- {m}")
+            return "\n".join(lines)
         return fp.read_text(encoding="utf-8")
 
     fp = root / f"{name}.md"
     if not fp.exists():
-        return f"错误：记忆文档「{name}」不存在"
+        # 目录存在但文件不存在，列出可用记忆供参考
+        available = sorted([f.stem for f in root.glob("*.md") if f.name != MEMORY_INDEX])
+        if available:
+            hint = "、".join(available[:10])
+            return f"错误：记忆文档「{name}」不存在。可用记忆：{hint}"
+        return f"错误：记忆文档「{name}」不存在（暂无任何记忆文档）"
     return fp.read_text(encoding="utf-8")
 
 

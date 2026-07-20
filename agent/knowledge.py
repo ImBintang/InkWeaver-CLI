@@ -6,7 +6,9 @@ from Jianzhi import JianzhiAgent
 from tools import wiki as wiki_tools
 from tools import category as category_tools
 from tools import rules as rules_tools
+from tools import plot as plot_tools
 from tools.knowledge_task import run_knowledge_task
+from tools.plot_task import run_plot_task
 from tools.review import run_review as _run_review
 from auto.relation_extractor import build_relations as _build_relations_raw
 
@@ -48,6 +50,9 @@ class KnowledgeAgent(JianzhiAgent):
             "\n"
             "# Knowledge 专家模式\n"
             "你当前处于 Knowledge 专家模式，负责知识提取与 Wiki 管理。\n"
+            "\n"
+            "## 技能调用\n"
+            "本模式下技能仍然可用。需要类别设计指导时，调用 `category_design` 技能获取 PRD 规范。\n"
             "\n"
             "## 可用操作\n"
             "- 使用 doc_diff 查看新增/修改的章节\n"
@@ -100,12 +105,15 @@ class KnowledgeAgent(JianzhiAgent):
             "1. doc_diff → 获取新增/修改的章节列表\n"
             "2. **先查 Wiki，再读章节**（详见「Wiki 优先 RAG 原则」）\n"
             "3. 查询现有 wiki（wiki_list → read_wiki）\n"
-            "4. 分析并制定计划（新增/修改哪些词条）\n"
-            "5. 展示结构化计划 → 等待用户确认（此时写工具被权限系统拦截）\n"
-            "6. 用户确认后调用 confirm_plan → 切换到执行阶段\n"
-            "7. 按类别分组，调用 knowledge_task 派发 subagent\n"
-            "8. **必须审核**：调用 review_knowledge 进行自审\n"
-            "9. **构建关系图**：审核修复后调用 build_relations 构建 relations.yaml\n"
+            f"3.5. 查询未结束剧情卡片（plot_list(ended=false)）\n"
+            f"3.6. 分析章节中涉及的剧情事件，拟定 plot 操作\n"
+            f"4. 分析并制定计划（新增/修改哪些词条）\n"
+            f"5. 展示结构化计划（包含 wiki 提取和 plot 提取两部分）→ 等待用户确认\n"
+            f"6. 用户确认后调用 confirm_plan → 切换到执行阶段\n"
+            f"7. 按类别分组，调用 knowledge_task 派发 subagent 提取 wiki\n"
+            f"8. 按任务边界分组，调用 plot_task 派发 subagent 提取剧情卡片\n"
+            f"9. **必须审核**：调用 review_knowledge 进行自审（同时审核 wiki + plot）\n"
+            f"10. **构建关系图**：审核修复后调用 build_relations 构建 relations.yaml\n"
             "\n"
             "## 规则文档与 Wiki 词条的区分\n"
             "| 类型 | 位置 | 用途 | 示例 |\n"
@@ -123,7 +131,19 @@ class KnowledgeAgent(JianzhiAgent):
             "- 设定图鉴类不需要 state 字段\n"
             "- 人物/势力类词条必须包含 state 字段（动态信息），见类别 index.md 定义\n"
             "- 所有 wiki 文档使用统一 frontmatter\n"
-            "- 知识提取完成后**必须**调用 review_knowledge 进行审核"
+            f"- 知识提取完成后**必须**调用 review_knowledge 进行审核\n"
+            f"\n"
+            f"## 剧情卡片操作\n"
+            f"- 使用 plot_list(ended=\"false\") 查看未结束的剧情卡片\n"
+            f"- 使用 read_plot 读取剧情卡片内容\n"
+            f"- 使用 plot_task 派发子智能体执行剧情提取\n"
+            f"- plot_task 的 active_plots 参数传入涉及到的未结束卡片列表\n"
+            f"\n"
+            f"## 剧情卡片内容要求\n"
+            f"- 剧情卡片正文**必须**包含 [[wikilink]] 引用相关 wiki 词条\n"
+            f"- 先用 wiki_list/read_wiki 查找已有词条名，再在卡片正文中引用\n"
+            f"- 例如：[[叶匀]]在[[银沙河]]修炼[[铁打功]]，获得[[寒叔（叶寒）]]传承\n"
+            f"- 卡片正文的 wikilink 能让关系图关联 plot 和 wiki，至关重要\n"
         )
         return base_prompt + knowledge_extension
 
@@ -294,6 +314,75 @@ class KnowledgeAgent(JianzhiAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "new_plot",
+                    "description": "新建剧情卡片（规划阶段被权限系统拦截）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片标题"},
+                            "chapters": {"type": "string", "description": "覆盖章节，如 \"1-5,7-10\""},
+                            "content": {"type": "string", "description": "正文内容"},
+                            "description": {"type": "string", "description": "剧情概要（静态）"},
+                            "state": {"type": "string", "description": "当前进展（动态，可选）"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
+                        },
+                        "required": ["name", "chapters", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_plot",
+                    "description": "编辑剧情卡片（规划阶段被权限系统拦截）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片标题"},
+                            "chapters": {"type": "string", "description": "新章节范围"},
+                            "content": {"type": "string", "description": "新正文"},
+                            "description": {"type": "string", "description": "新描述"},
+                            "state": {"type": "string", "description": "新状态"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_plot",
+                    "description": "将指定剧情卡片标注为已结束，写入收尾语（规划阶段被权限系统拦截）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片标题"},
+                            "end_notes": {"type": "string", "description": "收尾语"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "plot_task",
+                    "description": "创建 subagent 完成剧情提取（按任务边界；规划阶段被权限系统拦截）。支持 review_notes 参数传递审核修复建议。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chapters": {"type": "string", "description": "章节范围"},
+                            "active_plots": {"type": "array", "items": {"type": "string"}, "description": "涉及的未结束剧情卡片列表"},
+                            "review_notes": {"type": "string", "description": "审核修复建议（可选）"},
+                        },
+                        "required": ["chapters", "active_plots"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "edit_index",
                     "description": "编辑 index 文档（规划阶段被权限系统拦截）",
                     "parameters": {
@@ -351,7 +440,8 @@ class KnowledgeAgent(JianzhiAgent):
         # 统一权限检查（confirm_plan 也由 check 处理）
         if name in ("confirm_plan", "handoff_knowledge", "new_wiki", "edit_wiki", "delete_wiki",
                      "new_category", "edit_category", "new_rule", "edit_rule",
-                     "delete_rule", "knowledge_task", "edit_index"):
+                     "delete_rule", "knowledge_task", "edit_index",
+                     "new_plot", "edit_plot", "end_plot", "delete_plot", "plot_task"):
             result = self.permission.check(name)
             if result == "__HANDOFF_KNOWLEDGE__":
                 return "你已在 Knowledge 专家模式中。"
@@ -380,6 +470,15 @@ class KnowledgeAgent(JianzhiAgent):
             "knowledge_task": lambda **kw: run_knowledge_task(
                 self.llm, self.workspace, cli=self.cli, **kw
             ),
+            "plot_task": lambda **kw: run_plot_task(
+                self.llm, self.workspace, cli=self.cli, **kw
+            ),
+            "read_plot": lambda **kw: plot_tools.read_plot(self.workspace, **kw),
+            "plot_list": lambda **kw: plot_tools.plot_list(self.workspace, **kw),
+            "new_plot": lambda **kw: plot_tools.new_plot(self.workspace, **kw),
+            "edit_plot": lambda **kw: plot_tools.edit_plot(self.workspace, **kw),
+            "end_plot": lambda **kw: plot_tools.end_plot(self.workspace, **kw),
+            "delete_plot": lambda **kw: plot_tools.delete_plot(self.workspace, **kw),
             "edit_index": lambda **kw: category_tools.edit_index(self.workspace, **kw),
             "read_index": lambda **kw: category_tools.read_index(self.workspace, **kw),
             "review_knowledge": lambda **kw: _run_review(

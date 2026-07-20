@@ -152,12 +152,13 @@ def delete_wiki(workspace: Path, category: str, name: str) -> str:
     return f"已删除词条：{category}/{name}"
 
 
-def read_wiki(workspace: Path, category: str, name: str) -> str:
+def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True) -> str:
     """读取 wiki 文档
 
     Args:
         category: 类别名
         name: 词条名
+        yaml_only: True 只返回 frontmatter，False 返回全文
 
     Returns:
         文档全文（含 frontmatter）或错误消息
@@ -165,7 +166,15 @@ def read_wiki(workspace: Path, category: str, name: str) -> str:
     fp = _wiki_file(workspace, category, name)
     if not fp.exists():
         return f"错误：词条「{name}」不存在"
-    return fp.read_text(encoding="utf-8")
+
+    content = fp.read_text(encoding="utf-8")
+    if not yaml_only:
+        return content
+
+    meta, _ = _parse_frontmatter(content)
+    if meta:
+        return _build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
+    return content
 
 
 def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20) -> str:

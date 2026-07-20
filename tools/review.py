@@ -21,12 +21,17 @@ REVIEW_SUBAGENT_TOOLS = [
     "read_chapters",
     "wiki_list",
     "read_wiki",
+    "rules_list",
+    "read_rule",
     "read_memory",
     "read_index",
     "query_relations",
     "knowledge_task",
     "agent_output",
     "length_stats",
+    "read_plot",
+    "plot_list",
+    "plot_task",
 ]
 
 
@@ -126,6 +131,29 @@ def _build_review_tool_defs() -> list:
         {
             "type": "function",
             "function": {
+                "name": "rules_list",
+                "description": "查看规则文档列表（rules/ 目录下的世界观规则，如境界体系）。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_rule",
+                "description": "读取指定规则文档的全文。设置 yaml_only=false 可查看完整内容。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "规则名"},
+                        "yaml_only": {"type": "boolean", "description": "是否只返回 frontmatter（默认 true）"},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "knowledge_task",
                 "description": "创建 knowledge_task 修复词条问题。可指定 review_notes 提供修复建议。",
                 "parameters": {
@@ -178,6 +206,51 @@ def _build_review_tool_defs() -> list:
                         },
                     },
                     "required": ["type", "name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_plot",
+                "description": "读取指定剧情卡片。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "剧情卡片名"},
+                        "yaml_only": {"type": "boolean", "description": "是否只读 frontmatter（默认 true）"},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plot_list",
+                "description": "列出剧情卡片。ended=\"false\" 只看未结束，\"true\" 只看已结束，\"all\" 看全部。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ended": {"type": "string", "description": "过滤：true/false/all（默认 false）"},
+                        "page": {"type": "integer", "description": "页码（默认 1）"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "plot_task",
+                "description": "创建 plot_task 修复剧情卡片问题。可指定 review_notes 提供修复建议。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "chapters": {"type": "string", "description": "章节范围"},
+                        "active_plots": {"type": "array", "items": {"type": "string"}, "description": "涉及的剧情卡片列表"},
+                        "review_notes": {"type": "string", "description": "修复建议/审核意见（可选）"},
+                    },
+                    "required": ["chapters", "active_plots"],
                 },
             },
         },
@@ -272,8 +345,9 @@ class ReviewSubagent:
             f"1. 使用 wiki_list 获取所有类别的词条列表（遍历所有类别）\n"
             f"2. 使用 read_wiki 抽样或全量读取词条内容\n"
             f"3. 使用 read_index 查看类别 index.md 了解写作规范（特别是是否需要 state 字段）\n"
-            f"4. 使用 read_chapters 在必要时对照原文\n"
-            f"5. 使用 query_relations 查询关联关系\n"
+            f"4. 使用 rules_list 查看规则文档列表，使用 read_rule 读取全量检查\n"
+            f"5. 使用 read_chapters 在必要时对照原文\n"
+            f"6. 使用 query_relations 查询关联关系\n"
             f"\n"
             f"# 审核检查项\n"
             f"\n"
@@ -281,10 +355,13 @@ class ReviewSubagent:
             f"- 检查 [[wikilink]] 是否指向已存在的词条\n"
             f"- 如果指向的词条不存在，需要记录\n"
             f"\n"
-            f"## 2. 规则混入关系检查\n"
-            f"- rules/ 目录下的规则文档**禁止**包含 [[wikilink]]\n"
-            f"- 规则定义的是世界观底层规则，不应与具体词条建立关系\n"
-            f"- 发现后需移除规则文档中的 wikilink（改为纯文本引用）\n"
+            f"## 2. 规则文档检查\n"
+            f"- 使用 rules_list 和 read_rule 检查 rules/ 目录下的规则文档\n"
+            f"- 检查本次涉及章节的知识提取是否新增了需要更新规则的内容\n"
+            f"  （如新的修炼境界、新的妖兽等级体系等世界观规则）\n"
+            f"- 规则混入关系检查：rules/ 下的规则文档**禁止**包含 [[wikilink]]\n"
+            f"  - 规则定义的是世界观底层规则，不应与具体词条建立关系\n"
+            f"  - 发现后需移除规则文档中的 wikilink（改为纯文本引用）\n"
             f"\n"
             f"## 3. state 缺失检查\n"
             f"- 查看每个类别的 index.md，确认该类别的「是否需要 state 字段」\n"
@@ -309,6 +386,18 @@ class ReviewSubagent:
             f"这类已被覆盖的早期细节应删除，只保留当前最新状态\n"
             f"- 压缩通过 knowledge_task 的 review_notes 传递压缩意见来实现\n"
             f"\n"
+            f"## 7. 剧情卡片 Wikilink 悬空检查\n"
+            f"- 检查剧情卡片中的 [[wikilink]] 是否指向已存在的 wiki 词条\n"
+            f"- 如果指向的词条不存在，需要记录\n"
+            f"\n"
+            f"## 8. 剧情区间越界检查\n"
+            f"- 检查剧情卡片的 chapters 字段是否超出原文实际范围\n"
+            f"- 例如：原文只有 20 章，卡片写的 chapters: 1-25 则越界\n"
+            f"\n"
+            f"## 9. 未结束卡片收尾遗漏检查\n"
+            f"- 对于标记为未结束的剧情卡片，对照最新章节判断是否应有收尾操作\n"
+            f"- 如果本应收尾但未被处理，需要记录\n"
+            f"\n"
             f"# 输出要求\n"
             f"1. 先调用 agent_output 输出审核报告，列出所有发现的问题\n"
             f"2. 然后针对每个问题，调用 knowledge_task 进行修复\n"
@@ -324,7 +413,10 @@ class ReviewSubagent:
         from tools.memory import read_memory
         from tools.category import read_index
         from tools.relation import query_relations
+        from tools import rules as rules_tools
         from tools.knowledge_task import run_knowledge_task
+        from tools.plot import read_plot, plot_list
+        from tools.plot_task import run_plot_task
 
         # agent_output 特殊处理
         if name == "agent_output":
@@ -336,6 +428,8 @@ class ReviewSubagent:
             "read_chapters": lambda **kw: read_chapters(self.workspace, **kw),
             "wiki_list": lambda **kw: wiki_list(self.workspace, **kw),
             "read_wiki": lambda **kw: read_wiki(self.workspace, **kw),
+            "rules_list": lambda **kw: rules_tools.rules_list(self.workspace),
+            "read_rule": lambda **kw: rules_tools.read_rule(self.workspace, **kw),
             "read_memory": lambda **kw: read_memory(self.workspace, **kw),
             "read_index": lambda **kw: read_index(self.workspace, **kw),
             "query_relations": lambda **kw: query_relations(self.workspace, **kw),
@@ -343,6 +437,11 @@ class ReviewSubagent:
                 self.llm, self.workspace, cli=self.cli, **kw
             ),
             "length_stats": lambda **kw: length_stats(self.workspace, **kw),
+            "read_plot": lambda **kw: read_plot(self.workspace, **kw),
+            "plot_list": lambda **kw: plot_list(self.workspace, **kw),
+            "plot_task": lambda **kw: run_plot_task(
+                self.llm, self.workspace, cli=self.cli, **kw
+            ),
         }
 
         handler = dispatch.get(name)

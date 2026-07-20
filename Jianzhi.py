@@ -15,6 +15,7 @@ from tools import relation as relation_tools
 from tools import category as category_tools
 from tools import memory as memory_tools
 from tools import diff as diff_tools
+from tools import plot as plot_tools
 
 
 TOOL_RESULTS_DIR = Path(".task_outputs") / "tool-results"
@@ -40,7 +41,14 @@ class JianzhiAgent(BaseAgent):
             f"当前工作区：{self.workspace.name}",
             f"当前目录：{self.workspace}",
             "",
-            "# 可用技能",
+            "# 可用技能（渐进式披露）",
+            "技能是封装了完整工作流程的知识包。调用技能时，系统会加载该技能的详细步骤说明到上下文中。",
+            "**何时调用技能**：遇到以下关键词或场景时，调用对应的技能而非自行推断步骤：\n",
+            "- 触发词「提取知识、更新wiki、/update、新章节」→ 调用 `knowledge_extract` 技能\n",
+            "- 触发词「创建类别、新建分类、类别规范、设计类别」→ 调用 `category_design` 技能\n",
+            "调用方式：直接在响应中使用工具名，传入 query 参数说明意图。\n",
+            "",
+            "当前可用技能：",
             self.skills.describe_available(),
             "",
             "# 工具使用指南",
@@ -51,16 +59,17 @@ class JianzhiAgent(BaseAgent):
             "- 使用 agent_output 进行中间轮输出",
             "- 使用 tools_log_check 查询被压缩的工具调用记录",
             "- 使用 handoff_knowledge 进入 Knowledge 专家模式（知识提取、Wiki管理）",
-            "- 通过技能名调用对应技能",
             "",
-            "# Wiki 知识库（只读）",
-            "工作区可能包含 Wiki 知识库（wiki/目录），其中存储了已提取的结构化知识。",
-            "当用户询问故事相关的问题时，**优先使用 Wiki 进行检索**，而不是直接翻原文。",
+            "# 知识库（只读）",
+            "工作区可能包含知识库（wiki/目录 和 plot/目录），其中存储了已提取的结构化知识和剧情事件。",
+            "当用户询问故事相关的问题时，**优先使用知识库进行检索**，而不是直接翻原文。",
             "",
-            "### Wiki 查询工具",
-            "- 使用 category_list 查看有哪些类别（人物/势力/地点/功法/宝物）",
+            "### 知识库查询工具",
+            "- 使用 category_list 查看 wiki 有哪些类别（人物/势力/地点/功法/宝物）",
             "- 使用 wiki_list <类别> 查看某类别下的所有词条",
             "- 使用 read_wiki <类别> <词条名> 读取词条完整内容（含 frontmatter）",
+            "- 使用 read_plot <名称> 读取剧情卡片（了解故事事件）",
+            "- 使用 plot_list 浏览剧情卡片列表（支持 ended 参数过滤）",
             "- 使用 check_wiki <词条名> <章节> 检查词条在章节中是否出现",
             "- 使用 query_relations <词条名> 查看词条关联关系",
             "- 使用 rules_list 查看规则文档列表",
@@ -68,20 +77,21 @@ class JianzhiAgent(BaseAgent):
             "- 使用 read_memory 读取记忆索引/<name> 读取指定记忆",
             "- 使用 doc_diff 查看新增/修改的章节",
             "",
-            "### Wiki 优先 RAG 原则（重要）",
-            "**核心原则**：面对已有 wiki 词条的知识检索，必须先用 wiki 进行 RAG，而不是直接翻原文。",
+            "### 知识库优先 RAG 原则（重要）",
+            "**核心原则**：面对已有知识库的知识检索，必须先用知识库进行 RAG，而不是直接翻原文。",
             "",
             "正确的检索顺序：",
-            "1. category_list → 查看有哪些类别",
-            "2. wiki_list <类别> → 查看该类别下有哪些已有词条",
-            "3. read_wiki <类别> <词条名> → 读取相关词条内容",
-            "4. check_wiki <词条名> <章节> → 检查词条在章节中是否出现",
-            "5. 只有以上无法满足需求时，才用 read_chapters 读取章节原文",
+            "1. plot_list / read_plot → 先查剧情卡片，快速定位事件",
+            "2. category_list → 查看有哪些 wiki 类别",
+            "3. wiki_list <类别> → 查看该类别下有哪些词条",
+            "4. read_wiki <类别> <词条名> → 读取相关词条内容",
+            "5. check_wiki <词条名> <章节> → 检查词条在章节中是否出现",
+            "6. 只有以上无法满足需求时，才用 read_chapters 读取章节原文",
             "",
             "**禁止行为**：",
-            "- ❌ 跳过 wiki 直接 read_chapters 全文阅读",
-            "- ❌ 已有 wiki 词条的情况下，不查 wiki 就去翻原文",
-            "- ❌ 把 wiki 能解答的问题变成大段章节阅读",
+            "- ❌ 跳过知识库直接 read_chapters 全文阅读",
+            "- ❌ 已有知识库词条的情况下，不查知识库就去翻原文",
+            "- ❌ 把知识库能解答的问题变成大段章节阅读",
             "",
             "# 模式切换",
             "- 当用户要求「提取知识」「更新 wiki」「管理知识库」等知识相关任务时，",
@@ -246,12 +256,13 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "read_wiki",
-                    "description": "读取指定 wiki 词条的完整内容（含 frontmatter）。先查 category_list 得到类别名，再调用此工具。",
+                    "description": "读取指定 wiki 词条。默认只返回 frontmatter（yaml_only=true），设置 yaml_only=false 可查看全文。先查 category_list 得到类别名再调用。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
                             "name": {"type": "string", "description": "词条名"},
+                            "yaml_only": {"type": "boolean", "description": "是否只返回 frontmatter（默认 true，false 返回全文）"},
                         },
                         "required": ["category", "name"],
                     },
@@ -289,6 +300,35 @@ class JianzhiAgent(BaseAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "read_plot",
+                    "description": "读取指定剧情卡片。yaml_only=true 只返回 frontmatter。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片名"},
+                            "yaml_only": {"type": "boolean", "description": "是否只读 frontmatter（默认 true）"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "plot_list",
+                    "description": "列出剧情卡片（支持 ended 过滤）。ended=\"false\" 只看未结束，\"true\" 只看已结束，\"all\" 看全部。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ended": {"type": "string", "description": "过滤：true/false/all（默认 false）"},
+                            "page": {"type": "integer", "description": "页码（默认 1）"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "rules_list",
                     "description": "查看规则文档列表（rules/ 目录下的世界观规则，如境界体系）",
                     "parameters": {"type": "object", "properties": {}},
@@ -298,11 +338,12 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "read_rule",
-                    "description": "读取指定规则文档",
+                    "description": "读取指定规则文档。默认只返回 frontmatter（yaml_only=true），设置 yaml_only=false 可查看全文。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "规则名"},
+                            "yaml_only": {"type": "boolean", "description": "是否只返回 frontmatter（默认 true，false 返回全文）"},
                         },
                         "required": ["name"],
                     },
@@ -331,16 +372,23 @@ class JianzhiAgent(BaseAgent):
             },
         ]
 
-        # 为每个 skill 生成一个工具
+        # 为每个 skill 生成一个工具（渐进式披露：只暴露 name+description，调用时加载全文）
         for skill_name in self.skills.skill_names():
+            doc = self.skills.documents.get(skill_name)
+            desc = doc.manifest.description if doc else "（无描述）"
             tools.append({
                 "type": "function",
                 "function": {
                     "name": skill_name,
-                    "description": f"调用技能「{skill_name}」",
+                    "description": f"加载并执行技能「{skill_name}」— {desc}",
                     "parameters": {
                         "type": "object",
-                        "properties": {},
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "调用技能的原因或具体问题（可选）",
+                            },
+                        },
                     },
                 },
             })
@@ -375,6 +423,8 @@ class JianzhiAgent(BaseAgent):
             "read_wiki": lambda **kw: wiki_tools.read_wiki(self.workspace, **kw),
             "check_wiki": lambda **kw: wiki_tools.check_wiki(self.workspace, **kw),
             "query_relations": lambda **kw: relation_tools.query_relations(self.workspace, **kw),
+            "read_plot": lambda **kw: plot_tools.read_plot(self.workspace, **kw),
+            "plot_list": lambda **kw: plot_tools.plot_list(self.workspace, **kw),
             "rules_list": lambda **kw: rules_tools.rules_list(self.workspace),
             "read_rule": lambda **kw: rules_tools.read_rule(self.workspace, **kw),
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),

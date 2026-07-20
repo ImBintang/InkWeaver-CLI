@@ -19,43 +19,60 @@ def extract_wikilinks(text: str) -> list:
     return [match.strip() for match in WIKILINK_PATTERN.findall(text)]
 
 
-def build_relations(workspace: Path) -> dict:
-    """扫描所有 wiki 文档，构建关系图
+def _extract_file_relations(md_file: Path, relations: dict):
+    """从单个文件中提取关系并更新到 relations dict"""
+    if md_file.name in ("index.md", RELATIONS_FILE):
+        return
+
+    content = md_file.read_text(encoding="utf-8")
+    if content.startswith("---"):
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            content = parts[2]
+
+    from tools.wiki import _parse_frontmatter
+    meta, _ = _parse_frontmatter(md_file.read_text(encoding="utf-8"))
+    source_name = meta.get("title", md_file.stem)
+
+    targets = extract_wikilinks(content)
+    if targets:
+        if source_name not in relations:
+            relations[source_name] = set()
+        for target in targets:
+            relations[source_name].add(target)
+
+
+def build_relations(workspace: Path, extra_dirs: list[str] | None = None) -> dict:
+    """扫描所有 wiki 和剧情卡片文档，构建关系图
+
+    Args:
+        workspace: 工作区路径
+        extra_dirs: 额外扫描的目录（相对路径），如 ["plot"]
 
     Returns:
         {词条名: [关联词条名, ...]} 的 dict
     """
+    if extra_dirs is None:
+        extra_dirs = ["plot"]
+
     wiki_root = workspace / WIKI_DIR
-    if not wiki_root.exists():
-        print(f"错误：wiki 目录不存在 {wiki_root}")
-        return {}
+    relations = {}
 
-    relations = {}  # {source: set of targets}
+    # 扫描 wiki/
+    if wiki_root.exists():
+        for md_file in sorted(wiki_root.rglob("*.md")):
+            if md_file.name in ("index.md", RELATIONS_FILE):
+                continue
+            _extract_file_relations(md_file, relations)
 
-    for md_file in sorted(wiki_root.rglob("*.md")):
-        # 跳过 index.md 和 relations.yaml
-        if md_file.name in ("index.md", RELATIONS_FILE):
-            continue
-
-        content = md_file.read_text(encoding="utf-8")
-        # 跳过 frontmatter
-        if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                content = parts[2]
-
-        # 获取当前词条名（从 frontmatter 或文件名）
-        from tools.wiki import _parse_frontmatter
-        meta, _ = _parse_frontmatter(md_file.read_text(encoding="utf-8"))
-        source_name = meta.get("title", md_file.stem)
-
-        # 提取 wikilink
-        targets = extract_wikilinks(content)
-        if targets:
-            if source_name not in relations:
-                relations[source_name] = set()
-            for target in targets:
-                relations[source_name].add(target)
+    # 扫描额外目录
+    for extra_dir in extra_dirs:
+        extra_path = workspace / extra_dir
+        if extra_path.exists():
+            for md_file in sorted(extra_path.rglob("*.md")):
+                if md_file.name == "index.md":
+                    continue
+                _extract_file_relations(md_file, relations)
 
     # 转换为有序列表
     result = {}

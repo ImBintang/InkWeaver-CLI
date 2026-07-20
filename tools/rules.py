@@ -46,11 +46,12 @@ def rules_list(workspace: Path) -> str:
     return "\n".join(lines)
 
 
-def read_rule(workspace: Path, name: str) -> str:
+def read_rule(workspace: Path, name: str, yaml_only: bool = True) -> str:
     """读取指定规则文档
 
     Args:
         name: 规则名（不含 .md 后缀）
+        yaml_only: True 只返回 frontmatter，False 返回全文
 
     Returns:
         规则文档全文或错误消息
@@ -58,7 +59,16 @@ def read_rule(workspace: Path, name: str) -> str:
     fp = _rules_root(workspace) / f"{name}.md"
     if not fp.exists():
         return f"错误：规则文档「{name}」不存在"
-    return fp.read_text(encoding="utf-8")
+
+    content = fp.read_text(encoding="utf-8")
+    if not yaml_only:
+        return content
+
+    from tools.wiki import _parse_frontmatter, _build_frontmatter
+    meta, _ = _parse_frontmatter(content)
+    if meta:
+        return _build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
+    return content
 
 
 def new_rule(workspace: Path, name: str, content: str) -> str:
