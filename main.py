@@ -646,7 +646,7 @@ def main():
             print("尚无工作区，请先创建或切换到某个工作区。")
             sys.exit(1)
         from Muse import MuseWorkflow
-        workflow = MuseWorkflow(config, workspace, SKILLS_DIR)
+        workflow = MuseWorkflow(config, workspace, SKILLS_DIR, workspaces_dir=WORKSPACES_DIR)
         workflow.run()
         return
 

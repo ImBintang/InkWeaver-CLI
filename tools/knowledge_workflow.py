@@ -47,41 +47,25 @@ class KnowledgeWorkflow:
         return result
 
     def _resolve_wiki_names(self, names: list[str], full: bool = False) -> tuple[list[str], list[str]]:
-        """解析 wiki 名称列表，返回 (成功内容列表, 失败名称列表)"""
-        from tools.category import category_list
-        from tools.wiki import wiki_list
+        """解析 wiki 名称列表，返回 (成功内容列表, 失败名称列表)
 
-        raw = category_list(self.workspace)
-        if raw in ("（wiki 目录不存在）", "（暂无类别）", "错误"):
+        直接扫描文件系统避免 wiki_list 分页导致的漏查问题。
+        """
+        from tools.wiki import _wiki_root
+        root = _wiki_root(self.workspace)
+        if not root.exists():
             return [], names
-        if raw.startswith("错误"):
-            return [], names
 
-        # 从格式化输出中提取类别名
-        categories = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.startswith("- "):
-                # 格式: "- 类别名" 或 "- 类别名：描述"
-                cat_name = line[2:].strip()
-                # 去掉可能的描述部分
-                if "：" in cat_name:
-                    cat_name = cat_name.split("：")[0]
-                categories.append(cat_name)
-
-        # 构建 词条名 → 类别 的映射
+        # 直接扫描文件系统，构建 词条名 → 类别 的映射
         name_to_category = {}
-        for cat in categories:
-            wl = wiki_list(self.workspace, cat)
-            if isinstance(wl, str) and not wl.startswith("错误"):
-                for line in wl.splitlines():
-                    line = line.strip()
-                    if line.startswith("- "):
-                        raw_name = line[2:].strip()
-                        # 去掉可能的描述部分 "词条名：描述"
-                        if "：" in raw_name:
-                            raw_name = raw_name.split("：")[0]
-                        name_to_category[raw_name] = cat
+        for cat_dir in sorted(root.iterdir()):
+            if not cat_dir.is_dir():
+                continue
+            category = cat_dir.name
+            for fp in cat_dir.glob("*.md"):
+                if fp.name == "index.md":
+                    continue
+                name_to_category[fp.stem] = category
 
         successes = []
         failures = []

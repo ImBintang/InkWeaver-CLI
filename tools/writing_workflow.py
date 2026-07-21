@@ -24,7 +24,8 @@ class WritingWorkflow:
             self.cli.logger.write(tag, text)
 
     def run(self, outline: str, prior_knowledge: str, plot_summary: str,
-            last_chapter: str = "", review_issues: list = None) -> str:
+            last_chapter: str = "", review_issues: list = None,
+            previous_draft: str = "") -> str:
         """执行写作
 
         Args:
@@ -33,6 +34,7 @@ class WritingWorkflow:
             plot_summary: 前情提要
             last_chapter: 上一章全文
             review_issues: 上一轮审阅意见列表
+            previous_draft: 上一轮被驳回的草稿（重写时传入）
 
         Returns:
             生成的正文文本
@@ -50,6 +52,9 @@ class WritingWorkflow:
 
         if plot_summary:
             sections.append(f"## 前情提要\n{plot_summary}")
+
+        if previous_draft:
+            sections.append(f"## 上一轮草稿（需根据审阅意见修改）\n{previous_draft}")
 
         if review_issues:
             issues_lines = []
