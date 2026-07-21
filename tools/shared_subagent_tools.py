@@ -107,14 +107,14 @@ def build_shared_subagent_tools() -> list:
             "type": "function",
             "function": {
                 "name": "check_wiki",
-                "description": "检查 wiki 词条在指定章节中是否出现。",
+                "description": "检查 wiki 词条在指定章节或文本中是否出现。传入 name+chapters 查章节匹配，传入 text 查文本匹配实体。",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "词条名"},
-                        "chapters": {"type": "string", "description": "章节范围"},
+                        "name": {"type": "string", "description": "词条名（与 chapters 配合使用）"},
+                        "chapters": {"type": "string", "description": "章节范围（与 name 配合使用）"},
+                        "text": {"type": "string", "description": "任意文本，自动匹配其中包含的实体名"},
                     },
-                    "required": ["name", "chapters"],
                 },
             },
         },

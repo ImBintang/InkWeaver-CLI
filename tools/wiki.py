@@ -239,20 +239,50 @@ def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20
     return "\n".join(lines)
 
 
-def check_wiki(workspace: Path, name: str, chapters: str) -> str:
-    """检查 wiki 词条在指定章节中是否出现
+def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: str = None) -> str:
+    """检查 wiki 词条在指定章节或文本中是否出现
+
+    用法一：check_wiki(name="张三", chapters="1-5") — 查词条在章节中
+    用法二：check_wiki(text="张三走进大殿") — 查文本包含哪些实体
 
     Args:
-        name: 词条名
+        name: 词条名（与 chapters 配合使用）
         chapters: 章节范围表达式
+        text: 任意文本，自动匹配其中包含的实体名
 
     Returns:
         检查结果
     """
+    if text:
+        # 文本匹配模式：遍历所有 wiki 词条，看名称是否在 text 中出现
+        from tools.wiki import _wiki_root
+        root = _wiki_root(workspace)
+        if not root.exists():
+            return "错误：wiki 目录不存在"
+
+        matches = []
+        for category_dir in sorted(root.iterdir()):
+            if not category_dir.is_dir():
+                continue
+            for wiki_file in sorted(category_dir.glob("*.md")):
+                if wiki_file.name == "index.md":
+                    continue
+                entity_name = wiki_file.stem
+                if entity_name in text:
+                    matches.append(f"[{category_dir.name}] {entity_name}")
+
+        if not matches:
+            return "未在文本中匹配到已知实体。"
+        return "文本中匹配到以下实体：\n" + "\n".join(matches)
+
+    # 原有逻辑：查词条在章节中是否出现
+    if not name or not chapters:
+        return "错误：请提供 name+chapters（查章节匹配）或 text（查文本匹配）"
+
     from tools.chapter import read_chapters, parse_chapter_spec
-    text = read_chapters(workspace, chapters)
-    if not text.startswith("##"):
-        return text  # 错误消息
+    chapter_text = read_chapters(workspace, chapters)
+    if not chapter_text.startswith("##"):
+        return chapter_text  # 错误消息
 
     nums = parse_chapter_spec(chapters)
     found = []

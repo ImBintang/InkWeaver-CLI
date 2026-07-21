@@ -1,6 +1,242 @@
 # InkWeaver-CLI
 
-**墨笔** — 终端里的写作智能体。基于 LLM Agent 架构，为网文作者提供章节管理、知识提取、Wiki 构建与审核的一站式 CLI 工具。
+**墨笔（InkWeaver）** — 终端里的写作智能体。基于 LLM Agent 架构，为网文作者提供章节管理、知识提取（Wiki + 剧情卡片）、结构化审核、关系图构建与智能写作辅助的一站式 CLI 工具。
+
+当前版本：**v3.1.0**
+
+---
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置 API
+
+编辑 `.env/config.yaml`，填入你的 API Key：
+
+```yaml
+api:
+  url: https://api.deepseek.com       # OpenAI 兼容 API 地址
+  key: sk-your-api-key-here           # 替换为真实 Key
+  model: deepseek-v4-flash            # 模型名
+  input_max_tokens: 384000            # 输入上限
+  output_max_tokens: 128000           # 输出上限
+```
+
+支持任何 OpenAI 兼容格式的 LLM。`.env/` 目录已被 `.gitignore` 排除，不会提交到版本库。
+
+### 3. 启动
+
+```bash
+# 普通模式 — 章节管理、知识提取、知识库维护
+python main.py
+
+# 妙笔写作模式 — 大纲 → 先验知识 → 前情提要 → 写作 → 审阅
+python main.py --muse
+```
+
+首次启动会自动创建配置文件和工作区目录。
+
+---
+
+## 功能概览
+
+### 双运行模式
+
+| 模式 | 启动方式 | 用途 |
+|------|---------|------|
+| **普通模式** | `python main.py` | 章节管理、知识库维护（Wiki / 剧情卡片 / 规则）、关系图构建 |
+| **妙笔模式** | `python main.py --muse` | 四步写作工作流：大纲输入 → 知识准备 → 自动写作 → 审阅循环 |
+
+### 普通模式功能
+
+#### 工作区管理
+
+支持多项目隔离，每个工作区拥有独立的章节、Wiki 知识库、剧情卡片、规则文档和日志。
+
+| 指令 | 说明 |
+|------|------|
+| `/list` | 列出所有工作区 |
+| `/switch -n <name>` | 切换到指定工作区 |
+| `/create -n <name>` | 新建工作区并切换 |
+| `/update -n <name>` | 重命名当前工作区 |
+| `/delete` | 删除当前工作区 |
+| `/move -p <path>` | 移动工作区目录到新位置 |
+
+#### 章节管理
+
+支持小说导入、手动录入、查看、导出。
+
+| 指令 | 说明 |
+|------|------|
+| `/import -p <path>` | 导入小说文件（自动按章节拆分，支持 `第X章/回/节`、`Chapter X`、`序章/楔子` 等格式） |
+| `/write` | 手动输入一章（`qqq` 结束） |
+| `/show -n <num>` | 展示指定章节内容 |
+| `/chapters [-N]` | 列出最新 N 章（默认 50） |
+| `/export` | 合并所有章节为 txt 文件 |
+
+#### 知识系统
+
+构建结构化的故事知识库，包含三个正交维度：
+
+**Wiki 知识库** — 按类别组织实体词条（人物/势力/地点/功法/神通/法宝等），每篇含 YAML frontmatter（元数据）和 Markdown 正文。人物/势力类词条含 `state` 动态状态字段。
+
+**剧情卡片** — 记录故事事件/情节段，绑定章节区间，有明确的「未结束/已结束」生命周期，通过 `[[wikilink]]` 与 Wiki 词条交叉引用。
+
+**规则文档** — 世界观底层规则（如境界体系），不参与关系系统。
+
+#### 指令
+
+| 类别 | 指令 | 说明 |
+|------|------|------|
+| 模式 | `/knowledge` | 进入 Knowledge 专家模式（知识提取、Wiki 管理） |
+| | `/exit` | 退出 Knowledge 模式 |
+| 提取 | `/update` | 触发知识提取流程 |
+| | `/diff` | 查看新增/修改的章节 |
+| 查询 | `/memory` | 查看记忆索引 |
+| | `/memory -n <name>` | 查看指定记忆文档 |
+| | `/list -n <name>` | 查看指定类别的 Wiki 列表 |
+| | `/wiki -n <name>` | 查看指定词条的 Wiki |
+| | `/rule` | 查看规则列表 |
+| | `/rule -n <name>` | 查看指定规则文档 |
+| | `/relation -n <name>` | 查询词条关联关系 |
+| | `/link` | 提取 wikilink，构建关系图 |
+| Agent | `/clear` | 清空对话上下文 |
+| | `/context` | 查看上下文占用与组成 |
+| | `/compact` | 主动压缩上下文 |
+| | `/token` | 查询累计 Token 用量 |
+| 系统 | `/help` | 显示帮助信息 |
+| | `/exit` | 退出程序 |
+
+#### 知识提取流水线
+
+Knowledge 模式下的核心能力，分为两阶段：
+
+1. **规划阶段**（只读）：分析新章节 → 对比现有知识库 → 生成提取计划 → 用户确认
+2. **执行阶段**（读写）：按类别提取 Wiki 词条 → 提取剧情卡片 → 审核 Subagent 系统性检查 → 构建关系图
+
+所有写操作在规划阶段被权限系统**物理拦截**，只有用户明确确认后才放行。
+
+#### 输入机制
+
+- **多行文本**：输入多行后，以 `qqq` 单独一行结束，内容一次性发送
+- **指令**：第一行以 `/` 开头则立即执行，无需 `qqq`
+- **退出**：输入 `exit`
+
+---
+
+### 妙笔模式功能
+
+四步写作工作流，专为长篇小说创作设计：
+
+```
+① 大纲输入 → ② 知识准备 → ③ 自动写作 → ④ 审阅循环
+```
+
+#### ① 大纲输入
+
+多行输入大纲或草稿内容，保存至工作区。
+
+#### ② 知识准备
+
+自动执行两个步骤，每步用户可打回重写：
+
+- **先验知识提取**：LLM 通过工具检索 Wiki 词条（支持只读 YAML / 读全文两种粒度）、规则文档，生成创作所需的知识背景
+- **前情提要提取**：LLM 检索剧情卡片（支持 YAML / 全文）、最新章节正文，梳理故事当前进展
+
+参数由 LLM 自动规划提交，后端做严格校验（存在检查、数量上限检查），校验失败返回错误提示供修正重试。
+
+#### ③→④ 写作与审阅循环
+
+- **写作**：按 `上一章全文 → 大纲 → 先验知识 → 前情提要 → 审阅意见` 顺序组装上下文，纯 chat 模式生成正文
+- **后处理**：自动去除 Markdown 标题行、全角标点置换
+- **审阅**：独立 Agent 逐条报问题（使用 `report_issue` / `review_done` 工具），后端自动算分。评分维度涵盖叙事结构、段落句式、语言修辞、与上一章衔接、人物感官
+  - ≥ 85 分：通过，用户确认后保存
+  - < 85 分：自动打回重写，携带审阅意见进入下一轮
+  - 用户也可手动打回并补充自定义意见
+
+审阅上下文中包含 `上一章全文 + 大纲 + 正文`，不包含先验知识和前情提要，避免总结性内容干扰评审判断。
+
+#### Skill 系统
+
+妙笔各步骤由独立的 Skill 文件驱动，通过 `skills/` 目录加载：
+
+| Skill 文件 | 用途 |
+|-----------|------|
+| `muse_knowledge.skill.md` | 先验知识提取工作流指引 |
+| `muse_plot.skill.md` | 前情提要提取工作流指引 |
+| `muse_writer.skill.md` | 写实主义创作规范（叙事架构、段落铁律、禁用清单、白描主义） |
+| `muse_reviewer.skill.md` | 审阅审计清单及评分标准 |
+
+Skill 内容直接注入 system prompt，LLM 严格按照定义的步骤执行。
+
+---
+
+## 工作区结构
+
+```
+workingArea/
+├── 项目1/
+│   ├── document/          # 章节文件（c001.md, c002.md, ...）
+│   ├── session/           # 对话日志归档
+│   ├── wiki/              # Wiki 知识库
+│   │   ├── index.md       # 总索引
+│   │   ├── relations.yaml # Wikilink 关系图
+│   │   ├── 人物/          # 类别目录
+│   │   │   ├── index.md
+│   │   │   ├── 张三.md
+│   │   │   └── ...
+│   │   ├── 势力/
+│   │   ├── 地点/
+│   │   └── ...            # 自定义类别
+│   ├── plot/              # 剧情卡片
+│   │   ├── index.md
+│   │   └── 剧情事件.md
+│   ├── rules/             # 规则文档
+│   │   ├── 境界体系.md
+│   │   └── ...
+│   ├── memory/            # 跨会话记忆
+│   │   ├── MEMORY.md
+│   │   └── *.md
+│   ├── muse/              # 妙笔输出目录
+│   │   ├── YYYY-MM-DD_NNN/
+│   │   │   ├── outline.txt
+│   │   │   ├── prior_knowledge.md
+│   │   │   ├── plot_summary.md
+│   │   │   ├── draft.txt
+│   │   │   ├── review_round_1/
+│   │   │   │   ├── review.md
+│   │   │   │   └── final.txt
+│   │   │   ├── session.log
+│   │   │   └── ...
+│   │   └── ...
+│   └── log.json           # 文档变更日志 & 提取记录
+├── 项目2/
+└── ...
+```
+
+---
+
+## 配置文件
+
+位置：`.env/config.yaml`
+
+```yaml
+api:
+  url: https://api.deepseek.com       # OpenAI 兼容 API 地址
+  key: sk-xxx                          # API Key
+  model: deepseek-v4-flash             # 模型名
+  input_max_tokens: 384000             # 输入上限
+  output_max_tokens: 128000            # 输出上限
+
+workspace:
+  dir: D:/path/to/workingArea          # 工作区根目录
+  last: 项目名                          # 上次使用的工作区
+```
 
 ---
 
@@ -15,312 +251,18 @@
 
 | 包名 | 版本要求 | 用途 |
 |------|---------|------|
-| `openai` | >= 1.0.0 | 调用 LLM API（DeepSeek / OpenAI 兼容接口） |
-| `pyyaml` | >= 6.0 | 解析 YAML 配置文件与 Wiki frontmatter |
-| `tiktoken` | >= 0.5.0 | Token 用量统计 |
+| `openai` | >= 1.0.0 | LLM API 调用（OpenAI 兼容接口） |
+| `pyyaml` | >= 6.0 | 解析 YAML 配置与 Wiki / Plot frontmatter |
+| `tiktoken` | >= 0.5.0 | Token 用量统计（cl100k_base 编码） |
 
-安装方式：
+### 技术栈
 
-```bash
-pip install -r requirements.txt
-```
+| 层 | 技术 |
+|----|------|
+| 语言 | Python 3.10+ |
+| LLM 接口 | OpenAI SDK（兼容任意 OpenAI 格式推理模型） |
+| 数据格式 | YAML（配置 + frontmatter）+ Markdown（正文） |
+| Token 估算 | tiktoken（cl100k_base） |
+| 关系图 | YAML 文件 + wikilink 正则提取 |
 
-### LLM 模型
 
-默认接入 [DeepSeek API](https://platform.deepseek.com/)，兼容任何 OpenAI 格式的推理模型（如 DeepSeek R1/V4、OpenAI o1/o3 等）。
-
----
-
-## 快速开始
-
-### 1. 克隆项目
-
-```bash
-git clone <repo-url>
-cd InkWeaver-CLI
-```
-
-### 2. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. 配置 API Key
-
-编辑 `.env/config.yaml`，填入你的 API Key：
-
-```yaml
-api:
-  url: https://api.deepseek.com
-  key: sk-your-api-key-here        # ← 替换为真实 Key
-  model: deepseek-v4-flash
-  output_max_tokens: 128000
-```
-
-> `.env/` 目录已被 `.gitignore` 排除，不会提交到版本库。
-
-### 4. 启动
-
-```bash
-python main.py
-```
-
-首次启动会自动创建配置文件和工作区目录。
-
----
-
-## 配置文件
-
-位置：`.env/config.yaml`
-
-```yaml
-api:
-  url: https://api.deepseek.com       # API 地址
-  key: sk-xxx                          # API Key
-  model: deepseek-v4-flash             # 模型名
-  input_max_tokens: 384000             # 输入上限
-  output_max_tokens: 128000            # 输出上限
-
-workspace:
-  dir: D:/path/to/workingArea          # 工作区根目录（绝对路径）
-  last: 项目名                          # 上次使用的工作区
-```
-
----
-
-## 工作区结构
-
-```
-workingArea/
-├── 项目1/
-│   ├── document/          # 章节文件（c001.md, c002.md, ...）
-│   ├── session/           # 对话日志
-│   ├── wiki/              # Wiki 知识库
-│   │   ├── index.md
-│   │   ├── 人物/
-│   │   │   ├── index.md
-│   │   │   ├── 张三.md
-│   │   │   └── 李四.md
-│   │   ├── 势力/
-│   │   └── 地点/
-│   ├── rules/             # 世界观规则文档
-│   │   ├── 境界体系.md
-│   │   └── 法宝等级.md
-│   ├── relations.yaml     # Wikilink 关系图
-│   ├── memory.md          # 跨会话记忆
-│   └── log.json           # 文档变更日志
-├── 项目2/
-└── ...
-```
-
----
-
-## 指令列表
-
-### 工作区管理
-
-| 指令 | 说明 |
-|------|------|
-| `/list` | 列出所有工作区 |
-| `/switch -n <name>` | 切换到指定工作区 |
-| `/create -n <name>` | 新建工作区并切换 |
-| `/update -n <name>` | 重命名当前工作区 |
-| `/delete` | 删除当前工作区（需确认） |
-| `/move -p <path>` | 移动工作区目录到新位置 |
-
-### 章节管理
-
-| 指令 | 说明 |
-|------|------|
-| `/import -p <path>` | 导入小说文件（自动按章节拆分） |
-| `/write` | 手动输入一章（`qqq` 结束） |
-| `/show -n <num>` | 展示指定章节内容 |
-| `/chapters [-N]` | 列出最新 N 章（默认 50） |
-| `/export` | 合并所有章节为 txt 文件 |
-
-### Agent 控制
-
-| 指令 | 说明 |
-|------|------|
-| `/clear` | 清空对话上下文 |
-| `/context` | 查看上下文占用与组成 |
-| `/compact` | 主动压缩上下文 |
-| `/token` | 查询本次会话累计 Token 用量 |
-
-### 知识管理（需先进入 Knowledge 模式）
-
-| 指令 | 说明 |
-|------|------|
-| `/knowledge` | 进入 Knowledge 专家模式 |
-| `/exit` | 退出 Knowledge 模式 |
-| `/update` | 触发知识提取流程 |
-| `/diff` | 查看新增/修改的章节 |
-| `/memory` | 查看记忆索引 |
-| `/memory -n <name>` | 查看指定记忆文档 |
-| `/list -n <name>` | 查看指定类别的 Wiki 列表 |
-| `/wiki -n <name>` | 查看指定词条的 Wiki |
-| `/rule` | 查看规则列表 |
-| `/rule -n <name>` | 查看指定规则文档 |
-| `/relation -n <name>` | 查询词条关联关系 |
-| `/link` | 从 Wiki 提取 wikilink，构建关系图 |
-
-### 系统
-
-| 指令 | 说明 |
-|------|------|
-| `/help` | 显示帮助信息 |
-| `/exit` | 退出程序（或输入 `exit`） |
-
----
-
-## 功能详解
-
-### 0. 多轮对话输入机制
-
-CLI 采用特殊的多行输入监听模式，兼顾自由对话与指令操作：
-
-- **多行输入**：输入多行文本后，在单独一行输入 `qqq` 结束本轮输入，内容一次性发给 Agent 处理
-- **指令模式**：如果**第一行**以 `/` 开头（如 `/help`），则立即作为指令处理，无需 `qqq`
-- **纯文本对话**：不以 `/` 开头且非 `qqq` 的多行文本，直接作为普通对话发送给 Agent
-- **退出程序**：输入 `exit` 即可退出（大小写不敏感）
-
-```
-示例 — 多行对话：
-  主角在第5章使用了什么法宝？
-  请详细描述其外观和威力。
-  qqq                          ← 结束输入，两条内容一并发送
-
-示例 — 指令：
-  /chapters -N 10              ← 第一行以 / 开头，立即作为指令执行
-
-示例 — 退出：
-  exit
-```
-
-> 注意：只有**第一行**的 `/` 才被认为是指令。从第二行开始，即使以 `/` 开头也视为普通文本。
-
-### 1. 双模式 Agent
-
-**普通模式（JianzhiAgent）**：日常对话、章节问答、Wiki 检索。拥有 17 个通用工具，包括章节阅读、Wiki 查询、关键词统计等。
-
-**Knowledge 专家模式（KnowledgeAgent）**：继承普通模式全部能力，额外叠加知识提取工具包。通过 `/knowledge` 进入，`/exit` 返回，上下文不丢失。
-
-### 2. 知识提取流水线
-
-```
-导入章节 → doc_diff 检测变更 → knowledge_task 派发子智能体
-  → 按类别提取知识 → 生成/更新 Wiki 词条 → Review 审核
-  → 构建 Wikilink 关系图
-```
-
-每个 `knowledge_task` 会创建一个子智能体（KnowledgeSubagent），按类别独立提取知识，提取完成后自动调用审核子智能体（ReviewSubagent）进行质量检查。
-
-### 3. 审核机制
-
-审核子智能体（ReviewSubagent）自动检查以下项目：
-
-- **Wikilink 悬空**：`[[wikilink]]` 是否指向已存在的词条
-- **信息矛盾**：前后信息是否矛盾
-- **描述/状态混淆**：`description` vs `state` 字段是否正确
-- **规则混入关系**：规则文档是否包含 `[[wikilink]]`
-- **State 缺失**：人物/势力类词条是否缺少 `state` 字段
-- **篇幅检查**：使用 `length_stats` 检查文档字数，超过 1500 字自动发起压缩
-
-### 4. Wiki 知识库
-
-Wiki 采用 **YAML frontmatter + Markdown 正文** 格式：
-
-```markdown
----
-title: 张三
-category: 人物
-description: 青云宗内门弟子
-state: 筑基中期（第100章）
-tags: [青云宗, 主角团]
----
-
-张三自幼入青云宗，天资聪颖……
-```
-
-支持 `[[wikilink]]` 语法建立词条间关联关系，通过 `/link` 指令构建关系图。
-
-### 5. 权限系统
-
-两阶段权限控制：
-
-- **Planning 阶段**：只读权限，Agent 分析章节、查阅 Wiki、制定提取计划
-- **Executing 阶段**：读写权限，允许创建/修改/删除 Wiki 词条
-
-### 6. 上下文管理
-
-- 自动追踪已读章节和已用技能
-- `/compact` 指令主动压缩历史，将早期消息摘要化
-- `/context` 查看上下文各组成部分的 Token 占比
-- `/token` 查看累计 Token 用量
-
-### 7. 关系图
-
-通过 `[[wikilink]]` 语法在 Wiki 词条中建立关联，`/link` 指令自动扫描所有词条提取链接，生成 `relations.yaml`。支持 `query_relations` 工具查询词条关联网络。
-
----
-
-## 项目结构
-
-```
-InkWeaver-CLI/
-├── main.py                  # 入口：配置加载、REPL 主循环
-├── cli.py                   # 终端 I/O：多行输入、输出格式化、Session 日志
-├── Jianzhi.py               # 鉴知 Agent：System Prompt、Tool 定义、工具路由
-├── api.py                   # LLM API 封装（OpenAI SDK）
-├── requirements.txt         # Python 依赖
-├── skills/                  # 技能定义文件（Markdown）
-│   └── knowledge_extract.skill.md
-├── agent/                   # Agent 核心组件
-│   ├── base.py              # BaseAgent 基类
-│   ├── loop.py              # Agent 主循环（tool_calls 调度）
-│   ├── todo.py              # Todo 任务管理
-│   ├── compact.py           # 上下文压缩
-│   ├── skill.py             # 技能注册与加载
-│   ├── knowledge.py         # Knowledge 专家模式
-│   ├── permission.py        # 两阶段权限系统
-│   └── ...
-├── tools/                   # 工具实现
-│   ├── chapter.py           # 章节 CRUD
-│   ├── workspace.py         # 工作区 CRUD + 小说导入
-│   ├── wiki.py              # Wiki 词条 CRUD
-│   ├── category.py          # 类别管理
-│   ├── rules.py             # 规则文档管理
-│   ├── memory.py            # 记忆管理
-│   ├── relation.py          # 关系查询
-│   ├── diff.py              # 文档差异对比
-│   ├── review.py            # 审核 Subagent
-│   └── knowledge_task.py    # 知识提取 Subagent
-├── auto/                    # 自动化脚本
-│   └── relation_extractor.py # Wikilink 关系提取
-└── .env/                    # 配置文件（已 gitignore）
-    └── config.yaml
-```
-
----
-
-## 技术栈
-
-| 层面 | 技术 |
-|------|------|
-| 语言 | Python >= 3.10 |
-| LLM API | OpenAI SDK（兼容 DeepSeek / OpenAI） |
-| 配置 | YAML |
-| 文档格式 | Markdown + YAML frontmatter |
-| 知识链接 | Wikilink 语法 + 关系图 |
-| Token 计数 | tiktoken |
-| Agent 架构 | ReAct 模式（工具调用循环） |
-
----
-
-## 设计理念
-
-- **不兜底、不兼容**：仅实现当前明确需求，不添加防御性代码
-- **Wiki 优先 RAG**：知识检索优先使用 Wiki，不到万不得已不翻原文
-- **两阶段权限**：先计划再执行，避免 Agent 在分析阶段误修改数据
-- **自动审核**：每次知识提取后自动审核，确保 Wiki 质量

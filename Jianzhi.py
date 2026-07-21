@@ -30,6 +30,7 @@ class JianzhiAgent(BaseAgent):
         self.context = ContextManager()
         self.skills = SkillRegistry(skills_dir)
         self.permission = PermissionManager()
+        self.review_session = None  # 妙笔审阅会话（由 MuseWorkflow 设置）
 
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
@@ -272,14 +273,14 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "check_wiki",
-                    "description": "检查 wiki 词条在指定章节中是否出现",
+                    "description": "检查 wiki 词条在指定章节或文本中是否出现。传入 name+chapters 查章节匹配，传入 text 查文本匹配实体。",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "词条名"},
-                            "chapters": {"type": "string", "description": "章节范围"},
+                            "name": {"type": "string", "description": "词条名（与 chapters 配合使用）"},
+                            "chapters": {"type": "string", "description": "章节范围（与 name 配合使用）"},
+                            "text": {"type": "string", "description": "任意文本，自动匹配其中包含的实体名"},
                         },
-                        "required": ["name", "chapters"],
                     },
                 },
             },
@@ -372,6 +373,40 @@ class JianzhiAgent(BaseAgent):
             },
         ]
 
+        # 妙笔审阅工具（只在 review_session 激活时可用）
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "report_issue",
+                "description": "【妙笔审阅专用】报告一条审阅问题。每发现一条问题调用一次。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "level": {
+                            "type": "integer",
+                            "description": "问题等级：0-严重(-20分) / 1-重要(-10分) / 2-一般(-5分) / 3-可优化(-3分)",
+                            "enum": [0, 1, 2, 3],
+                        },
+                        "quote": {"type": "string", "description": "原文引用"},
+                        "description": {"type": "string", "description": "问题描述"},
+                        "suggestion": {"type": "string", "description": "优化建议"},
+                    },
+                    "required": ["level", "quote", "description", "suggestion"],
+                },
+            },
+        })
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "review_done",
+                "description": "【妙笔审阅专用】所有问题报告完毕，结束审阅，触发后端自动算分。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        })
+
         # 为每个 skill 生成一个工具（渐进式披露：只暴露 name+description，调用时加载全文）
         for skill_name in self.skills.skill_names():
             doc = self.skills.documents.get(skill_name)
@@ -410,6 +445,18 @@ class JianzhiAgent(BaseAgent):
             self.context.track_skill(name)
             return self.skills.load_full_text(name)
 
+        # 妙笔审阅工具
+        if name == "report_issue":
+            if self.review_session is None:
+                return "错误：report_issue 仅在妙笔审阅模式下可用"
+            return self.review_session.report_issue(**args)
+        if name == "review_done":
+            if self.review_session is None:
+                return "错误：review_done 仅在妙笔审阅模式下可用"
+            result = self.review_session.review_done()
+            import json
+            return json.dumps(result, ensure_ascii=False)
+
         dispatch = {
             "update_todo": self._handle_todo,
             "tools_log_check": self._handle_tools_log_check,
@@ -425,6 +472,7 @@ class JianzhiAgent(BaseAgent):
             "query_relations": lambda **kw: relation_tools.query_relations(self.workspace, **kw),
             "read_plot": lambda **kw: plot_tools.read_plot(self.workspace, **kw),
             "plot_list": lambda **kw: plot_tools.plot_list(self.workspace, **kw),
+            "query_plot_by_chapters": lambda **kw: plot_tools.query_plot_by_chapters(self.workspace, **kw),
             "rules_list": lambda **kw: rules_tools.rules_list(self.workspace),
             "read_rule": lambda **kw: rules_tools.read_rule(self.workspace, **kw),
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),

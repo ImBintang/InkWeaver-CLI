@@ -1,5 +1,6 @@
 """InkWeaver-CLI 入口程序"""
 
+import argparse
 import sys
 import shutil
 import yaml
@@ -604,7 +605,10 @@ def _switch_to_workspace(target: Path, cli: CLI, config: dict):
 
 
 def main():
-    cli = CLI()
+    # ---- 命令行参数 ----
+    parser = argparse.ArgumentParser(description="InkWeaver-CLI")
+    parser.add_argument("--muse", action="store_true", help="启动妙笔写作工作流")
+    args = parser.parse_args()
 
     # ---- 启动前准备：自动创建缺失的目录和配置文件 ----
     _ensure_dirs()
@@ -613,12 +617,12 @@ def main():
     try:
         config = load_config()
     except Exception as e:
-        cli.print_info(f"错误：无法读取配置文件 - {e}")
+        print(f"错误：无法读取配置文件 - {e}")
         sys.exit(1)
 
     err = validate_config(config)
     if err:
-        cli.print_info(f"错误：配置无效 - {err}")
+        print(f"错误：配置无效 - {err}")
         sys.exit(1)
 
     # ---- 从配置文件加载工作区目录 ----
@@ -628,12 +632,25 @@ def main():
     WORKSPACES_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- API 连接测试 ----
-    cli.print_info("正在测试 API 连接...")
+    print("正在测试 API 连接...")
     err = test_api_connection(config)
     if err:
-        cli.print_info(f"错误：{err}")
+        print(f"错误：{err}")
         sys.exit(1)
-    cli.print_info("API 连接正常。")
+    print("API 连接正常。")
+
+    # ---- 妙笔模式 ----
+    if args.muse:
+        workspace = resolve_workspace(config)
+        if workspace is None:
+            print("尚无工作区，请先创建或切换到某个工作区。")
+            sys.exit(1)
+        from Muse import MuseWorkflow
+        workflow = MuseWorkflow(config, workspace, SKILLS_DIR)
+        workflow.run()
+        return
+
+    cli = CLI()
 
     # ---- 工作区初始化 ----
     workspace = resolve_workspace(config)

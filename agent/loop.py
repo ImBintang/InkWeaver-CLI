@@ -85,5 +85,8 @@ def agent_loop(jianzhi, messages: list) -> list:
         if tool_results:
             messages.extend(tool_results)
             jianzhi.todo.note_round_without_update()
+            # 如果 dispatch 设置了停止标记，立即终止循环
+            if getattr(jianzhi, "_stop_agent_loop", False):
+                break
 
     return messages

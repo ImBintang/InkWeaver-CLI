@@ -349,3 +349,41 @@ def delete_plot(workspace: Path, name: str) -> str:
     _plot_index_file(workspace).write_text("\n".join(new_lines), encoding="utf-8")
     
     return f"已删除剧情卡片：{name}"
+
+
+def query_plot_by_chapters(workspace: Path, chapters: str) -> str:
+    """查询指定章节区间覆盖的剧情卡片。
+
+    返回格式：
+    | 标题 | 覆盖区间 | 状态 |
+    | 萧炎历练魔兽山脉 | 1-5,7-10 | 未结束 |
+
+    Args:
+        chapters: 章节范围，如 "1-5,7-10"
+
+    Returns:
+        格式化的剧情卡片列表
+    """
+    from tools.chapter import parse_chapter_spec
+    target = set(parse_chapter_spec(chapters))
+
+    plot_dir = _plot_root(workspace)
+    if not plot_dir.exists():
+        return "暂无剧情卡片。"
+
+    results = []
+    for f in sorted(plot_dir.glob("*.md")):
+        if f.name == "index.md":
+            continue
+        meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
+        if not meta:
+            continue
+        card_chapters = meta.get("chapters", "")
+        card_set = set(parse_chapter_spec(card_chapters))
+        if target & card_set:  # 有交集
+            ended = "已结束" if meta.get("ended") in (True, "true", "True") else "未结束"
+            results.append(f"| {meta.get('title', f.stem)} | {card_chapters} | {ended} |")
+
+    if not results:
+        return f"章节 {chapters} 范围内无关联的剧情卡片。"
+    return "| 标题 | 覆盖区间 | 状态 |\n|------|----------|------|\n" + "\n".join(results)
