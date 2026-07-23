@@ -8,6 +8,7 @@ import re
 import json
 from pathlib import Path
 from datetime import datetime
+from tools.wiki import _parse_frontmatter, _build_frontmatter
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 
@@ -22,50 +23,6 @@ WIKILINK_PATTERN = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 ALIAS_PAREN_PATTERN = re.compile(r"（([^）]+)）")
 # 匹配中文方括号内的消歧义：【消歧义】
 ALIAS_BRACKET_PATTERN = re.compile(r"【([^】]+)】")
-
-# ── Frontmatter 辅助函数 ─────────────────────────────────────────────
-
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """解析 YAML frontmatter，返回 (meta, body)
-
-    兼容重复 frontmatter：如果有多组 ---...--- 块，取最后一组为有效。
-    """
-    text = text.replace("\r\n", "\n")
-
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
-    if not match:
-        return {}, text.strip()
-
-    fm_content = match.group(1).strip()
-    body = match.group(2).strip()
-
-    # 检查 body 是否以另一组 frontmatter 开头
-    body_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", body, re.DOTALL)
-    if body_match:
-        fm_content = body_match.group(1).strip()
-        body = body_match.group(2).strip()
-
-    meta = {}
-    for line in fm_content.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if value.startswith("[") and value.endswith("]"):
-            value = [v.strip() for v in value[1:-1].split(",") if v.strip()]
-        meta[key] = value
-    return meta, body
-
-
-def _build_frontmatter(meta: dict) -> str:
-    """将 meta dict 构建为 YAML frontmatter 字符串"""
-    lines = []
-    for key, value in meta.items():
-        if isinstance(value, list):
-            value = "[" + ", ".join(str(v) for v in value) + "]"
-        lines.append(f"{key}: {value}")
-    return "---\n" + "\n".join(lines) + "\n---\n"
 
 
 def extract_wikilinks(text: str) -> list[str]:
@@ -97,7 +54,7 @@ def get_aliases(title: str) -> list[str]:
 
 # ── 文件扫描辅助 ─────────────────────────────────────────────────────
 
-def _get_changed_files(workspace: Path, chapters: str | None = None) -> list[Path]:
+def _get_changed_files(workspace: Path) -> list[Path]:
     """获取待检查的文件列表
 
     简单实现：返回 wiki/ + plot/ 下所有 .md 文件（排除 index.md 和 relations.yaml）
@@ -148,8 +105,11 @@ def _build_wiki_map(workspace: Path) -> dict[str, Path]:
             for alias in get_aliases(source_name):
                 if alias not in wiki_map:
                     wiki_map[alias] = fp
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to read %s for wiki map: %s", fp, e
+            )
 
     return wiki_map
 
@@ -625,7 +585,7 @@ def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
 
 def run_lint(workspace: Path, chapters: str | None = None) -> str:
     """运行全套 lint 检查，写入 debt JSON，返回格式化摘要"""
-    changed_files = _get_changed_files(workspace, chapters)
+    changed_files = _get_changed_files(workspace)
 
     if not changed_files:
         return "（无文件需要检查）"
@@ -694,73 +654,53 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
     all_fixes = (
         rules_fixes + state_fixes + category_fixes + plot_range_fixes
     )
+    total_fixed = len(all_fixes)
     if all_fixes:
-        lines.append("【自动修复】")
+        lines.append("## 代码 lint 完成\n")
+        lines.append(f"### 自动修复（{total_fixed} 项）")
         for fix in all_fixes:
-            lines.append(f"  ✅ {fix['file']}：{fix['detail']}")
+            lines.append(f"  ✅ {fix['file']}: {fix['detail']}")
         lines.append("")
 
     # 需人工处理的债务
-    manual_debts = (
-        yaml_debts
-        + link_debts
-        + state_debts
-        + length_debts
-        + plot_link_debts
-    )
-    # 过滤掉已自动修复的
-    manual_debts = [d for d in manual_debts if not d.get("auto_fixed")]
-    if yaml_debts:
-        for d in yaml_debts:
-            if d.get("auto_fixed"):
-                continue
-            lines.append(f"  ❌ {d['file']}：{d['detail']}")
+    debt_groups = [
+        ("broken_links", link_debts),
+        ("state_missing", [d for d in state_debts if d["type"] == "state_missing"]),
+        ("state_verbose", [d for d in state_debts if d["type"] == "state_verbose"]),
+        ("length_overage", length_debts),
+        ("plot_broken_links", plot_link_debts),
+    ]
+    all_debt_items = []
+    for _, items in debt_groups:
+        all_debt_items.extend(items)
+    total_debts = len(all_debt_items)
 
-    if link_debts:
+    if all_debt_items:
+        lines.append(f"### 需人工处理的债务（{total_debts} 项）")
+        for debt_type, items in debt_groups:
+            if items:
+                lines.append(f"**{debt_type}**（{len(items)} 项）")
+                for item in items[:5]:
+                    detail = item.get("detail", item.get("target", ""))
+                    lines.append(f"  ⚠️ {detail}")
+                if len(items) > 5:
+                    lines.append(f"  ...还有 {len(items)-5} 项")
         lines.append("")
-        lines.append(f"【断链】共 {len(link_debts)} 处")
-        for d in link_debts[:10]:
-            lines.append(f"  🔗 {d['file']} → [[{d['target']}]]")
-        if len(link_debts) > 10:
-            lines.append(f"  ... 另有 {len(link_debts) - 10} 处")
-
-    if state_debts:
-        lines.append("")
-        lines.append(f"【State 问题】共 {len(state_debts)} 处")
-        for d in state_debts:
-            lines.append(f"  📌 {d['file']}：{d['detail']}")
-
-    if length_debts:
-        lines.append("")
-        lines.append(f"【正文过长】共 {len(length_debts)} 处")
-        for d in length_debts:
-            lines.append(f"  📏 {d['file']}：{d['detail']}")
-
-    if plot_link_debts:
-        lines.append("")
-        lines.append(f"【剧情断链】共 {len(plot_link_debts)} 处")
-        for d in plot_link_debts[:10]:
-            lines.append(f"  🎬 {d['file']} → [[{d['target']}]]")
-        if len(plot_link_debts) > 10:
-            lines.append(f"  ... 另有 {len(plot_link_debts) - 10} 处")
 
     if plot_range_fixes:
-        lines.append("")
-        lines.append(f"【剧情范围修正】共 {len(plot_range_fixes)} 处")
+        lines.append(f"### 剧情范围修正（{len(plot_range_fixes)} 处）")
         for d in plot_range_fixes:
             lines.append(f"  🔧 {d['file']}：{d['detail']}")
+        lines.append("")
 
     # 出场统计
     active_count = sum(1 for r in appearance_results if r["recent_activity"])
     if appearance_results:
+        lines.append(f"### 出场统计")
+        lines.append(f"活跃 {active_count}/{len(appearance_results)} 个词条")
         lines.append("")
-        lines.append(f"【出场统计】活跃 {active_count}/{len(appearance_results)} 个词条")
 
-    # 统计
-    total_fixes = len(all_fixes)
-    total_debts = len(manual_debts)
-    lines.append("")
-    lines.append(f"总计：自动修复 {total_fixes} 处，待处理债务 {total_debts} 项")
+    lines.append(f"总计：自动修复 {total_fixed} 处，待处理债务 {total_debts} 项")
 
     return "\n".join(lines)
 
