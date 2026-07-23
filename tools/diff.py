@@ -241,20 +241,7 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
 
     _save_log(workspace, log)
 
-    # 6. 自动构建关系图
-    try:
-        from auto.relation_extractor import build_relations as _build_relations
-        from auto.relation_extractor import save_relations
-        relations = _build_relations(workspace)
-        if relations:
-            save_relations(workspace, relations)
-            rel_msg = f"，关系图已构建（{len(relations)} 个词条）"
-        else:
-            rel_msg = ""
-    except Exception as e:
-        rel_msg = f"（关系图构建失败：{e}）"
-
     return (f"✅ 任务已完成。已记录：{len(chapter_nums)} 章、"
             f"{len(new_wiki + updated_wiki)} 个 wiki 词条、"
             f"{len(new_rules + updated_rules)} 个规则、"
-            f"{len(new_plots + updated_plots)} 个剧情卡片{rel_msg}")
+            f"{len(new_plots + updated_plots)} 个剧情卡片")

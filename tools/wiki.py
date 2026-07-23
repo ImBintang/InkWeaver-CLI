@@ -101,7 +101,7 @@ def new_wiki(workspace: Path, category: str, name: str, content: str = "",
         return f"错误：词条「{name}」已存在"
 
     meta = {
-        "type": _category_to_type(category),
+        "type": category,
         "title": name,
         "updated": updated if updated is not None else 0,
     }
@@ -408,15 +408,7 @@ def check_wiki_yaml(workspace: Path, category: str = "",
     return "\n".join(report_lines)
 
 
-def _category_to_type(category: str) -> str:
-    """将类别名映射为 type 字段值"""
-    mapping = {
-        "人物": "character",
-        "势力": "faction",
-        "地图": "location",
-        "设定图鉴": "artifact",
-    }
-    return mapping.get(category, "artifact")
+
 
 
 def get_wiki_meta(workspace: Path, category: str, name: str) -> dict:

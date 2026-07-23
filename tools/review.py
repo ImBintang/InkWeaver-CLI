@@ -1,29 +1,19 @@
 """审核 Subagent — 知识提取完成后进行自审
 
-检查项：
-0. YAML 结构完整性 — frontmatter 是否存在/重复，正文是否为空
-1. wikilink 悬空检查 — [[wikilink]] 是否指向已存在的词条
-2. 规则文档检查 — rules/ 规则文档是否包含 [[wikilink]]
-3. state 缺失检查 — 人物/势力类词条是否缺少 state 字段
-4. state 简洁性检查 — state 是否过于冗长（建议 ≤100 字）
-5. 类别归属约束 — 禁止修改已在计划中确认的类别归属
-6. 信息矛盾检查 — 前后信息是否矛盾
-7. 描述/状态混淆检查 — description 和 state 是否混淆
-8. 文档篇幅检查 — wiki/规则文档超过 1500 字时需发起压缩请求
-9. 剧情卡片 Wikilink 悬空检查
-10. 剧情区间越界检查
-11. 未结束卡片收尾遗漏检查
+检查项（代码 lint 已处理的项不再重复审查，通过 check_debt 查看结果）：
+- 信息矛盾检查 — 前后信息是否矛盾
+- 描述/状态混淆检查 — description 和 state 是否混淆
 """
 
 import json
-import re
 from pathlib import Path
 
 from api import LLMClient
+from tools.lint import read_debt
 
 
 # 审核 Subagent 可用工具（不含写工具，审核后通过 knowledge_task 修复）
-# 必须先调用 check_wiki_yaml 检查 YAML 结构完整性
+# 先调用 check_debt 查看 lint 债务清单
 REVIEW_SUBAGENT_TOOLS = [
     "read_chapters",
     "wiki_list",
@@ -35,8 +25,7 @@ REVIEW_SUBAGENT_TOOLS = [
     "query_relations",
     "knowledge_task",
     "agent_output",
-    "length_stats",
-    "check_wiki_yaml",
+    "check_debt",
     "read_plot",
     "plot_list",
     "plot_task",
@@ -44,7 +33,7 @@ REVIEW_SUBAGENT_TOOLS = [
 
 
 def _build_review_tool_defs() -> list:
-    """构建审核 subagent 的 tool definitions（8 个工具）"""
+    """构建审核 subagent 的 tool definitions"""
     from tools.chapter import read_chapters
     from tools.wiki import wiki_list, read_wiki
     from tools.memory import read_memory
@@ -194,40 +183,11 @@ def _build_review_tool_defs() -> list:
         {
             "type": "function",
             "function": {
-                "name": "check_wiki_yaml",
-                "description": "检查 wiki 文档的 YAML 结构完整性。审核开始时必须先调用此工具检查所有类别。检查项：frontmatter 是否存在/重复、正文是否为空/None、正文是否有章节标题。返回每个异常文件的详细问题列表。",
+                "name": "check_debt",
+                "description": "读取代码 lint 产生的债务清单。必须先调用此工具了解当前有哪些待处理问题。",
                 "parameters": {
                     "type": "object",
-                    "properties": {
-                        "category": {"type": "string", "description": "类别名（为空则检查所有类别）"},
-                        "name": {"type": "string", "description": "词条名（为空则检查该类别的所有词条）"},
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "length_stats",
-                "description": "统计指定 wiki 词条或规则文档除去 YAML frontmatter 后的 Markdown 字数。如果字数超过 1500，需要发起修改请求进行压缩。",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": ["wiki", "rule"],
-                            "description": "文档类型：wiki（词条）或 rule（规则文档）",
-                        },
-                        "category": {
-                            "type": "string",
-                            "description": "类别名（当 type=wiki 时必填，如「人物」「势力」）",
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "文档名称（不含 .md），如「寒叔（叶寒）」「境界体系」",
-                        },
-                    },
-                    "required": ["type", "name"],
+                    "properties": {},
                 },
             },
         },
@@ -279,62 +239,6 @@ def _build_review_tool_defs() -> list:
     ]
 
 
-def _strip_frontmatter(text: str) -> str:
-    """去除 YAML frontmatter，返回纯 Markdown 正文"""
-    match = re.match(r"^---\s*\n.*?\n---\s*\n(.*)", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
-
-
-def length_stats(workspace: Path, doc_type: str, name: str, category: str = "") -> str:
-    """统计 wiki 或规则文档除去 YAML frontmatter 后的字数
-
-    Args:
-        workspace: 工作区路径
-        doc_type: "wiki" 或 "rule"
-        name: 文档名（不含 .md）
-        category: wiki 类别（doc_type=wiki 时必填）
-
-    Returns:
-        字数统计结果
-    """
-    if doc_type == "wiki":
-        if not category:
-            return "错误：type=wiki 时必须提供 category 参数"
-        fp = workspace / "wiki" / category / f"{name}.md"
-    elif doc_type == "rule":
-        fp = workspace / "rules" / f"{name}.md"
-    else:
-        return f"错误：未知文档类型「{doc_type}」"
-
-    if not fp.exists():
-        return f"错误：文档不存在 - {fp}"
-
-    text = fp.read_text(encoding="utf-8")
-    body = _strip_frontmatter(text)
-    char_count = len(body)
-    line_count = len(body.splitlines())
-
-    if char_count > 1500:
-        suggestion = (
-            f"⚠️ 字数 {char_count}，超过 1500 字限制。"
-            f"建议压缩：移除过时/重复内容（如早期章节的设定已在后续章节被覆盖），"
-            f"保留当前最新状态。"
-        )
-    else:
-        suggestion = f"✓ 字数 {char_count}，在合理范围内。"
-
-    return (
-        f"文档：{name}.md\n"
-        f"类型：{doc_type}\n"
-        f"路径：{fp}\n"
-        f"正文行数：{line_count}\n"
-        f"正文字数：{char_count}\n"
-        f"评估：{suggestion}"
-    )
-
-
 class ReviewSubagent:
     """审核子智能体 — 检查知识提取质量，委托 knowledge_task 修复"""
 
@@ -366,81 +270,27 @@ class ReviewSubagent:
             f"涉及章节：第 {self.chapters} 章\n"
             f"\n"
             f"# 审核流程\n"
-            f"0. **必须先调用 check_wiki_yaml 检查 YAML 结构完整性**（遍历所有类别）\n"
-            f"1. 使用 wiki_list 获取所有类别的词条列表（遍历所有类别）\n"
-            f"2. 使用 read_wiki 抽样或全量读取词条内容\n"
-            f"3. 使用 read_index 查看类别 index.md 了解写作规范（特别是是否需要 state 字段）\n"
-            f"4. 使用 rules_list 查看规则文档列表，使用 read_rule 读取全量检查\n"
-            f"5. 使用 read_chapters 在必要时对照原文\n"
-            f"6. 使用 query_relations 查询关联关系\n"
+            f"1. **先调用 check_debt** — 查看代码 lint 已发现的债务清单\n"
+            f"2. **语义审查** — 检查信息矛盾、描述/状态混淆（代码无法自动判断的问题）\n"
+            f"3. **汇总分析** — 结合债务清单和语义发现，判断：\n"
+            f"   - 断链是\"真缺失\"还是\"被规则覆盖\"\n"
+            f"   - state 缺失需要从原文补充\n"
+            f"   - 篇幅/状态过长需要压缩\n"
+            f"4. **委派修复** — 调用 knowledge_task / plot_task 执行修复\n"
+            f"5. 输出审查报告\n"
             f"\n"
             f"# 审核检查项\n"
             f"\n"
-            f"## 0. YAML 结构完整性检查（先调用 check_wiki_yaml）\n"
-            f"- 审核必须**先**调用 check_wiki_yaml 检查所有类别\n"
-            f"- 检查项：frontmatter 是否存在、是否重复、正文是否为空/None、正文是否有章节标题\n"
-            f"- 发现异常后，通过 knowledge_task 的 review_notes 指定修复内容\n"
-            f"- 修复时注意：正文为 None 的词条需要从原文补充完整内容，重复 frontmatter 的已自动清理但需确认\n"
-            f"\n"
-            f"## 1. Wikilink 悬空检查\n"
-            f"- 检查 [[wikilink]] 是否指向已存在的词条\n"
-            f"- 如果指向的词条不存在，需要记录\n"
-            f"\n"
-            f"## 2. 规则文档检查\n"
-            f"- 使用 rules_list 和 read_rule 检查 rules/ 目录下的规则文档\n"
-            f"- 检查本次涉及章节的知识提取是否新增了需要更新规则的内容\n"
-            f"  （如新的修炼境界、新的妖兽等级体系等世界观规则）\n"
-            f"- 规则混入关系检查：rules/ 下的规则文档**禁止**包含 [[wikilink]]\n"
-            f"  - 规则定义的是世界观底层规则，不应与具体词条建立关系\n"
-            f"  - 发现后需移除规则文档中的 wikilink（改为纯文本引用）\n"
-            f"\n"
-            f"## 3. state 缺失检查\n"
-            f"- 查看每个类别的 index.md，确认该类别的「是否需要 state 字段」\n"
-            f"- 人物、势力类通常需要 state 字段\n"
-            f"- 设定图鉴类不需要 state 字段\n"
-            f"- 如果类别需要 state 但词条缺失，需要记录并修复\n"
-            f"\n"
-            f"## 4. state 简洁性检查\n"
-            f"- state 字段应简明扼要（建议不超过 100 字）\n"
-            f"- 不应堆叠多个章节的完整剧情流水账\n"
-            f"- 例如：不应把「做了X→然后Y→接着Z→最后W」全部写入 state\n"
-            f"- 正确做法：只保留当前最新状态快照，早期细节已被正文覆盖的可删除\n"
-            f"- 发现 state 过于冗长时，通过 knowledge_task 发起精简\n"
-            f"\n"
-            f"## 5. 类别归属约束（重要——禁止修改）\n"
-            f"- **禁止在审核阶段修改词条的类别归属**\n"
-            f"- 类别（如法宝/功法/阵法等）已在提取计划阶段经人工确认，审核不应调整\n"
-            f"- 如果发现 type 字段与所在类别不匹配，只需记录到报告，不发起修复\n"
-            f"- 如果发现词条放错了文件夹，同样只记录不修改\n"
-            f"\n"
-            f"## 6. 信息矛盾检查\n"
+            f"## 信息矛盾检查\n"
             f"- 检查前后信息是否矛盾（如境界变化是否符合逻辑）\n"
             f"- 对照原文核实关键信息\n"
             f"\n"
-            f"## 7. 描述/状态混淆检查\n"
+            f"## 描述/状态混淆检查\n"
             f"- description 应放客观介绍（静态信息）\n"
             f"- state 应放近期事件带来的变化（动态信息）\n"
             f"- 两者不应混淆\n"
             f"\n"
-            f"## 8. 文档篇幅检查\n"
-            f"- 使用 length_stats 逐个检查 wiki 词条和规则文档的字数\n"
-            f"- 对**超过 1500 字**的文档，必须发起修改请求进行压缩\n"
-            f"- 压缩目标：移除过时、重复、被后续章节覆盖的内容\n"
-            f"- 例如：小说已写到 100 章，词条中却还在详细描述第 20 章的修为境界——"
-            f"这类已被覆盖的早期细节应删除，只保留当前最新状态\n"
-            f"- 压缩通过 knowledge_task 的 review_notes 传递压缩意见来实现\n"
-            f"\n"
-            f"## 9. 剧情卡片 Wikilink 悬空检查\n"
-            f"- 检查剧情卡片中的 [[wikilink]] 是否指向已存在的 wiki 词条\n"
-            f"- 如果指向的词条不存在，需要记录\n"
-            f"\n"
-            f"## 10. 剧情区间越界检查\n"
-            f"- 检查剧情卡片的 chapters 字段是否超出原文实际范围\n"
-            f"- 例如：原文只有 20 章，卡片写的 chapters: 1-25 则越界\n"
-            f"\n"
-            f"## 11. 未结束卡片收尾遗漏检查\n"
-            f"- 对于标记为未结束的剧情卡片，对照最新章节判断是否应有收尾操作\n"
-            f"- 如果本应收尾但未被处理，需要记录\n"
+            f"代码 lint 已处理的检查项（YAML 结构、断链、规则 wikilink、state 缺失/冗长/冗余、类别归属、文档篇幅、剧情区间越界、出现章节）不再重复审查，通过 check_debt 查看结果。\n"
             f"\n"
             f"# 输出要求\n"
             f"1. 先调用 agent_output 输出审核报告，列出所有发现的问题\n"
@@ -453,7 +303,7 @@ class ReviewSubagent:
     def dispatch_tool(self, name: str, args: dict) -> str:
         """工具分发路由"""
         from tools.chapter import read_chapters
-        from tools.wiki import wiki_list, read_wiki, check_wiki_yaml
+        from tools.wiki import wiki_list, read_wiki
         from tools.memory import read_memory
         from tools.category import read_index
         from tools.relation import query_relations
@@ -480,8 +330,7 @@ class ReviewSubagent:
             "knowledge_task": lambda **kw: run_knowledge_task(
                 self.llm, self.workspace, cli=self.cli, **kw
             ),
-            "length_stats": lambda **kw: length_stats(self.workspace, **kw),
-            "check_wiki_yaml": lambda **kw: check_wiki_yaml(self.workspace, **kw),
+            "check_debt": lambda **kw: read_debt(self.workspace),
             "read_plot": lambda **kw: read_plot(self.workspace, **kw),
             "plot_list": lambda **kw: plot_list(self.workspace, **kw),
             "plot_task": lambda **kw: run_plot_task(
@@ -513,8 +362,7 @@ class ReviewSubagent:
             f"请对工作区「{self.workspace.name}」的知识库进行全面审核。\n"
             f"涉及章节：第 {self.chapters} 章\n"
             f"\n"
-            f"请先从 wiki_list 获取所有类别的词条列表，逐项检查。\n"
-            f"同时使用 length_stats 检查各文档字数，对超过 1500 字的发起压缩。"
+            f"请先调用 check_debt 查看 lint 债务清单，再进行语义审查。"
         )
 
         self.messages.append({"role": "user", "content": initial_msg})
@@ -596,7 +444,9 @@ class ReviewSubagent:
 def run_review(llm: LLMClient, workspace: Path,
                chapters: str, cli=None,
                token_callback=None) -> str:
-    """便捷函数：创建并运行 ReviewSubagent
+    """代码 lint + 审查 subagent
+
+    先运行纯代码 lint（自动修复 + 债务清单），再启动 ReviewSubagent 进行语义审查。
 
     Args:
         llm: LLM 客户端实例
@@ -607,6 +457,13 @@ def run_review(llm: LLMClient, workspace: Path,
     Returns:
         审核结果摘要
     """
+    # 1. 代码 lint
+    from tools.lint import run_lint
+    lint_result = run_lint(workspace)
+    if cli:
+        cli.print_output(lint_result)
+
+    # 2. 审查 subagent
     subagent = ReviewSubagent(
         llm=llm,
         workspace=workspace,
@@ -615,7 +472,7 @@ def run_review(llm: LLMClient, workspace: Path,
     )
     result = subagent.run()
 
-    # 将 subagent 的 token 用量回调给主 agent
+    # 3. 将 subagent 的 token 用量回调给主 agent
     if token_callback and (subagent._input_tokens or subagent._output_tokens):
         token_callback(subagent._input_tokens, subagent._output_tokens)
 

@@ -54,7 +54,7 @@ class KnowledgeAgent(JianzhiAgent):
             "- 使用 query_relations 查询词条关联\n"
             "- 使用 read_memory 读取记忆\n"
             "- 使用 knowledge_task 派发 subagent 执行知识提取\n"
-            "- 使用 review_knowledge 启动审核 subagent（知识提取完成后必须审核）\n"            "- 使用 finish_task 完成知识提取任务（自动校验、记录日志、构建关系图）\n"            "\n"
+            "- 使用 review_knowledge 启动代码 lint + 审核 subagent（知识提取完成后必须执行，自动修复 + 构建关系图）\n"            "- 使用 finish_task 完成知识提取任务（自动校验、记录日志）\n"            "\n"
             "## Wiki 优先 RAG 原则（重要）\n"
             "**核心原则**：面对已有 wiki 词条的知识检索，必须先用 wiki 进行 RAG，而不是直接翻原文。\n"
             "\n"
