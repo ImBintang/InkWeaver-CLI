@@ -118,6 +118,9 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 - 设定图鉴类不需要 state 字段
 - 所有 wiki 文档使用统一 frontmatter
 - new_wiki 的 content 参数为必填，必须提供正文内容
+- **新增统一编辑工具**：`edit_doc_text`（正文精确文本替换）/ `edit_doc_wikilink`（wikilink 定向替换）
+  - 只需要改正文中一句话时，用 `edit_doc_text` 比 `edit_doc(content=新全文)` 省大量 token
+  - Lint 债务修复时优先使用 `edit_doc_wikilink` 修复断链
 - subagent 使用 fresh messages=[]，不共享父对话上下文
 - subagent 无法调用 knowledge_task、new_category 等管理工具
 - subagent 完成时调用 agent_output 输出完整操作摘要

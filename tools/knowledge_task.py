@@ -105,7 +105,10 @@ class KnowledgeSubagent:
             f"1. **先用 Wiki 做 RAG**：使用 wiki_list 查看该类别下已有词条\n"
             f"2. 使用 read_wiki（yaml_only=false）读取已有词条的**完整内容**（含正文）\n"
             f"3. **必须使用 read_chapters 读取本次涉及的新章节原文**，获取新增信息\n"
-            f"4. 使用 new_wiki 或 edit_wiki 写入/更新词条\n"
+            f"4. 写入/更新词条（根据改动范围选择最省 token 的方式）：\n"
+            f"   - **改正文中一句话/一个词** → 用 `edit_doc_text`，只需说「把 A 改成 B」，不用传整个正文\n"
+            f"   - **改 [[wikilink]] 指向** → 用 `edit_doc_wikilink`，只需说「把指向 X 的链接改成 Y」\n"
+            f"   - **大幅重写/新建** → 用 `new_wiki` 或 `edit_wiki(content=新全文)`\n"
             f"5. 词条正文使用 [[wikilink]] 格式建立交叉引用\n"
             f"\n"
             f"# 规则\n"
@@ -126,7 +129,9 @@ class KnowledgeSubagent:
             f"  - 获得/失去物品 → 更新「持有物品」\n"
             f"  - 新增人际关系 → 更新「情感与关系」\n"
             f"  - 新增重要事件 → 更新相关章节\n"
-            f"- 调用 edit_wiki 时，除了 state/description 外，**必须同时传入 content** 参数提供更新后的完整正文\n"
+            f"- **正文局部修改优先用 `edit_doc_text`**：只需改一句话时，不要传整个正文\n"
+            f"- **断链修复优先用 `edit_doc_wikilink`**：只需改 wikilink 目标时，不要翻整篇正文\n"
+            f"- 只有**大幅重写正文**时才用 `edit_wiki(content=新全文)`\n"
             f"- 正文中已被新信息覆盖的旧内容可以删除或精简（例如「淬体境一重」→「淬体境六重」）"
         )
 
@@ -134,6 +139,7 @@ class KnowledgeSubagent:
         """工具分发路由"""
         from tools.chapter import read_chapters, keywords_stat, chapter_list
         from tools.wiki import wiki_list, read_wiki, new_wiki, edit_wiki, check_wiki
+        from tools.wiki import edit_wiki_text, edit_wiki_wikilink
         from tools.memory import read_memory
         from tools.category import read_index
         from tools.relation import query_relations
@@ -154,6 +160,11 @@ class KnowledgeSubagent:
             "edit_wiki": lambda **kw: edit_wiki(
                 self.workspace, **{**kw, "updated": kw.get("updated") or self._get_max_chapter()}
             ),
+            "edit_wiki_text": lambda **kw: edit_wiki_text(self.workspace, **kw),
+            "edit_wiki_wikilink": lambda **kw: edit_wiki_wikilink(self.workspace, **kw),
+            # 统一工具名（subagent 工具定义来自 shared_subagent_tools.py，使用统一名）
+            "edit_doc_text": lambda **kw: _edit_doc_text_fallback(self.workspace, **kw),
+            "edit_doc_wikilink": lambda **kw: _edit_doc_wikilink_fallback(self.workspace, **kw),
             "read_memory": lambda **kw: read_memory(self.workspace, **kw),
             "check_wiki": lambda **kw: check_wiki(self.workspace, **kw),
             "read_index": lambda **kw: read_index(self.workspace, **kw),
@@ -279,6 +290,35 @@ class KnowledgeSubagent:
 
         self._log("SUBAGENT_END", "（subagent 未返回摘要）")
         return "（subagent 未返回摘要）"
+
+
+# ── 统一工具回退路由 ──────────────────────────────────────────────────────
+# subagent 的 tool_defs 来自 shared_subagent_tools.py（统一名 edit_doc_text/wikilink），
+# dispatch 需要对应的处理函数。
+
+
+def _edit_doc_text_fallback(workspace: Path, **kw) -> str:
+    """回退路由：统一 edit_doc_text → wiki/plot 具体实现"""
+    doc_type = kw.pop("doc_type", "wiki")
+    if doc_type == "wiki":
+        from tools.wiki import edit_wiki_text
+        return edit_wiki_text(workspace, **kw)
+    elif doc_type == "plot":
+        from tools.plot import edit_plot_text
+        return edit_plot_text(workspace, **kw)
+    return f"错误：不支持的 doc_type「{doc_type}」"
+
+
+def _edit_doc_wikilink_fallback(workspace: Path, **kw) -> str:
+    """回退路由：统一 edit_doc_wikilink → wiki/plot 具体实现"""
+    doc_type = kw.pop("doc_type", "wiki")
+    if doc_type == "wiki":
+        from tools.wiki import edit_wiki_wikilink
+        return edit_wiki_wikilink(workspace, **kw)
+    elif doc_type == "plot":
+        from tools.plot import edit_plot_wikilink
+        return edit_plot_wikilink(workspace, **kw)
+    return f"错误：不支持的 doc_type「{doc_type}」"
 
 
 def run_knowledge_task(llm: LLMClient, workspace: Path,

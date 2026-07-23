@@ -1,10 +1,28 @@
-"""剧情卡片工具：增删查改、列表、收尾"""
+"""剧情卡片工具：增删查改、列表、收尾
 
-import re
+兼容性：new_plot / edit_plot / delete_plot 保留为向后兼容的薄代理层，
+核心实现在 tools/editor.py（统一编辑器）。
+plot 特有功能（end_plot / query_plot_by_chapters）保留在此文件。
+"""
+
 from pathlib import Path
 from datetime import date
 
-from tools.wiki import _parse_frontmatter, _build_frontmatter
+from tools.editor import (
+    parse_frontmatter as _parse_frontmatter,
+    build_frontmatter as _build_frontmatter,
+    create_doc as _create_doc,
+    edit_doc as _edit_doc,
+    delete_doc as _delete_doc,
+    edit_doc_text as _edit_doc_text,
+    edit_doc_wikilink as _edit_doc_wikilink,
+    _ensure_plot_index as _ensure_index,
+    _parse_plot_index_line as _parse_index_line,
+    _build_plot_index_line as _build_index_line,
+    _update_plot_index_add as _update_index_add,
+    _update_plot_index_edit as _update_index_edit,
+    update_plot_index_end as _update_index_end,
+)
 from tools.diff import record_extraction
 
 
@@ -23,106 +41,6 @@ def _ensure_plot_dir(workspace: Path) -> Path:
 
 def _plot_file(workspace: Path, name: str) -> Path:
     return _plot_root(workspace) / f"{name}.md"
-
-
-def _plot_index_file(workspace: Path) -> Path:
-    return _plot_root(workspace) / "index.md"
-
-
-def _ensure_index(workspace: Path) -> str:
-    """确保 plot/index.md 存在，若不存在则创建"""
-    idx = _plot_index_file(workspace)
-    if not idx.exists():
-        _ensure_plot_dir(workspace)
-        content = (
-            "# 剧情卡片索引\n"
-            "\n"
-            "## 未结束\n"
-            "\n"
-            "## 已结束\n"
-        )
-        idx.write_text(content, encoding="utf-8")
-    return idx.read_text(encoding="utf-8")
-
-
-def _parse_index_line(line: str) -> dict | None:
-    """解析 index.md 中的一行，返回 {name, chapters, ended, end_notes} 或 None"""
-    line = line.strip()
-    if not line.startswith("- [["):
-        return None
-    # - [[name]] | chapters: X | ended: true/false | end_notes: ...
-    match = re.match(
-        r"- \[\[(.+?)\]\]\s*\|\s*chapters:\s*(.+?)\s*\|\s*ended:\s*(true|false)"
-        r"(?:\s*\|\s*end_notes:\s*(.*))?$",
-        line,
-    )
-    if not match:
-        return None
-    return {
-        "name": match.group(1).strip(),
-        "chapters": match.group(2).strip(),
-        "ended": match.group(3).strip() == "true",
-        "end_notes": (match.group(4) or "").strip(),
-    }
-
-
-def _build_index_line(name: str, chapters: str, ended: bool, end_notes: str = "") -> str:
-    parts = [f"- [[{name}]] | chapters: {chapters} | ended: {'true' if ended else 'false'}"]
-    if end_notes:
-        parts.append(f" | end_notes: {end_notes}")
-    return "".join(parts)
-
-
-def _update_index_add(workspace: Path, name: str, chapters: str):
-    """new_plot: 在「未结束」区追加一行"""
-    idx_content = _ensure_index(workspace)
-    line = _build_index_line(name, chapters, ended=False)
-    # 追加到 ## 未结束 之后
-    idx_content = idx_content.replace(
-        "## 未结束\n",
-        f"## 未结束\n{line}\n",
-        1,
-    )
-    _plot_index_file(workspace).write_text(idx_content, encoding="utf-8")
-
-
-def _update_index_edit(workspace: Path, name: str, chapters: str):
-    """edit_plot: 更新 index 中的 chapters 信息"""
-    idx_content = _ensure_index(workspace)
-    lines = idx_content.split("\n")
-    new_lines = []
-    for line in lines:
-        parsed = _parse_index_line(line)
-        if parsed and parsed["name"] == name:
-            new_lines.append(_build_index_line(name, chapters, parsed["ended"], parsed.get("end_notes", "")))
-        else:
-            new_lines.append(line)
-    _plot_index_file(workspace).write_text("\n".join(new_lines), encoding="utf-8")
-
-
-def _update_index_end(workspace: Path, name: str, end_notes: str):
-    """end_plot: 将行从「未结束」移到「已结束」，写入 end_notes"""
-    idx_content = _ensure_index(workspace)
-    lines = idx_content.split("\n")
-    found = None
-    new_lines = []
-    for line in lines:
-        parsed = _parse_index_line(line)
-        if parsed and parsed["name"] == name:
-            found = (parsed["name"], parsed["chapters"])
-        else:
-            new_lines.append(line)
-
-    if found:
-        line = _build_index_line(found[0], found[1], ended=True, end_notes=end_notes)
-        # 插入到 ## 已结束 区第一行
-        idx_text = "\n".join(new_lines)
-        idx_text = idx_text.replace(
-            "## 已结束\n",
-            f"## 已结束\n{line}\n",
-            1,
-        )
-        _plot_index_file(workspace).write_text(idx_text, encoding="utf-8")
 
 
 def read_plot(workspace: Path, name: str, yaml_only: bool = True) -> str:
@@ -206,99 +124,42 @@ def new_plot(workspace: Path, name: str, chapters: str,
              content: str = "", description: str = "",
              state: str = "", tags: list = None,
              updated: int | None = None) -> str:
-    """新建剧情卡片
-    
-    Args:
-        name: 剧情卡片标题
-        chapters: 覆盖章节，如 "1-5,7-10"
-        content: 正文内容
-        description: 剧情概要（静态）
-        state: 当前进展（动态，可选）
-        tags: 标签列表
-        updated: 章节号（纯数字），None 时默认 0
-    
-    Returns:
-        操作结果消息
-    """
-    _ensure_plot_dir(workspace)
-    fp = _plot_file(workspace, name)
-    if fp.exists():
-        return f"错误：剧情卡片「{name}」已存在"
-    
-    meta = {
-        "type": "plot",
-        "title": name,
-        "description": description,
-        "chapters": chapters,
-        "ended": False,
-        "updated": updated if updated is not None else 0,
-    }
-    if state:
-        meta["state"] = state
-    if tags:
-        meta["tags"] = tags
-    
-    fp.write_text(_build_frontmatter(meta) + content, encoding="utf-8")
-    _update_index_add(workspace, name, chapters)
-    # 记录到 log.json
-    try:
-        record_extraction(workspace, [], [name], [])
-    except Exception:
-        pass
-    return f"已创建剧情卡片：{name}（章节 {chapters}）"
+    """新建剧情卡片（薄代理层 → tools.editor.create_doc）"""
+    return _create_doc(
+        workspace, doc_type="plot", name=name, content=content,
+        description=description, state=state, tags=tags,
+        chapters=chapters, updated=updated,
+    )
 
 
 def edit_plot(workspace: Path, name: str, chapters: str = None,
               content: str = None, description: str = None,
               state: str = None, tags: list = None,
               updated: int | None = None) -> str:
-    """编辑剧情卡片
-    
-    Args:
-        name: 剧情卡片标题
-        chapters: 新章节范围（None 表示不修改）
-        content: 新正文（None 表示不修改）
-        description: 新描述（None 表示不修改）
-        state: 新状态（None 表示不修改）
-        tags: 新标签（None 表示不修改）
-        updated: 章节号（纯数字），None 表示保持原值
-    
-    Returns:
-        操作结果消息
-    """
-    fp = _plot_file(workspace, name)
-    if not fp.exists():
-        return f"错误：剧情卡片「{name}」不存在"
-    
-    meta, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
-    if updated is not None:
-        meta["updated"] = updated
-    
-    if description is not None:
-        meta["description"] = description
-    if state is not None:
-        if state == "" and "state" in meta:
-            del meta["state"]
-        else:
-            meta["state"] = state
-    if tags is not None:
-        meta["tags"] = tags
-    if chapters is not None:
-        meta["chapters"] = chapters
-    if content is not None:
-        body = content
-    
-    fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-    
-    # 更新 index
-    current_chapters = meta.get("chapters", chapters or "")
-    _update_index_edit(workspace, name, current_chapters)
-    # 记录到 log.json
-    try:
-        record_extraction(workspace, [], [], [name])
-    except Exception:
-        pass
-    return f"已更新剧情卡片：{name}"
+    """编辑剧情卡片（薄代理层 → tools.editor.edit_doc）"""
+    return _edit_doc(
+        workspace, doc_type="plot", name=name, content=content,
+        description=description, state=state, tags=tags,
+        chapters=chapters, updated=updated,
+    )
+
+
+def edit_plot_text(workspace: Path, name: str,
+                   old_text: str, new_text: str) -> str:
+    """在剧情卡片正文中精确匹配一段文本并替换（手术刀式）"""
+    return _edit_doc_text(
+        workspace, doc_type="plot", name=name,
+        old_text=old_text, new_text=new_text,
+    )
+
+
+def edit_plot_wikilink(workspace: Path, name: str,
+                       old_target: str, new_target: str) -> str:
+    """替换剧情卡片正文中所有指向 old_target 的 [[wikilink]]"""
+    return _edit_doc_wikilink(
+        workspace, doc_type="plot", name=name,
+        old_target=old_target, new_target=new_target,
+    )
 
 
 def end_plot(workspace: Path, name: str, end_notes: str = "") -> str:
@@ -341,19 +202,8 @@ def end_plot(workspace: Path, name: str, end_notes: str = "") -> str:
 
 
 def delete_plot(workspace: Path, name: str) -> str:
-    """删除剧情卡片"""
-    fp = _plot_file(workspace, name)
-    if not fp.exists():
-        return f"错误：剧情卡片「{name}」不存在"
-    fp.unlink()
-    
-    # 从 index 中移除
-    idx_content = _ensure_index(workspace)
-    lines = idx_content.split("\n")
-    new_lines = [line for line in lines if not (_parse_index_line(line) and _parse_index_line(line)["name"] == name)]
-    _plot_index_file(workspace).write_text("\n".join(new_lines), encoding="utf-8")
-    
-    return f"已删除剧情卡片：{name}"
+    """删除剧情卡片（薄代理层 → tools.editor.delete_doc）"""
+    return _delete_doc(workspace, doc_type="plot", name=name)
 
 
 def query_plot_by_chapters(workspace: Path, chapters: str) -> str:

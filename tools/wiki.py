@@ -1,8 +1,20 @@
-"""Wiki 文档工具：增删查改、列表、检查"""
+"""Wiki 文档工具：增删查改、列表、检查
 
-import re
-import yaml
+兼容性：new_wiki / edit_wiki / delete_wiki 保留为向后兼容的薄代理层，
+核心实现在 tools/editor.py（统一编辑器，支持 wiki / plot / rule 三种类型）。
+"""
+
 from pathlib import Path
+
+from tools.editor import (
+    parse_frontmatter as _parse_frontmatter,
+    build_frontmatter as _build_frontmatter,
+    create_doc as _create_doc,
+    edit_doc as _edit_doc,
+    delete_doc as _delete_doc,
+    edit_doc_text as _edit_doc_text,
+    edit_doc_wikilink as _edit_doc_wikilink,
+)
 
 
 WIKI_DIR = "wiki"
@@ -16,55 +28,6 @@ def _ensure_wiki_dir(workspace: Path) -> Path:
     root = _wiki_root(workspace)
     root.mkdir(exist_ok=True)
     return root
-
-
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """解析 YAML frontmatter，返回 (meta, body)
-
-    自动清理重复的 frontmatter 块：
-    如果文件开头有多组 ---...--- 块，只取最后一组作为有效 frontmatter。
-    正文中的 ---（如 Markdown 水平线）不会被误判为 frontmatter。
-    """
-    # 统一换行符
-    text = text.replace("\r\n", "\n")
-
-    # 第一层：匹配文件开头的第一组 frontmatter --- ... ---
-    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
-    if not match:
-        return {}, text.strip()
-
-    fm_content = match.group(1).strip()
-    body = match.group(2).strip()
-
-    # 第二层：检查 body 是否以另一组 frontmatter 开头（重复 frontmatter）
-    # 如果是，丢弃第一组，用第二组
-    body_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", body, re.DOTALL)
-    if body_match:
-        fm_content = body_match.group(1).strip()
-        body = body_match.group(2).strip()
-
-    meta = {}
-    for line in fm_content.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        # 尝试解析列表
-        if value.startswith("[") and value.endswith("]"):
-            value = [v.strip() for v in value[1:-1].split(",") if v.strip()]
-        meta[key] = value
-    return meta, body
-
-
-def _build_frontmatter(meta: dict) -> str:
-    """将 meta dict 构建为 YAML frontmatter 字符串"""
-    lines = []
-    for key, value in meta.items():
-        if isinstance(value, list):
-            value = "[" + ", ".join(str(v) for v in value) + "]"
-        lines.append(f"{key}: {value}")
-    return "---\n" + "\n".join(lines) + "\n---\n"
 
 
 def _wiki_file(workspace: Path, category: str, name: str) -> Path:
@@ -81,98 +44,54 @@ def _ensure_category_dir(workspace: Path, category: str) -> Path:
 def new_wiki(workspace: Path, category: str, name: str, content: str = "",
              description: str = "", state: str = "", tags: list = None,
              updated: int | None = None) -> str:
-    """新建 wiki 文档
-
-    Args:
-        category: 类别名（如 "人物"）
-        name: 词条名（如 "张三"）
-        content: 正文内容（不含 frontmatter）
-        description: 描述（静态信息）
-        state: 状态（动态信息，可选）
-        tags: 标签列表
-        updated: 章节号（纯数字），None 时默认 0
-
-    Returns:
-        操作结果消息
-    """
-    cat_dir = _ensure_category_dir(workspace, category)
-    fp = cat_dir / f"{name}.md"
-    if fp.exists():
-        return f"错误：词条「{name}」已存在"
-
-    meta = {
-        "type": category,
-        "title": name,
-        "updated": updated if updated is not None else 0,
-    }
-    if tags:
-        meta["tags"] = tags
-    if description:
-        meta["description"] = description
-    if state:
-        meta["state"] = state
-
-    fp.write_text(_build_frontmatter(meta) + content, encoding="utf-8")
-    return f"已创建词条：{category}/{name}"
+    """新建 wiki 文档（薄代理层 → tools.editor.create_doc）"""
+    return _create_doc(
+        workspace, doc_type="wiki", name=name, content=content,
+        category=category, description=description, state=state,
+        tags=tags, updated=updated,
+    )
 
 
 def edit_wiki(workspace: Path, category: str, name: str,
               content: str = None, description: str = None,
               state: str = None, tags: list = None,
               updated: int | None = None) -> str:
-    """编辑 wiki 文档
+    """编辑 wiki 文档（薄代理层 → tools.editor.edit_doc）"""
+    return _edit_doc(
+        workspace, doc_type="wiki", name=name, content=content,
+        category=category, description=description, state=state,
+        tags=tags, updated=updated,
+    )
 
-    Args:
-        category: 类别名
-        name: 词条名
-        content: 新正文（None 表示不修改）
-        description: 新描述（None 表示不修改）
-        state: 新状态（None 表示不修改）
-        tags: 新标签（None 表示不修改）
-        updated: 章节号（纯数字），None 表示保持原值
 
-    Returns:
-        操作结果消息
+def edit_wiki_text(workspace: Path, category: str, name: str,
+                   old_text: str, new_text: str) -> str:
+    """在 wiki 正文中精确匹配一段文本并替换（手术刀式，不传整个body）
+
+    参考 learn-claude-code 的 edit_file 模式。只在 body 中替换第一次出现。
     """
-    fp = _wiki_file(workspace, category, name)
-    if not fp.exists():
-        return f"错误：词条「{name}」不存在"
+    return _edit_doc_text(
+        workspace, doc_type="wiki", name=name,
+        old_text=old_text, new_text=new_text, category=category,
+    )
 
-    meta, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
 
-    if updated is not None:
-        meta["updated"] = updated
-    if description is not None:
-        meta["description"] = description
-    if state is not None:
-        if state == "" and "state" in meta:
-            del meta["state"]
-        else:
-            meta["state"] = state
-    if tags is not None:
-        meta["tags"] = tags
-    if content is not None:
-        body = content
+def edit_wiki_wikilink(workspace: Path, category: str, name: str,
+                       old_target: str, new_target: str) -> str:
+    """替换 wiki 正文中所有指向 old_target 的 [[wikilink]] 为 new_target
 
-    fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-    return f"已更新词条：{category}/{name}"
+    参考 llm-wiki lint-fixes.ts 的 rewriteWikilinkTarget。
+    支持带别名的 wikilink，大小写不敏感匹配。
+    """
+    return _edit_doc_wikilink(
+        workspace, doc_type="wiki", name=name,
+        old_target=old_target, new_target=new_target, category=category,
+    )
 
 
 def delete_wiki(workspace: Path, category: str, name: str) -> str:
-    """删除 wiki 文档
-
-    Args:
-        category: 类别名
-        name: 词条名
-
-    Returns:
-        操作结果消息
-    """
-    fp = _wiki_file(workspace, category, name)
-    if not fp.exists():
-        return f"错误：词条「{name}」不存在"
-    fp.unlink()
-    return f"已删除词条：{category}/{name}"
+    """删除 wiki 文档（薄代理层 → tools.editor.delete_doc）"""
+    return _delete_doc(workspace, doc_type="wiki", name=name, category=category)
 
 
 def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True) -> str:

@@ -82,7 +82,6 @@ class MuseAgent(BaseAgent):
         self.todo = TodoManager()
         self.review_session = None
         self._last_subagent_output = ""
-        self._last_material_raw = None
         self._stop_agent_loop = False
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
@@ -131,23 +130,7 @@ class MuseAgent(BaseAgent):
                     },
                 },
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_chapters",
-                    "description": "读取指定章节的正文。支持范围表达式如 \"1-3,5,7-9\"。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "chapters": {
-                                "type": "string",
-                                "description": "章节范围，如 \"1-3,5,7-9\"",
-                            }
-                        },
-                        "required": ["chapters"],
-                    },
-                },
-            },
+
             {
                 "type": "function",
                 "function": {
@@ -384,7 +367,7 @@ class MuseAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "call_knowledge_workflow",
-                    "description": "提交先验知识编写任务。根据词条名列表自动查找 Wiki 内容并生成先验知识文档。如有名称不存在或数量超限则拒绝调用并返回错误提示。",
+                    "description": "提交先验知识编写任务。根据词条名列表自动查找 Wiki 内容汇编参考材料，然后调用 LLM 压缩重写为结构化的先验知识文档。如有名称不存在或数量超限则拒绝调用并返回错误提示。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -412,7 +395,7 @@ class MuseAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "call_plot_workflow",
-                    "description": "提交前情提要编写任务。根据剧情卡片名和章节号自动查找内容并生成前情提要。如有名称不存在或数量超限则拒绝调用并返回错误提示。",
+                    "description": "提交前情提要编写任务。根据剧情卡片名自动查找内容并生成前情提要。如有名称不存在或数量超限则拒绝调用并返回错误提示。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -426,13 +409,8 @@ class MuseAgent(BaseAgent):
                                 "items": {"type": "string"},
                                 "description": "需展示完整内容（含正文）的剧情卡片名，至多12个",
                             },
-                            "chapters": {
-                                "type": "array",
-                                "items": {"type": "integer"},
-                                "description": "章节编号",
-                            },
                         },
-                        "required": ["plot_only_yaml", "plot_full", "chapters"],
+                        "required": ["plot_only_yaml", "plot_full"],
                     },
                 },
             },
@@ -462,10 +440,9 @@ class MuseAgent(BaseAgent):
                 # 校验失败，返回错误信息让 LLM 修正后重试，不终止循环
                 return result
             self._last_subagent_output = result
-            self._last_material_raw = getattr(wf, "_last_material", None)
             self.cli.print_output(result)
             self._stop_agent_loop = True
-            return "(材料清单已生成，请确认)"
+            return "(先验知识已生成)"
 
         if name == "call_plot_workflow":
             from tools.plot_workflow import PlotWorkflow
@@ -474,10 +451,9 @@ class MuseAgent(BaseAgent):
             if result.startswith("错误"):
                 return result
             self._last_subagent_output = result
-            self._last_material_raw = getattr(wf, "_last_material", None)
             self.cli.print_output(result)
             self._stop_agent_loop = True
-            return "(材料清单已生成，请确认)"
+            return "(前情提要已生成)"
 
         # 通用工具路由
         from tools import chapter as chapter_tools
@@ -491,7 +467,7 @@ class MuseAgent(BaseAgent):
 
         dispatch = {
             "agent_output": lambda **kw: "(已输出)",
-            "read_chapters": lambda **kw: chapter_tools.read_chapters(self.workspace, **kw),
+
             "keywords_stat": lambda **kw: chapter_tools.keywords_stat(self.workspace, **kw),
             "chapter_list": lambda **kw: chapter_tools.chapter_list(self.workspace),
             "category_list": lambda **kw: category_tools.category_list(self.workspace),
@@ -544,8 +520,6 @@ class MuseWorkflow:
         self.plot_summary: str = ""
         self.current_draft: str = ""
         self.issues: list = []  # 携带到下一轮的 issue 列表
-        self._knowledge_material = None
-        self._plot_material = None
         self._token_stats = {}  # step_name -> {input, output, total}
         self._token_total = {"input": 0, "output": 0, "total": 0}
 
@@ -670,18 +644,22 @@ class MuseWorkflow:
     # ---- 步骤②：知识准备 ----
 
     def _step_knowledge_prep(self):
-        """② 知识准备 — 先验知识 + 前情提要（材料清单模式）"""
+        """② 知识准备
+
+        顺序：先生成先验知识 → 用户确认 → 再生成前情提要 → 用户确认
+        """
         print("=" * 40)
         print("第二步：知识准备")
 
         # ---- 先验知识 ----
         while True:
-            print("正在生成先验知识材料清单...")
+            print("正在生成先验知识...")
             self.prior_knowledge = self._run_researcher()
             self.io.save_prior_knowledge(self.prior_knowledge)
-            print(f"\n先验知识材料清单已生成，请查看：")
+            print("\n" + "=" * 40)
+            print("先验知识：")
             print(self.prior_knowledge)
-            print("\n确认清单通过？[y/n]")
+            print("\n确认知识准备通过？[y/n]")
             try:
                 choice = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -689,22 +667,24 @@ class MuseWorkflow:
             if choice == "y":
                 break
             elif choice == "n":
-                print("请输入修改建议（增删条目）：")
+                print("请输入打回理由：")
                 try:
-                    suggestion = input().strip()
+                    reason = input().strip()
                 except (EOFError, KeyboardInterrupt):
-                    suggestion = ""
-                self._revise_material(suggestion, "knowledge")
-                continue
+                    reason = ""
+                print("正在根据反馈增量修正...")
+                self._revise_knowledge(reason)
 
         # ---- 前情提要 ----
         while True:
-            print("正在生成前情提要材料清单...")
+            print("正在生成前情提要...")
             self.plot_summary = self._run_plot_summary()
             self.io.save_plot_summary(self.plot_summary)
-            print(f"\n前情提要材料清单已生成，请查看：")
+            print("\n" + "=" * 40)
+            print("前情提要：")
+            self.plot_summary = textwrap.dedent(self.plot_summary)
             print(self.plot_summary)
-            print("\n确认清单通过？[y/n]")
+            print("\n确认前情提要通过？[y/n]")
             try:
                 choice = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -712,23 +692,23 @@ class MuseWorkflow:
             if choice == "y":
                 break
             elif choice == "n":
-                print("请输入修改建议（增删条目）：")
+                print("请输入打回理由：")
                 try:
-                    suggestion = input().strip()
+                    reason = input().strip()
                 except (EOFError, KeyboardInterrupt):
-                    suggestion = ""
-                self._revise_material(suggestion, "plot")
-                continue
+                    reason = ""
+                print("正在根据反馈增量修正...")
+                self._revise_knowledge(reason)
 
     @staticmethod
     def _check_word_count(text: str) -> list[dict]:
         """自动字数检查：统计正文中文字数，返回审阅问题列表
 
-        阈值：
+        阈值（对齐 skill 要求 3000～4000 字）：
           <2200 或 >5000 → level 0（严重）
-          <2500 或 >4500 → level 1（重要）
-          <2800 或 >4000 → level 2（一般）
-          <3000 或 >3800 → level 3（可优化）
+          <2600 或 >4500 → level 1（重要）
+          <2800 或 >4200 → level 2（一般）
+          <3000 或 >4000 → level 3（可优化）
         """
         cn_count = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
 
@@ -737,41 +717,41 @@ class MuseWorkflow:
             if cn_count < 2200:
                 quote = f"正文共 {cn_count} 字（不足 2200 字）"
                 desc = f"正文字数不足 2200 字（当前 {cn_count} 字），篇幅过短，内容展开不足。"
-                sug = f"建议扩充至 2200 字以上（需补充约 {2200 - cn_count} 字），增加细节描写或情节铺垫。"
+                sug = f"建议扩充至 3000 字以上（需补充约 {3000 - cn_count} 字），增加细节描写或情节铺垫。"
             else:
                 quote = f"正文共 {cn_count} 字（超过 5000 字）"
                 desc = f"正文字数超过 5000 字（当前 {cn_count} 字），篇幅过长，可能拖慢叙事节奏。"
-                sug = f"建议精简至 5000 字以内（需精简约 {cn_count - 5000} 字），删减冗余描写或拆分段落。"
-        elif cn_count < 2500 or cn_count > 4500:
+                sug = f"建议精简至 4000 字以内（需精简约 {cn_count - 4000} 字），删减冗余描写或拆分段落。"
+        elif cn_count < 2600 or cn_count > 4500:
             level = 1
-            if cn_count < 2500:
-                quote = f"正文共 {cn_count} 字（不足 2500 字）"
-                desc = f"正文字数不足 2500 字（当前 {cn_count} 字），篇幅偏短。"
-                sug = f"建议适当扩充至 2500 字以上，使情节更加丰满。"
+            if cn_count < 2600:
+                quote = f"正文共 {cn_count} 字（不足 2600 字）"
+                desc = f"正文字数不足 2600 字（当前 {cn_count} 字），篇幅偏短。"
+                sug = f"建议适当扩充至 3000 字以上，使情节更加丰满。"
             else:
                 quote = f"正文共 {cn_count} 字（超过 4500 字）"
                 desc = f"正文字数超过 4500 字（当前 {cn_count} 字），篇幅偏长。"
-                sug = f"建议适当精简至 4500 字以内，避免节奏拖沓。"
-        elif cn_count < 2800 or cn_count > 4000:
+                sug = f"建议适当精简至 4000 字以内，避免节奏拖沓。"
+        elif cn_count < 2800 or cn_count > 4200:
             level = 2
             if cn_count < 2800:
                 quote = f"正文共 {cn_count} 字（不足 2800 字）"
                 desc = f"正文字数不足 2800 字（当前 {cn_count} 字），篇幅略短。"
-                sug = f"可考虑补充部分细节，使内容更加充实。"
+                sug = f"可考虑补充部分细节，使内容更加充实，目标 3000 字以上。"
             else:
-                quote = f"正文共 {cn_count} 字（超过 4000 字）"
-                desc = f"正文字数超过 4000 字（当前 {cn_count} 字），篇幅略长。"
-                sug = f"可考虑适当精简，保持节奏紧凑。"
-        elif cn_count < 3000 or cn_count > 3800:
+                quote = f"正文共 {cn_count} 字（超过 4200 字）"
+                desc = f"正文字数超过 4200 字（当前 {cn_count} 字），篇幅略长。"
+                sug = f"可考虑适当精简至 4000 字以内，保持节奏紧凑。"
+        elif cn_count < 3000 or cn_count > 4000:
             level = 3
             if cn_count < 3000:
                 quote = f"正文共 {cn_count} 字（不足 3000 字）"
                 desc = f"正文字数不足 3000 字（当前 {cn_count} 字），篇幅稍短。"
-                sug = f"若感觉内容偏少，可适当增加描写。"
+                sug = f"若感觉内容偏少，可适当增加描写，最佳 3500 字左右。"
             else:
-                quote = f"正文共 {cn_count} 字（超过 3800 字）"
-                desc = f"正文字数超过 3800 字（当前 {cn_count} 字），篇幅稍长。"
-                sug = f"若感觉内容偏多，可适当精简。"
+                quote = f"正文共 {cn_count} 字（超过 4000 字）"
+                desc = f"正文字数超过 4000 字（当前 {cn_count} 字），篇幅稍长。"
+                sug = f"若感觉内容偏多，可适当精简，最佳 3500 字左右。"
         else:
             return []  # 字数在合理范围内，不生成问题
 
@@ -790,8 +770,6 @@ class MuseWorkflow:
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("knowledge_prep", agent)
         self._save_token_stats()
-        # 捕获结构化材料
-        self._knowledge_material = getattr(agent, "_last_material_raw", None)
         # 优先取 workflow 输出（call_knowledge_workflow 存入了 _last_subagent_output）
         if agent._last_subagent_output:
             return agent._last_subagent_output
@@ -805,31 +783,34 @@ class MuseWorkflow:
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("plot_summary", agent)
         self._save_token_stats()
-        # 捕获结构化材料
-        self._plot_material = getattr(agent, "_last_material_raw", None)
         # 优先取 workflow 输出
         if agent._last_subagent_output:
             return agent._last_subagent_output
         return self._extract_last_text(messages)
 
-    def _revise_material(self, suggestion: str, material_type: str):
-        """根据用户建议修改材料清单"""
-        agent = self._create_agent([])
-        msg = (
-            f"用户对当前{'先验知识' if material_type == 'knowledge' else '前情提要'}的材料清单提出了修改建议：\n"
-            f"{suggestion}\n\n"
-            f"请根据建议重新调用相应的 workflow 工具调整材料清单。"
+    def _revise_knowledge(self, reason: str):
+        """增量修正知识准备"""
+        context = (
+            f"## 当前先验知识\n{self.prior_knowledge}\n\n"
+            f"## 当前前情提要\n{self.plot_summary}\n\n"
+            f"## 打回理由\n{reason}"
         )
-        messages = [{"role": "user", "content": msg}]
+        agent = self._create_agent(["muse_knowledge.skill.md", "muse_plot.skill.md"])
+        messages = [{"role": "user", "content": context + "\n\n请根据打回理由修正上述知识文档。"}]
         messages = agent_loop(agent, messages)
         self.io.save_session_log(messages)
-        if agent._last_subagent_output:
-            if material_type == "knowledge":
-                self.prior_knowledge = agent._last_subagent_output
-                self.io.save_prior_knowledge(self.prior_knowledge)
-            else:
-                self.plot_summary = agent._last_subagent_output
-                self.io.save_plot_summary(self.plot_summary)
+        self._update_token_stats_from_agent("knowledge_revise", agent)
+        self._save_token_stats()
+        result = self._extract_last_text(messages)
+        # 简单分成先验知识和前情提要（按段落分割）
+        parts = result.split("\n## ")
+        if len(parts) >= 2:
+            self.prior_knowledge = parts[0]
+            self.plot_summary = "\n## ".join(parts[1:])
+        else:
+            self.prior_knowledge = result
+        self.io.save_prior_knowledge(self.prior_knowledge)
+        self.io.save_plot_summary(self.plot_summary)
 
     # ---- 步骤③→④：写作与审阅循环 ----
 
@@ -851,13 +832,12 @@ class MuseWorkflow:
 
             # 自动字数检查：将字数问题注入审阅会话
             word_count_issues = self._check_word_count(polished)
+            cn_count = sum(1 for ch in polished if '\u4e00' <= ch <= '\u9fff')
             for issue in word_count_issues:
                 review_session.report_issue(**issue)
-            if word_count_issues:
-                level_map = {0: "严重", 1: "重要", 2: "一般", 3: "可优化"}
-                lv = level_map.get(word_count_issues[0]["level"], "用户")
-                cn_count = sum(1 for ch in polished if '\u4e00' <= ch <= '\u9fff')
-                print(f"  [自动字数检查] {lv}：正文共 {cn_count} 字")
+            level_map = {0: "严重", 1: "重要", 2: "一般", 3: "可优化"}
+            lv = level_map.get(word_count_issues[0]["level"], "正常") if word_count_issues else "正常"
+            print(f"  [自动字数检查] {lv}：正文共 {cn_count} 字")
 
             review_result = self._run_reviewer(polished, review_session)
 
@@ -942,14 +922,16 @@ class MuseWorkflow:
             cli=None,
         )
 
-        knowledge_material = self._knowledge_material
-        plot_material = self._plot_material
+        last_chapter = self._get_last_chapter_full()
+
+        # 如果是重写轮次（round > 1），传入上一轮草稿
         previous_draft = self.current_draft if self.io.round > 1 else ""
 
         result = wf.run(
             outline=self.outline,
-            knowledge_material=knowledge_material,
-            plot_material=plot_material,
+            prior_knowledge=self.prior_knowledge,
+            plot_summary=self.plot_summary,
+            last_chapter=last_chapter,
             review_issues=self.issues if self.issues else None,
             previous_draft=previous_draft,
         )
@@ -968,6 +950,11 @@ class MuseWorkflow:
         agent = self._create_restricted_agent(
             skill_names=["muse_reviewer.skill.md"],
             allowed_tools=["agent_output", "report_issue", "review_done"],
+        )
+        # 覆盖角色定义：审阅Agent绝不能去写作，否则会跑去写下一章
+        agent.system_prompt = agent.system_prompt.replace(
+            "你是妙笔（Muse），一个专业的长篇小说写作辅助助手。",
+            "你是妙笔审阅官（Muse Reviewer），你的唯一职责是审阅正文并报告问题。你绝不创作、绝不续写。",
         )
         agent.review_session = review_session
         last_chapter = self._get_last_chapter_full()
@@ -1026,14 +1013,20 @@ class MuseWorkflow:
     def _create_restricted_agent(self, skill_names: list[str], allowed_tools: list[str]) -> MuseAgent:
         """创建工具受限的妙笔 Agent（写作/审阅阶段使用，防止 LLM 回去翻 wiki/章节）"""
         agent = self._create_agent(skill_names)
+        # 先保存旧工具指南文本（在过滤 tool_defs 之前）
+        old_tool_guide_text = "\n\n" + agent._build_tool_guide()
         # 只保留 allowed_tools 中的工具
         agent.tool_defs = [
             t for t in agent.tool_defs
             if t["function"]["name"] in allowed_tools
         ]
         # 重写 system prompt 末尾的工具指南，与实际 tool_defs 一致
-        prompt_body = agent.system_prompt.rsplit("\n\n# 可用工具", 1)[0]
-        agent.system_prompt = prompt_body + "\n\n" + agent._build_tool_guide()
+        # 注意：不能简单 rsplit，因为 skill 文本在 tool guide 之后追加
+        new_tool_guide_text = "\n\n" + agent._build_tool_guide()
+        if old_tool_guide_text in agent.system_prompt:
+            agent.system_prompt = agent.system_prompt.replace(old_tool_guide_text, new_tool_guide_text, 1)
+        else:
+            agent.system_prompt = agent.system_prompt.rstrip() + new_tool_guide_text
         return agent
 
     def _extract_last_text(self, messages: list) -> str:

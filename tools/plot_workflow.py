@@ -1,4 +1,9 @@
-"""plot_workflow — 前情提要 Workflow（材料清单模式）"""
+"""plot_workflow — 前情提要 Workflow（纯 chat，无 tools）
+
+入参由 MuseAgent 通过 call_plot_workflow 工具提交，
+Workflow 层负责参数校验、内容解析、纯 chat 调用 LLM 压缩重写。
+注意：不读取章节正文，仅依赖剧情卡片数据。
+"""
 
 import re
 from pathlib import Path
@@ -7,7 +12,7 @@ from api import LLMClient
 
 
 class PlotWorkflow:
-    """前情提要 Workflow — 参数校验 + 内容解析 + 材料清单"""
+    """前情提要 Workflow — 参数校验 + 内容解析 + 纯 chat 调用"""
 
     def __init__(self, llm: LLMClient, workspace: Path, cli=None):
         self.llm = llm
@@ -18,41 +23,6 @@ class PlotWorkflow:
     def _log(self, tag: str, text: str):
         if self.cli and self.cli.logger:
             self.cli.logger.write(tag, text)
-
-    def _append_recent_chapters(self, chapters: list[int]) -> list[int]:
-        """自动追加最近 3 章"""
-        from tools.chapter import chapter_list
-        raw = chapter_list(self.workspace)
-        max_num = 0
-        for line in raw.splitlines():
-            m = re.match(r"第(\d+)章", line)
-            if m:
-                num = int(m.group(1))
-                if num > max_num:
-                    max_num = num
-        recent = list(range(max(1, max_num - 2), max_num + 1))
-        all_chs = list(set(chapters + recent))
-        return sorted(all_chs)
-
-    def _build_material_list(self, only_contents, full_contents, chapter_contents):
-        return {
-            "plots": only_contents + full_contents,
-            "chapters": chapter_contents,
-        }
-
-    def _material_to_review_text(self, material: dict) -> str:
-        lines = ["📋 前情提要材料清单", ""]
-        if material["plots"]:
-            lines.append("【剧情卡片】")
-            for p in material["plots"]:
-                name = p.split("\n")[0].replace("## ", "").strip()
-                lines.append(f"- {name}")
-            lines.append("")
-        if material["chapters"]:
-            lines.append(f"【章节参考】（最近 3 章：{len(material['chapters'])} 章，后端自动注入）")
-            lines.append("")
-        lines.append("请确认以上清单：输入 y 确认，输入 n 修改。")
-        return "\n".join(lines)
 
     def _resolve_plot_names(self, names: list[str], full: bool = False) -> tuple[list[str], list[str]]:
         """解析剧情卡片名称列表，返回 (成功内容列表, 失败名称列表)"""
@@ -83,39 +53,8 @@ class PlotWorkflow:
                 successes.append(f"## {name}\n{content}")
         return successes, failures
 
-    def _resolve_chapters(self, chapter_nums: list[int]) -> tuple[list[str], list[int]]:
-        """解析章节号列表，返回 (成功内容列表, 失败章节号列表)"""
-        from tools.chapter import chapter_list, read_chapters
-
-        raw = chapter_list(self.workspace)
-        if raw in ("（尚无章节）", ""):
-            return [], chapter_nums
-
-        # 获取最大章节号
-        max_num = 0
-        for line in raw.splitlines():
-            m = re.match(r"第(\d+)章", line)
-            if m:
-                num = int(m.group(1))
-                if num > max_num:
-                    max_num = num
-
-        successes = []
-        failures = []
-        for num in chapter_nums:
-            if num < 1 or num > max_num:
-                failures.append(num)
-                continue
-            content = read_chapters(self.workspace, str(num))
-            if isinstance(content, str) and content.startswith("错误"):
-                failures.append(num)
-            else:
-                successes.append(f"## 第{num}章\n{content}")
-        return successes, failures
-
-    def validate_and_run(self, plot_only_yaml: list[str], plot_full: list[str],
-                         chapters: list[int]) -> str:
-        """校验参数并执行前情提要生成"""
+    def validate_and_run(self, plot_only_yaml: list[str], plot_full: list[str]) -> str:
+        """校验参数并执行前情提要生成（不读章节正文）"""
         # 1. 去重检查
         set_only = set(plot_only_yaml)
         set_full = set(plot_full)
@@ -136,23 +75,47 @@ class PlotWorkflow:
         if all_plot_fail:
             return f"错误：以下剧情卡片未找到，请检查并重试：{'、'.join(sorted(all_plot_fail))}"
 
-        # 4. 存在检查（chapters）
-        chapter_contents, chapter_fail = self._resolve_chapters(chapters)
-        if chapter_fail:
-            fail_str = "、".join(str(n) for n in sorted(chapter_fail))
-            return f"错误：以下章节不存在，请检查并重试：{fail_str}"
+        # 4. 拼接消息
+        sections = ["# 参考材料"]
+        if only_contents:
+            sections.append("## 剧情卡片（概要）\n" + "\n\n".join(only_contents))
+        if full_contents:
+            sections.append("## 剧情卡片（完整）\n" + "\n\n".join(full_contents))
+        sections.append(
+            "\n# 任务\n"
+            "请根据以上参考材料，按时间顺序梳理一份完整的前情提要。\n"
+            "要求：\n"
+            "- 按时间顺序梳理\n"
+            "- 与大纲相关性强的剧情优先\n"
+            "- 不超过 10000 字\n"
+            "- 不要出现'根据大纲''基于以上材料'等字眼\n"
+            "- 输出格式如下：\n"
+            "\n"
+            "# 当前事件\n"
+            "# 背景事件"
+        )
 
-        # 5. 自动注入最近 3 章
-        chapters = self._append_recent_chapters(chapters)
-        # Re-resolve chapters with the expanded list
-        chapter_contents, chapter_fail = self._resolve_chapters(chapters)
-        if chapter_fail:
-            fail_str = "、".join(str(n) for n in sorted(chapter_fail))
-            return f"错误：以下章节不存在，请检查并重试：{fail_str}"
+        user_content = "\n\n".join(sections)
 
-        # 6. 构建材料清单
-        material = self._build_material_list(only_contents, full_contents, chapter_contents)
-        self._last_material = material
+        system_prompt = (
+            "你是前情提要编写助手。你的任务是根据提供的剧情卡片，"
+            "按时间顺序梳理一份完整的前情提要，供小说写作参考。"
+            "注意：你不知道大纲内容，只基于提供的材料进行编写。"
+        )
 
-        # 7. 返回清单文本（不再调 LLM）
-        return self._material_to_review_text(material)
+        self._log("PLOT_WF_START", f"only_yaml={len(plot_only_yaml)}, full={len(plot_full)}")
+
+        # 5. 纯 chat 调用
+        messages = [{"role": "user", "content": user_content}]
+        response = self.llm.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            tools=None,
+        )
+
+        if "usage" in response:
+            self._last_usage = response["usage"]
+
+        result = response.get("content", "").strip()
+        self._log("PLOT_WF_END", result[:200])
+        return result

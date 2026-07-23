@@ -1,6 +1,20 @@
-"""规则文档工具：列表和读取"""
+"""规则文档工具：列表和读取
+
+兼容性：new_rule / edit_rule / delete_rule 保留为向后兼容的薄代理层，
+核心实现在 tools/editor.py（统一编辑器，支持 wiki / plot / rule 三种类型）。
+"""
 
 from pathlib import Path
+
+from tools.editor import (
+    parse_frontmatter as _parse_frontmatter,
+    build_frontmatter as _build_frontmatter,
+    create_doc as _create_doc,
+    edit_doc as _edit_doc,
+    delete_doc as _delete_doc,
+    edit_doc_text as _edit_doc_text,
+    edit_doc_wikilink as _edit_doc_wikilink,
+)
 
 
 RULES_DIR = "rules"
@@ -64,68 +78,46 @@ def read_rule(workspace: Path, name: str, yaml_only: bool = True) -> str:
     if not yaml_only:
         return content
 
-    from tools.wiki import _parse_frontmatter, _build_frontmatter
-    meta, _ = _parse_frontmatter(content)
+    from tools.editor import parse_frontmatter, build_frontmatter
+    meta, _ = parse_frontmatter(content)
     if meta:
-        return _build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
+        return build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
     return content
 
 
 def new_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
-    """新建规则文档
-
-    Args:
-        name: 规则名
-        content: 文档全文
-        updated: 章节号（纯数字），None 时默认 0
-
-    Returns:
-        操作结果消息
-    """
-    root = _ensure_rules_dir(workspace)
-    fp = root / f"{name}.md"
-    if fp.exists():
-        return f"错误：规则文档「{name}」已存在"
-
-    updated_val = updated if updated is not None else 0
-    # 确保有 frontmatter
-    if not content.startswith("---"):
-        content = f"---\ntitle: {name}\nupdated: {updated_val}\n---\n\n{content}"
-
-    fp.write_text(content, encoding="utf-8")
-    return f"已创建规则文档：{name}"
+    """新建规则文档（薄代理层 → tools.editor.create_doc）"""
+    return _create_doc(
+        workspace, doc_type="rule", name=name, content=content, updated=updated,
+    )
 
 
 def edit_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
-    """编辑规则文档
+    """编辑规则文档（薄代理层 → tools.editor.edit_doc）"""
+    return _edit_doc(
+        workspace, doc_type="rule", name=name, content=content, updated=updated,
+    )
 
-    Args:
-        name: 规则名
-        content: 新全文
-        updated: 章节号（纯数字），不影响写入（由 content 中的 frontmatter 决定）
 
-    Returns:
-        操作结果消息
-    """
-    fp = _rules_root(workspace) / f"{name}.md"
-    if not fp.exists():
-        return f"错误：规则文档「{name}」不存在"
+def edit_rule_text(workspace: Path, name: str,
+                   old_text: str, new_text: str) -> str:
+    """在规则文档正文中精确匹配一段文本并替换（手术刀式）"""
+    return _edit_doc_text(
+        workspace, doc_type="rule", name=name,
+        old_text=old_text, new_text=new_text,
+    )
 
-    fp.write_text(content, encoding="utf-8")
-    return f"已更新规则文档：{name}"
+
+def edit_rule_wikilink(workspace: Path, name: str,
+                       old_target: str, new_target: str) -> str:
+    """替换规则文档正文中所有指向 old_target 的 [[wikilink]]"""
+    return _edit_doc_wikilink(
+        workspace, doc_type="rule", name=name,
+        old_target=old_target, new_target=new_target,
+    )
 
 
 def delete_rule(workspace: Path, name: str) -> str:
-    """删除规则文档
-
-    Args:
-        name: 规则名
-
-    Returns:
-        操作结果消息
-    """
-    fp = _rules_root(workspace) / f"{name}.md"
-    if not fp.exists():
-        return f"错误：规则文档「{name}」不存在"
-    fp.unlink()
+    """删除规则文档（薄代理层 → tools.editor.delete_doc）"""
+    return _delete_doc(workspace, doc_type="rule", name=name)
     return f"已删除规则文档：{name}"

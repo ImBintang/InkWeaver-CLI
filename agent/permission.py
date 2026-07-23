@@ -20,6 +20,9 @@ WRITE_TOOLS = {
     "edit_index",
     "new_plot", "edit_plot", "end_plot", "delete_plot",
     "plot_task",
+    # 统一文档管理工具
+    "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
+    "delete_doc",
 }
 
 # 模式切换工具（需用户确认后才放行）

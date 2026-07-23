@@ -16,6 +16,7 @@ from tools import category as category_tools
 from tools import memory as memory_tools
 from tools import diff as diff_tools
 from tools import plot as plot_tools
+from tools import editor as editor_tools
 
 
 TOOL_RESULTS_DIR = Path(".task_outputs") / "tool-results"
@@ -388,6 +389,101 @@ class JianzhiAgent(BaseAgent):
                     },
                 },
             },
+            # 统一文档管理工具（通过 doc_type 参数指定类型：wiki / plot / rule）
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_doc",
+                    "description": "【统一】新建文档。通过 doc_type 指定类型：\"wiki\"（需 category）/ \"plot\"（需 chapters）/ \"rule\"。支持 frontmatter 字段（description/state/tags）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
+                            "name": {"type": "string", "description": "文档名"},
+                            "content": {"type": "string", "description": "正文内容"},
+                            "category": {"type": "string", "description": "wiki 类别（仅 doc_type=wiki 时需要）"},
+                            "description": {"type": "string", "description": "描述（wiki/plot）"},
+                            "state": {"type": "string", "description": "状态（wiki/plot 动态信息）"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
+                            "chapters": {"type": "string", "description": "覆盖章节（仅 doc_type=plot 时需要），如 \"1-5,7-10\""},
+                        },
+                        "required": ["doc_type", "name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_doc",
+                    "description": "【统一】编辑文档字段（frontmatter 级）。通过 doc_type 指定类型。所有参数可选，None 表示不修改。如需修改正文中的少量文本，优先使用 edit_doc_text（更省 token）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
+                            "name": {"type": "string", "description": "文档名"},
+                            "content": {"type": "string", "description": "新正文（None 表示不修改）"},
+                            "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                            "description": {"type": "string", "description": "新描述"},
+                            "state": {"type": "string", "description": "新状态（空字符串删除此字段）"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
+                            "chapters": {"type": "string", "description": "新章节范围（仅 plot）"},
+                        },
+                        "required": ["doc_type", "name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_doc_text",
+                    "description": "【统一·手术刀式】在正文中精确匹配一段文本并替换（不涉及 frontmatter）。比 edit_doc(content=新全文) 更省 token，只需提供 \"把哪句话改成什么\"。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
+                            "name": {"type": "string", "description": "文档名"},
+                            "old_text": {"type": "string", "description": "要替换的原文（必须精确匹配）"},
+                            "new_text": {"type": "string", "description": "替换后的文本"},
+                            "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                        },
+                        "required": ["doc_type", "name", "old_text", "new_text"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_doc_wikilink",
+                    "description": "【统一·wikilink 定向替换】替换正文中所有指向 old_target 的 [[wikilink]] 为 new_target。支持带别名的 wikilink（[[旧名|别名]] → [[新名|别名]]）。比手动 edit_doc 省大量 token。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
+                            "name": {"type": "string", "description": "文档名"},
+                            "old_target": {"type": "string", "description": "旧 wikilink 目标名"},
+                            "new_target": {"type": "string", "description": "新 wikilink 目标名"},
+                            "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                        },
+                        "required": ["doc_type", "name", "old_target", "new_target"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_doc",
+                    "description": "【统一】删除文档。通过 doc_type 指定类型（wiki / plot / rule）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
+                            "name": {"type": "string", "description": "文档名"},
+                            "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                        },
+                        "required": ["doc_type", "name"],
+                    },
+                },
+            },
         ]
 
         # 妙笔审阅工具（只在 review_session 激活时可用）
@@ -450,9 +546,14 @@ class JianzhiAgent(BaseAgent):
     def dispatch_tool(self, name: str, args: dict) -> str:
         """工具分发路由"""
         # 统一权限检查
-        if name in ("handoff_knowledge", "new_wiki", "edit_wiki", "delete_wiki",
-                     "new_category", "edit_category", "new_rule", "edit_rule",
-                     "delete_rule", "knowledge_task", "edit_index"):
+        write_tools = {
+            "handoff_knowledge", "new_wiki", "edit_wiki", "delete_wiki",
+            "new_category", "edit_category", "new_rule", "edit_rule",
+            "delete_rule", "knowledge_task", "edit_index",
+            "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
+            "delete_doc",
+        }
+        if name in write_tools:
             result = self.permission.check(name)
             if result is not None:
                 return result
@@ -495,6 +596,12 @@ class JianzhiAgent(BaseAgent):
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),
             "doc_diff": lambda **kw: diff_tools.doc_diff(self.workspace),
             "context_query": lambda **kw: self.context.query_context(**kw),
+            # 统一文档管理工具
+            "create_doc": lambda **kw: editor_tools.create_doc(self.workspace, **kw),
+            "edit_doc": lambda **kw: editor_tools.edit_doc(self.workspace, **kw),
+            "edit_doc_text": lambda **kw: editor_tools.edit_doc_text(self.workspace, **kw),
+            "edit_doc_wikilink": lambda **kw: editor_tools.edit_doc_wikilink(self.workspace, **kw),
+            "delete_doc": lambda **kw: editor_tools.delete_doc(self.workspace, **kw),
         }
 
         handler = dispatch.get(name)

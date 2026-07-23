@@ -2,9 +2,10 @@
 
 
 def build_shared_subagent_tools() -> list:
-    """构建 subagent 共享的 10 个工具定义
+    """构建 subagent 共享的工具定义
     
     包括：read_chapters / wiki_list / read_wiki / new_wiki / edit_wiki /
+          edit_doc_text / edit_doc_wikilink /
           read_memory / check_wiki / read_index / query_relations / agent_output
     """
     return [
@@ -87,6 +88,43 @@ def build_shared_subagent_tools() -> list:
                         "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签（None 表示不修改）"},
                     },
                     "required": ["category", "name"],
+                },
+            },
+        },
+        # 统一手术刀式编辑工具
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_doc_text",
+                "description": "【统一】在正文中精确匹配一段文本并替换。比 edit_wiki(content=新全文) 省 token，只需提供 old_text → new_text。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_type": {"type": "string", "enum": ["wiki", "plot"], "description": "文档类型"},
+                        "name": {"type": "string", "description": "文档名"},
+                        "old_text": {"type": "string", "description": "要替换的原文"},
+                        "new_text": {"type": "string", "description": "替换后的文本"},
+                        "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                    },
+                    "required": ["doc_type", "name", "old_text", "new_text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_doc_wikilink",
+                "description": "【统一】替换正文中所有指向 old_target 的 [[wikilink]] 为 new_target。支持别名。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_type": {"type": "string", "enum": ["wiki", "plot"], "description": "文档类型"},
+                        "name": {"type": "string", "description": "文档名"},
+                        "old_target": {"type": "string", "description": "旧 wikilink 目标"},
+                        "new_target": {"type": "string", "description": "新 wikilink 目标"},
+                        "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                    },
+                    "required": ["doc_type", "name", "old_target", "new_target"],
                 },
             },
         },

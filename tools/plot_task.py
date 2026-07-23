@@ -168,7 +168,10 @@ class PlotTaskSubagent:
             f"1. 使用 read_chapters 阅读本次提取范围的章节正文\n"
             f"2. 使用 read_plot 读取涉及到的未结束卡片当前内容\n"
             f"3. 分析并拟定操作\n"
-            f"4. 逐个执行操作（new_plot / edit_plot / end_plot）\n"
+            f"4. 逐个执行操作。**优先使用手术刀式工具**：\n"
+            f"   - 改正文中一句话 → `edit_doc_text`\n"
+            f"   - 改 [[wikilink]] 指向 → `edit_doc_wikilink`\n"
+            f"   - 大幅重写或新建 → `new_plot` / `edit_plot`\n"
             f"5. 所有操作完成后，调用 agent_output 输出操作摘要\n"
             f"{review_section}"
         )
@@ -177,10 +180,12 @@ class PlotTaskSubagent:
         """工具分发路由"""
         from tools.chapter import read_chapters
         from tools.wiki import wiki_list, read_wiki, new_wiki, edit_wiki, check_wiki
+        from tools.wiki import edit_wiki_text, edit_wiki_wikilink
         from tools.memory import read_memory
         from tools.category import read_index
         from tools.relation import query_relations
         from tools.plot import read_plot, plot_list, new_plot, edit_plot, end_plot
+        from tools.plot import edit_plot_text, edit_plot_wikilink
 
         if name == "agent_output":
             text = args.get("text", "")
@@ -197,6 +202,8 @@ class PlotTaskSubagent:
             "edit_wiki": lambda **kw: edit_wiki(
                 self.workspace, **{**kw, "updated": kw.get("updated") or self._get_max_chapter()}
             ),
+            "edit_wiki_text": lambda **kw: edit_wiki_text(self.workspace, **kw),
+            "edit_wiki_wikilink": lambda **kw: edit_wiki_wikilink(self.workspace, **kw),
             "read_memory": lambda **kw: read_memory(self.workspace, **kw),
             "check_wiki": lambda **kw: check_wiki(self.workspace, **kw),
             "read_index": lambda **kw: read_index(self.workspace, **kw),
@@ -209,6 +216,11 @@ class PlotTaskSubagent:
             "edit_plot": lambda **kw: edit_plot(
                 self.workspace, **{**kw, "updated": kw.get("updated") or self._get_max_chapter()}
             ),
+            "edit_plot_text": lambda **kw: edit_plot_text(self.workspace, **kw),
+            "edit_plot_wikilink": lambda **kw: edit_plot_wikilink(self.workspace, **kw),
+            # 统一工具名（subagent 工具定义来自 shared_subagent_tools.py）
+            "edit_doc_text": lambda **kw: _edit_doc_text_fallback(self.workspace, **kw),
+            "edit_doc_wikilink": lambda **kw: _edit_doc_wikilink_fallback(self.workspace, **kw),
             "end_plot": lambda **kw: end_plot(self.workspace, **kw),
         }
 
@@ -309,6 +321,33 @@ class PlotTaskSubagent:
 
         self._log("PLOT_END", "（subagent 未返回摘要）")
         return "（subagent 未返回摘要）"
+
+
+# ── 统一工具回退路由 ──────────────────────────────────────────────────────
+
+
+def _edit_doc_text_fallback(workspace: Path, **kw) -> str:
+    """回退路由：统一 edit_doc_text → wiki/plot 具体实现"""
+    doc_type = kw.pop("doc_type", "wiki")
+    if doc_type == "wiki":
+        from tools.wiki import edit_wiki_text
+        return edit_wiki_text(workspace, **kw)
+    elif doc_type == "plot":
+        from tools.plot import edit_plot_text
+        return edit_plot_text(workspace, **kw)
+    return f"错误：不支持的 doc_type「{doc_type}」"
+
+
+def _edit_doc_wikilink_fallback(workspace: Path, **kw) -> str:
+    """回退路由：统一 edit_doc_wikilink → wiki/plot 具体实现"""
+    doc_type = kw.pop("doc_type", "wiki")
+    if doc_type == "wiki":
+        from tools.wiki import edit_wiki_wikilink
+        return edit_wiki_wikilink(workspace, **kw)
+    elif doc_type == "plot":
+        from tools.plot import edit_plot_wikilink
+        return edit_plot_wikilink(workspace, **kw)
+    return f"错误：不支持的 doc_type「{doc_type}」"
 
 
 def run_plot_task(llm: LLMClient, workspace: Path,

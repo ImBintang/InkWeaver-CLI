@@ -7,6 +7,7 @@ from tools import wiki as wiki_tools
 from tools import category as category_tools
 from tools import rules as rules_tools
 from tools import plot as plot_tools
+from tools import editor as editor_tools
 from tools.knowledge_task import run_knowledge_task
 from tools.plot_task import run_plot_task
 from tools.review import run_review as _run_review
@@ -48,6 +49,9 @@ class KnowledgeAgent(JianzhiAgent):
             "- 使用 wiki_list 查看类别下的词条列表\n"
             "- 使用 read_wiki 读取指定词条\n"
             "- 使用 new_wiki / edit_wiki / delete_wiki 管理 wiki 词条\n"
+            "- 使用 create_doc / edit_doc / delete_doc（统一工具，通过 doc_type 参数指定类型）\n"
+            "- 使用 edit_doc_text 在正文中精确替换文本（手术刀式，省 token）\n"
+            "- 使用 edit_doc_wikilink 替换 [[wikilink]] 目标\n"
             "- 使用 new_rule / edit_rule / delete_rule 管理规则文档（rules/ 目录）\n"
             "- 使用 new_category / edit_category 管理类别\n"
             "- 使用 rules_list / read_rule 查看规则文档\n"
@@ -444,7 +448,9 @@ class KnowledgeAgent(JianzhiAgent):
         if name in ("confirm_plan", "handoff_knowledge", "new_wiki", "edit_wiki", "delete_wiki",
                      "new_category", "edit_category", "new_rule", "edit_rule",
                      "delete_rule", "knowledge_task", "edit_index",
-                     "new_plot", "edit_plot", "end_plot", "delete_plot", "plot_task"):
+                     "new_plot", "edit_plot", "end_plot", "delete_plot", "plot_task",
+                     "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
+                     "delete_doc"):
             result = self.permission.check(name)
             if result == "__HANDOFF_KNOWLEDGE__":
                 return "你已在 Knowledge 专家模式中。"
@@ -498,6 +504,12 @@ class KnowledgeAgent(JianzhiAgent):
             ),
             "finish_task": lambda **kw: diff_tools.finish_task(self.workspace, **kw),
             "get_unprocessed_chapters": lambda **kw: str(diff_tools.get_unprocessed_chapters(self.workspace, **kw)),
+            # 统一文档管理工具
+            "create_doc": lambda **kw: editor_tools.create_doc(self.workspace, **kw),
+            "edit_doc": lambda **kw: editor_tools.edit_doc(self.workspace, **kw),
+            "edit_doc_text": lambda **kw: editor_tools.edit_doc_text(self.workspace, **kw),
+            "edit_doc_wikilink": lambda **kw: editor_tools.edit_doc_wikilink(self.workspace, **kw),
+            "delete_doc": lambda **kw: editor_tools.delete_doc(self.workspace, **kw),
         }
 
         handler = knowledge_dispatch.get(name)
