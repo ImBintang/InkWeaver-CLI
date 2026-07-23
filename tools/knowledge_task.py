@@ -57,6 +57,8 @@ class KnowledgeSubagent:
         self.review_notes = review_notes
         self.messages: list = []  # fresh，上下文隔离
         self.tool_defs = build_shared_subagent_tools()
+        self._input_tokens = 0
+        self._output_tokens = 0
 
     def _build_system_prompt(self) -> str:
         """构建知识提取专用 system prompt"""
@@ -146,8 +148,12 @@ class KnowledgeSubagent:
             "read_chapters": lambda **kw: read_chapters(self.workspace, **kw),
             "wiki_list": lambda **kw: wiki_list(self.workspace, **kw),
             "read_wiki": lambda **kw: read_wiki(self.workspace, **kw),
-            "new_wiki": lambda **kw: new_wiki(self.workspace, **kw),
-            "edit_wiki": lambda **kw: edit_wiki(self.workspace, **kw),
+            "new_wiki": lambda **kw: new_wiki(
+                self.workspace, **{**kw, "updated": kw.get("updated") or self._get_max_chapter()}
+            ),
+            "edit_wiki": lambda **kw: edit_wiki(
+                self.workspace, **{**kw, "updated": kw.get("updated") or self._get_max_chapter()}
+            ),
             "read_memory": lambda **kw: read_memory(self.workspace, **kw),
             "check_wiki": lambda **kw: check_wiki(self.workspace, **kw),
             "read_index": lambda **kw: read_index(self.workspace, **kw),
@@ -162,6 +168,12 @@ class KnowledgeSubagent:
             return handler(**args)
         except Exception as e:
             return f"错误：{e}"
+
+    def _get_max_chapter(self) -> int:
+        """从 chapters 范围中获取最大章节号"""
+        from tools.chapter import parse_chapter_spec
+        nums = parse_chapter_spec(self.chapters)
+        return max(nums) if nums else 0
 
     def _log(self, tag: str, text: str):
         """记录日志到 session 日志文件"""
@@ -209,8 +221,11 @@ class KnowledgeSubagent:
                 usage = response["usage"]
                 pt = usage.get("prompt_tokens") or usage.get("input_tokens", 0)
                 ct = usage.get("completion_tokens") or usage.get("output_tokens", 0)
+                self._input_tokens += pt
+                self._output_tokens += ct
                 self._log("SUBAGENT_TOKEN",
-                          f"轮次={turn+1}, input={pt}, output={ct}, total={pt+ct}")
+                          f"轮次={turn+1}, input={pt}, output={ct}, total={pt+ct} | "
+                          f"累计: input={self._input_tokens}, output={self._output_tokens}")
 
             # 检查是否完成
             if response["stop_reason"] != "tool_use":
@@ -269,7 +284,8 @@ class KnowledgeSubagent:
 def run_knowledge_task(llm: LLMClient, workspace: Path,
                       category: str, chapters: str,
                       entries: list, task_type: str = "new",
-                      cli=None, review_notes: str = "") -> str:
+                      cli=None, review_notes: str = "",
+                      token_callback=None) -> str:
     """便捷函数：创建并运行 KnowledgeSubagent
 
     Args:
@@ -293,6 +309,10 @@ def run_knowledge_task(llm: LLMClient, workspace: Path,
         review_notes=review_notes,
     )
     result = subagent.run()
+
+    # 将 subagent 的 token 用量回调给主 agent
+    if token_callback and (subagent._input_tokens or subagent._output_tokens):
+        token_callback(subagent._input_tokens, subagent._output_tokens)
 
     # 记录 extraction 到 log.json
     try:

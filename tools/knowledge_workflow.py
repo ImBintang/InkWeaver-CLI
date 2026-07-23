@@ -1,7 +1,7 @@
-"""knowledge_workflow — 先验知识 Workflow（纯 chat，无 tools）
+"""knowledge_workflow — 先验知识 Workflow（材料清单模式）
 
 入参由 MuseAgent 通过 call_knowledge_workflow 工具提交，
-Workflow 层负责参数校验、内容解析、纯 chat 调用。
+Workflow 层负责参数校验、内容解析、构建材料清单供用户审阅。
 """
 
 from pathlib import Path
@@ -10,7 +10,7 @@ from api import LLMClient
 
 
 class KnowledgeWorkflow:
-    """先验知识 Workflow — 参数校验 + 内容解析 + 纯 chat 调用"""
+    """先验知识 Workflow — 参数校验 + 内容解析 + 材料清单"""
 
     def __init__(self, llm: LLMClient, workspace: Path, cli=None):
         self.llm = llm
@@ -21,6 +21,38 @@ class KnowledgeWorkflow:
     def _log(self, tag: str, text: str):
         if self.cli and self.cli.logger:
             self.cli.logger.write(tag, text)
+
+    def _build_material_list(self, wiki_only_contents, wiki_full_contents, rule_contents):
+        """构建材料清单数据结构"""
+        return {
+            "rules": rule_contents,
+            "wiki_important": wiki_full_contents,
+            "wiki_supplement": wiki_only_contents,
+        }
+
+    def _material_to_review_text(self, material: dict) -> str:
+        """生成用户审阅用的清单文本"""
+        lines = ["📋 先验知识材料清单", ""]
+        if material["rules"]:
+            lines.append("【规则文档】")
+            for r in material["rules"]:
+                name = r.split("\n")[0].replace("## ", "").strip()
+                lines.append(f"- {name}")
+            lines.append("")
+        if material["wiki_important"]:
+            lines.append("【重要 Wiki 词条（完整）】")
+            for w in material["wiki_important"]:
+                name = w.split("\n")[0].replace("## ", "").strip()
+                lines.append(f"- {name}")
+            lines.append("")
+        if material["wiki_supplement"]:
+            lines.append("【补充 Wiki 词条（概要）】")
+            for w in material["wiki_supplement"]:
+                name = w.split("\n")[0].replace("## ", "").strip()
+                lines.append(f"- {name}")
+            lines.append("")
+        lines.append("请确认以上清单：输入 y 确认，输入 n 修改。")
+        return "\n".join(lines)
 
     def _find_wiki(self, category: str, name: str) -> str | None:
         """在指定类别下查找 wiki 词条，返回完整内容或 None"""
@@ -129,45 +161,9 @@ class KnowledgeWorkflow:
         if rule_fail:
             return f"错误：以下规则文档未找到，请检查并重试：{'、'.join(sorted(rule_fail))}"
 
-        # 5. 拼接消息内容
-        sections = ["# 参考材料"]
-        if wiki_only_contents:
-            sections.append("## Wiki 词条（概要）\n" + "\n\n".join(wiki_only_contents))
-        if wiki_full_contents:
-            sections.append("## Wiki 词条（完整）\n" + "\n\n".join(wiki_full_contents))
-        if rule_contents:
-            sections.append("## 规则文档\n" + "\n\n".join(rule_contents))
-        sections.append(
-            "\n# 任务\n"
-            "请根据以上参考材料，撰写一份完整的先验知识文档。\n"
-            "要求：\n"
-            "- 包括世界观基本规则、当前活跃角色/势力状态、关键物品/地点信息\n"
-            "- 语言流畅、结构清晰\n"
-            "- 不超过 10000 字\n"
-            "- 不要出现'根据大纲''基于以上材料'等字眼"
-        )
+        # 5. 构建材料清单
+        material = self._build_material_list(wiki_only_contents, wiki_full_contents, rule_contents)
+        self._last_material = material
 
-        user_content = "\n\n".join(sections)
-
-        system_prompt = (
-            "你是先验知识编写助手。你的任务是根据提供的参考材料（Wiki 词条和规则文档），"
-            "撰写一份结构清晰的先验知识文档，供小说写作参考。"
-            "注意：你不知道大纲内容，只基于提供的材料进行编写。"
-        )
-
-        self._log("KNOWLEDGE_WF_START", f"wiki_only={len(wiki_only_yaml)}, wiki_full={len(wiki_full)}, rules={len(rules)}")
-
-        # 6. 纯 chat 调用
-        messages = [{"role": "user", "content": user_content}]
-        response = self.llm.chat(
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=None,
-        )
-
-        if "usage" in response:
-            self._last_usage = response["usage"]
-
-        result = response.get("content", "").strip()
-        self._log("KNOWLEDGE_WF_END", result[:200])
-        return result
+        # 6. 返回清单文本（不再调 LLM）
+        return self._material_to_review_text(material)

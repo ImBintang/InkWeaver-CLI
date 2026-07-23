@@ -71,12 +71,13 @@ def read_rule(workspace: Path, name: str, yaml_only: bool = True) -> str:
     return content
 
 
-def new_rule(workspace: Path, name: str, content: str) -> str:
+def new_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
     """新建规则文档
 
     Args:
         name: 规则名
         content: 文档全文
+        updated: 章节号（纯数字），None 时默认 0
 
     Returns:
         操作结果消息
@@ -86,21 +87,22 @@ def new_rule(workspace: Path, name: str, content: str) -> str:
     if fp.exists():
         return f"错误：规则文档「{name}」已存在"
 
-    from datetime import date
+    updated_val = updated if updated is not None else 0
     # 确保有 frontmatter
     if not content.startswith("---"):
-        content = f"---\ntitle: {name}\nupdated: {date.today()}\n---\n\n{content}"
+        content = f"---\ntitle: {name}\nupdated: {updated_val}\n---\n\n{content}"
 
     fp.write_text(content, encoding="utf-8")
     return f"已创建规则文档：{name}"
 
 
-def edit_rule(workspace: Path, name: str, content: str) -> str:
+def edit_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
     """编辑规则文档
 
     Args:
         name: 规则名
         content: 新全文
+        updated: 章节号（纯数字），不影响写入（由 content 中的 frontmatter 决定）
 
     Returns:
         操作结果消息

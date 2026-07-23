@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 
@@ -31,6 +32,20 @@ def _save_log(workspace: Path, log: dict):
 def _md5(text: str) -> str:
     """计算字符串的 MD5"""
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _is_covered_by_ranges(filename: str, ranges: list[str]) -> bool:
+    """检查文件名（如 c005.md）是否被某个章节区间覆盖"""
+    from tools.chapter import parse_chapter_spec
+    m = re.match(r"c?0*(\d+)\.md", filename)
+    if not m:
+        return False
+    num = int(m.group(1))
+    for r in ranges:
+        nums = parse_chapter_spec(r)
+        if num in nums:
+            return True
+    return False
 
 
 def doc_diff(workspace: Path) -> str:
@@ -64,6 +79,12 @@ def doc_diff(workspace: Path) -> str:
     for name in old_files:
         if name not in current_files:
             deleted_files.append(name)
+
+    # 过滤已处理的章节
+    processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
+    if processed_ranges:
+        new_files = [f for f in new_files if not _is_covered_by_ranges(f, processed_ranges)]
+        modified_files = [f for f in modified_files if not _is_covered_by_ranges(f, processed_ranges)]
 
     # 更新 log.json 中的文件记录
     log["files"] = current_files
@@ -121,3 +142,119 @@ def record_extraction(workspace: Path, chapters: list, new_entries: list, update
     }
     log.setdefault("extractions", []).append(extraction)
     _save_log(workspace, log)
+
+
+def get_unprocessed_chapters(workspace: Path, limit: int = 10) -> list[int]:
+    """获取未处理的章节号列表（从小到大排序），至多 limit 个"""
+    doc_dir = workspace / "document"
+    if not doc_dir.exists():
+        return []
+
+    log = _ensure_log(workspace)
+    old_files = log.get("files", {})
+    processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
+
+    unprocessed = set()
+    for fp in sorted(doc_dir.glob("c*.md")):
+        name = fp.name
+        m = re.match(r"c?0*(\d+)\.md", name)
+        if not m:
+            continue
+        num = int(m.group(1))
+        # 全新文件或已修改但未处理的文件
+        if name not in old_files:
+            if not processed_ranges or not _is_covered_by_ranges(name, processed_ranges):
+                unprocessed.add(num)
+        elif processed_ranges and not _is_covered_by_ranges(name, processed_ranges):
+            unprocessed.add(num)
+
+    result = sorted(unprocessed)
+    return result[:limit]
+
+
+def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
+                new_rules=None, updated_rules=None,
+                new_plots=None, updated_plots=None) -> str:
+    """完成知识提取任务：校验存在性 + 记录 log.json + 构建关系图"""
+    from tools.chapter import parse_chapter_spec
+
+    new_wiki = new_wiki or []
+    updated_wiki = updated_wiki or []
+    new_rules = new_rules or []
+    updated_rules = updated_rules or []
+    new_plots = new_plots or []
+    updated_plots = updated_plots or []
+
+    # 1. 校验 chapters 格式
+    chapter_nums = parse_chapter_spec(chapters)
+    if not chapter_nums:
+        return f"错误：章节区间格式无效「{chapters}」"
+
+    # 2. 校验所有声明的 wiki 存在
+    for name in new_wiki + updated_wiki:
+        found = False
+        from tools.wiki import _wiki_root
+        root = _wiki_root(workspace)
+        if root.exists():
+            for cat_dir in root.iterdir():
+                if cat_dir.is_dir() and (cat_dir / f"{name}.md").exists():
+                    found = True
+                    break
+        if not found:
+            return f"错误：wiki 词条「{name}」不存在，请检查并重试"
+
+    # 3. 校验所有声明的 rules 存在
+    rules_root = workspace / "rules"
+    for name in new_rules + updated_rules:
+        if not (rules_root / f"{name}.md").exists():
+            return f"错误：规则文档「{name}」不存在，请检查并重试"
+
+    # 4. 校验所有声明的 plots 存在
+    plot_root = workspace / "plot"
+    for name in new_plots + updated_plots:
+        fp = plot_root / f"{name}.md"
+        if not fp.exists():
+            # 也检查 plot/muse/ 子目录
+            muse_fp = plot_root / "muse" / f"{name}.md"
+            if not muse_fp.exists():
+                return f"错误：剧情卡片「{name}」不存在，请检查并重试"
+
+    # 5. 全部校验通过 → 写入 log.json
+    log = _ensure_log(workspace)
+
+    # 5a. 追加 extraction 记录
+    import datetime
+    extraction = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "chapters": chapter_nums,
+        "new_entries": new_wiki + new_rules + new_plots,
+        "updated_entries": updated_wiki + updated_rules + updated_plots,
+    }
+    log.setdefault("extractions", []).append(extraction)
+
+    # 5b. 合并 processed.chapter_ranges
+    processed = log.setdefault("processed", {"chapter_ranges": [], "last_finish": ""})
+    existing_ranges = processed.get("chapter_ranges", [])
+    existing_ranges.append(chapters)
+    processed["chapter_ranges"] = existing_ranges
+    processed["last_finish"] = extraction["timestamp"]
+
+    _save_log(workspace, log)
+
+    # 6. 自动构建关系图
+    try:
+        from auto.relation_extractor import build_relations as _build_relations
+        from auto.relation_extractor import save_relations
+        relations = _build_relations(workspace)
+        if relations:
+            save_relations(workspace, relations)
+            rel_msg = f"，关系图已构建（{len(relations)} 个词条）"
+        else:
+            rel_msg = ""
+    except Exception as e:
+        rel_msg = f"（关系图构建失败：{e}）"
+
+    return (f"✅ 任务已完成。已记录：{len(chapter_nums)} 章、"
+            f"{len(new_wiki + updated_wiki)} 个 wiki 词条、"
+            f"{len(new_rules + updated_rules)} 个规则、"
+            f"{len(new_plots + updated_plots)} 个剧情卡片{rel_msg}")

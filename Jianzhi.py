@@ -77,6 +77,7 @@ class JianzhiAgent(BaseAgent):
             "- 使用 read_rule <规则名> 读取规则文档",
             "- 使用 read_memory 读取记忆索引/<name> 读取指定记忆",
             "- 使用 doc_diff 查看新增/修改的章节",
+            "- 使用 context_query 查询当前上下文中已引用的 wiki/规则/剧情卡片列表",
             "",
             "### 知识库优先 RAG 原则（重要）",
             "**核心原则**：面对已有知识库的知识检索，必须先用知识库进行 RAG，而不是直接翻原文。",
@@ -371,6 +372,22 @@ class JianzhiAgent(BaseAgent):
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "context_query",
+                    "description": "查询当前对话上下文中已引用的 wiki 词条、规则文档、剧情卡片列表。entity_type=\"all\" 查看全部，\"wiki\"/\"rules\"/\"plots\" 查看单项。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "entity_type": {
+                                "type": "string",
+                                "description": "查询范围：\"all\" / \"wiki\" / \"rules\" / \"plots\"（默认 \"all\"）",
+                            },
+                        },
+                    },
+                },
+            },
         ]
 
         # 妙笔审阅工具（只在 review_session 激活时可用）
@@ -477,6 +494,7 @@ class JianzhiAgent(BaseAgent):
             "read_rule": lambda **kw: rules_tools.read_rule(self.workspace, **kw),
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),
             "doc_diff": lambda **kw: diff_tools.doc_diff(self.workspace),
+            "context_query": lambda **kw: self.context.query_context(**kw),
         }
 
         handler = dispatch.get(name)
@@ -484,7 +502,21 @@ class JianzhiAgent(BaseAgent):
             return f"错误：未知工具「{name}」"
 
         try:
-            return handler(**args)
+            result = handler(**args)
+            # 追踪已引用的实体
+            if name == "read_wiki":
+                name_val = args.get("name", "")
+                if name_val and not result.startswith("错误"):
+                    self.context.track_entity("wiki", [name_val])
+            elif name == "read_rule":
+                name_val = args.get("name", "")
+                if name_val and not result.startswith("错误"):
+                    self.context.track_entity("rules", [name_val])
+            elif name == "read_plot":
+                name_val = args.get("name", "")
+                if name_val and not result.startswith("错误"):
+                    self.context.track_entity("plot", [name_val])
+            return result
         except Exception as e:
             return f"错误：{e}"
 

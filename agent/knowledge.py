@@ -10,18 +10,7 @@ from tools import plot as plot_tools
 from tools.knowledge_task import run_knowledge_task
 from tools.plot_task import run_plot_task
 from tools.review import run_review as _run_review
-from auto.relation_extractor import build_relations as _build_relations_raw
-
-
-def _build_relations(workspace):
-    """构建关系图并返回结果消息"""
-    relations = _build_relations_raw(workspace)
-    if not relations:
-        return "未发现任何 wikilink 关系"
-    from auto.relation_extractor import save_relations
-    save_relations(workspace, relations)
-    total = sum(len(t) for t in relations.values())
-    return f"关系图已构建：共 {len(relations)} 个词条，{total} 条关系"
+from tools import diff as diff_tools
 
 
 class KnowledgeAgent(JianzhiAgent):
@@ -52,7 +41,7 @@ class KnowledgeAgent(JianzhiAgent):
             "你当前处于 Knowledge 专家模式，负责知识提取与 Wiki 管理。\n"
             "\n"
             "## 技能调用\n"
-            "本模式下技能仍然可用。需要类别设计指导时，调用 `category_design` 技能获取 PRD 规范。\n"
+            "本模式下技能仍然可用。需要提取知识时，调用 `knowledge_extract` 技能获取完整流程步骤；需要类别设计指导时，调用 `category_design` 技能获取 PRD 规范。\n"
             "\n"
             "## 可用操作\n"
             "- 使用 doc_diff 查看新增/修改的章节\n"
@@ -65,7 +54,7 @@ class KnowledgeAgent(JianzhiAgent):
             "- 使用 query_relations 查询词条关联\n"
             "- 使用 read_memory 读取记忆\n"
             "- 使用 knowledge_task 派发 subagent 执行知识提取\n"
-            "- 使用 review_knowledge 启动审核 subagent（知识提取完成后必须审核）\n"            "- 使用 build_relations 构建 wikilink 关系图（审核修复后调用）\n"            "\n"
+            "- 使用 review_knowledge 启动审核 subagent（知识提取完成后必须审核）\n"            "- 使用 finish_task 完成知识提取任务（自动校验、记录日志、构建关系图）\n"            "\n"
             "## Wiki 优先 RAG 原则（重要）\n"
             "**核心原则**：面对已有 wiki 词条的知识检索，必须先用 wiki 进行 RAG，而不是直接翻原文。\n"
             "\n"
@@ -101,19 +90,8 @@ class KnowledgeAgent(JianzhiAgent):
             "4. 用户确认后，调用 confirm_plan 切换到执行阶段\n"
             "5. 切换到执行阶段后即可执行写入操作\n"
             "\n"
-            "## 知识提取流程\n"
-            "1. doc_diff → 获取新增/修改的章节列表\n"
-            "2. **先查 Wiki，再读章节**（详见「Wiki 优先 RAG 原则」）\n"
-            "3. 查询现有 wiki（wiki_list → read_wiki）\n"
-            f"3.5. 查询未结束剧情卡片（plot_list(ended=false)）\n"
-            f"3.6. 分析章节中涉及的剧情事件，拟定 plot 操作\n"
-            f"4. 分析并制定计划（新增/修改哪些词条）\n"
-            f"5. 展示结构化计划（包含 wiki 提取和 plot 提取两部分）→ 等待用户确认\n"
-            f"6. 用户确认后调用 confirm_plan → 切换到执行阶段\n"
-            f"7. 按类别分组，调用 knowledge_task 派发 subagent 提取 wiki\n"
-            f"8. 按任务边界分组，调用 plot_task 派发 subagent 提取剧情卡片\n"
-            f"9. **必须审核**：调用 review_knowledge 进行自审（同时审核 wiki + plot）\n"
-            f"10. **构建关系图**：审核修复后调用 build_relations 构建 relations.yaml\n"
+            "## 知识提取\n"
+            "执行知识提取时，先调用 `knowledge_extract` 技能获取完整的流程步骤说明（范围确定 → wiki 查询 → 计划制定 → subagent 派发 → 审核 → 完成任务）。技能会指导你每一步的具体操作。\n"
             "\n"
             "## 规则文档与 Wiki 词条的区分\n"
             "| 类型 | 位置 | 用途 | 示例 |\n"
@@ -411,6 +389,19 @@ class KnowledgeAgent(JianzhiAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "get_unprocessed_chapters",
+                    "description": "获取未处理的章节号列表（从小到大排序），至多 limit 个。返回纯数字列表，如 [1,2,3]。用于知识提取前确定待提取范围。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "最大返回数量（默认 10）"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "review_knowledge",
                     "description": "审核知识提取结果。检查wikilink悬空、信息矛盾、描述/状态混淆、规则混入关系、state缺失等问题。审核后会委托knowledge_task修复问题。知识提取完成后必须调用此工具进行审核。",
                     "parameters": {
@@ -425,9 +416,21 @@ class KnowledgeAgent(JianzhiAgent):
             {
                 "type": "function",
                 "function": {
-                    "name": "build_relations",
-                    "description": "从所有 wiki 文档中提取 [[wikilink]]，构建/更新 relations.yaml 关系图。审核修复完成后调用此工具构建关系图。",
-                    "parameters": {"type": "object", "properties": {}},
+                    "name": "finish_task",
+                    "description": "完成知识提取任务。声明本次提取的章节区间和所有涉及的新增/修改词条、规则、剧情卡片。后端校验存在性后记录到 log.json 并自动构建关系图。提取完成后必须调用此工具。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "chapters": {"type": "string", "description": "本次提取的章节区间，如 \"1-10,15-20\""},
+                            "new_wiki": {"type": "array", "items": {"type": "string"}, "description": "新增的 wiki 词条名列表"},
+                            "updated_wiki": {"type": "array", "items": {"type": "string"}, "description": "修改的 wiki 词条名列表"},
+                            "new_rules": {"type": "array", "items": {"type": "string"}, "description": "新增的规则名列表"},
+                            "updated_rules": {"type": "array", "items": {"type": "string"}, "description": "修改的规则名列表"},
+                            "new_plots": {"type": "array", "items": {"type": "string"}, "description": "新增的剧情卡片名列表"},
+                            "updated_plots": {"type": "array", "items": {"type": "string"}, "description": "修改的剧情卡片名列表"}
+                        },
+                        "required": ["chapters"],
+                    },
                 },
             },
         ]
@@ -468,10 +471,16 @@ class KnowledgeAgent(JianzhiAgent):
             "edit_rule": lambda **kw: rules_tools.edit_rule(self.workspace, **kw),
             "delete_rule": lambda **kw: rules_tools.delete_rule(self.workspace, **kw),
             "knowledge_task": lambda **kw: run_knowledge_task(
-                self.llm, self.workspace, cli=self.cli, **kw
+                self.llm, self.workspace, cli=self.cli,
+                token_callback=lambda i, o: self._accumulate_tokens(
+                    {"input_tokens": i, "output_tokens": o}
+                ), **kw
             ),
             "plot_task": lambda **kw: run_plot_task(
-                self.llm, self.workspace, cli=self.cli, **kw
+                self.llm, self.workspace, cli=self.cli,
+                token_callback=lambda i, o: self._accumulate_tokens(
+                    {"input_tokens": i, "output_tokens": o}
+                ), **kw
             ),
             "read_plot": lambda **kw: plot_tools.read_plot(self.workspace, **kw),
             "plot_list": lambda **kw: plot_tools.plot_list(self.workspace, **kw),
@@ -482,9 +491,13 @@ class KnowledgeAgent(JianzhiAgent):
             "edit_index": lambda **kw: category_tools.edit_index(self.workspace, **kw),
             "read_index": lambda **kw: category_tools.read_index(self.workspace, **kw),
             "review_knowledge": lambda **kw: _run_review(
-                self.llm, self.workspace, cli=self.cli, **kw
+                self.llm, self.workspace, cli=self.cli,
+                token_callback=lambda i, o: self._accumulate_tokens(
+                    {"input_tokens": i, "output_tokens": o}
+                ), **kw
             ),
-            "build_relations": lambda **kw: _build_relations(self.workspace),
+            "finish_task": lambda **kw: diff_tools.finish_task(self.workspace, **kw),
+            "get_unprocessed_chapters": lambda **kw: str(diff_tools.get_unprocessed_chapters(self.workspace, **kw)),
         }
 
         handler = knowledge_dispatch.get(name)

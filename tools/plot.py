@@ -204,7 +204,8 @@ def plot_list(workspace: Path, page: int = 1, page_size: int = 20, ended: str = 
 
 def new_plot(workspace: Path, name: str, chapters: str,
              content: str = "", description: str = "",
-             state: str = "", tags: list = None) -> str:
+             state: str = "", tags: list = None,
+             updated: int | None = None) -> str:
     """新建剧情卡片
     
     Args:
@@ -214,6 +215,7 @@ def new_plot(workspace: Path, name: str, chapters: str,
         description: 剧情概要（静态）
         state: 当前进展（动态，可选）
         tags: 标签列表
+        updated: 章节号（纯数字），None 时默认 0
     
     Returns:
         操作结果消息
@@ -229,7 +231,7 @@ def new_plot(workspace: Path, name: str, chapters: str,
         "description": description,
         "chapters": chapters,
         "ended": False,
-        "updated": str(date.today()),
+        "updated": updated if updated is not None else 0,
     }
     if state:
         meta["state"] = state
@@ -248,7 +250,8 @@ def new_plot(workspace: Path, name: str, chapters: str,
 
 def edit_plot(workspace: Path, name: str, chapters: str = None,
               content: str = None, description: str = None,
-              state: str = None, tags: list = None) -> str:
+              state: str = None, tags: list = None,
+              updated: int | None = None) -> str:
     """编辑剧情卡片
     
     Args:
@@ -258,6 +261,7 @@ def edit_plot(workspace: Path, name: str, chapters: str = None,
         description: 新描述（None 表示不修改）
         state: 新状态（None 表示不修改）
         tags: 新标签（None 表示不修改）
+        updated: 章节号（纯数字），None 表示保持原值
     
     Returns:
         操作结果消息
@@ -267,7 +271,8 @@ def edit_plot(workspace: Path, name: str, chapters: str = None,
         return f"错误：剧情卡片「{name}」不存在"
     
     meta, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
-    meta["updated"] = str(date.today())
+    if updated is not None:
+        meta["updated"] = updated
     
     if description is not None:
         meta["description"] = description

@@ -79,7 +79,8 @@ def _ensure_category_dir(workspace: Path, category: str) -> Path:
 
 
 def new_wiki(workspace: Path, category: str, name: str, content: str = "",
-             description: str = "", state: str = "", tags: list = None) -> str:
+             description: str = "", state: str = "", tags: list = None,
+             updated: int | None = None) -> str:
     """新建 wiki 文档
 
     Args:
@@ -89,6 +90,7 @@ def new_wiki(workspace: Path, category: str, name: str, content: str = "",
         description: 描述（静态信息）
         state: 状态（动态信息，可选）
         tags: 标签列表
+        updated: 章节号（纯数字），None 时默认 0
 
     Returns:
         操作结果消息
@@ -98,11 +100,10 @@ def new_wiki(workspace: Path, category: str, name: str, content: str = "",
     if fp.exists():
         return f"错误：词条「{name}」已存在"
 
-    from datetime import date
     meta = {
         "type": _category_to_type(category),
         "title": name,
-        "updated": str(date.today()),
+        "updated": updated if updated is not None else 0,
     }
     if tags:
         meta["tags"] = tags
@@ -117,7 +118,8 @@ def new_wiki(workspace: Path, category: str, name: str, content: str = "",
 
 def edit_wiki(workspace: Path, category: str, name: str,
               content: str = None, description: str = None,
-              state: str = None, tags: list = None) -> str:
+              state: str = None, tags: list = None,
+              updated: int | None = None) -> str:
     """编辑 wiki 文档
 
     Args:
@@ -127,6 +129,7 @@ def edit_wiki(workspace: Path, category: str, name: str,
         description: 新描述（None 表示不修改）
         state: 新状态（None 表示不修改）
         tags: 新标签（None 表示不修改）
+        updated: 章节号（纯数字），None 表示保持原值
 
     Returns:
         操作结果消息
@@ -137,8 +140,8 @@ def edit_wiki(workspace: Path, category: str, name: str,
 
     meta, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
 
-    from datetime import date
-    meta["updated"] = str(date.today())
+    if updated is not None:
+        meta["updated"] = updated
     if description is not None:
         meta["description"] = description
     if state is not None:

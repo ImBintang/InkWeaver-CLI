@@ -16,6 +16,20 @@ def agent_loop(jianzhi, messages: list) -> list:
     Returns:
         更新后的 messages（OpenAI 格式）
     """
+    # 在循环开始时检测 /compact 命令
+    if messages and len(messages) > 0:
+        last_user = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                last_user = msg["content"]
+                break
+        if last_user and "/compact" in last_user.strip():
+            from agent.compact import CompactWorkflow
+            compact_wf = CompactWorkflow(jianzhi.llm)
+            messages = compact_wf.compress(messages)
+            messages.append({"role": "user", "content": "上下文已压缩，请继续。"})
+            return agent_loop(jianzhi, messages)
+
     for turn in range(MAX_TURNS):
         start = time.time()
         response = jianzhi.llm.chat(

@@ -82,6 +82,7 @@ class MuseAgent(BaseAgent):
         self.todo = TodoManager()
         self.review_session = None
         self._last_subagent_output = ""
+        self._last_material_raw = None
         self._stop_agent_loop = False
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
@@ -461,9 +462,10 @@ class MuseAgent(BaseAgent):
                 # 校验失败，返回错误信息让 LLM 修正后重试，不终止循环
                 return result
             self._last_subagent_output = result
+            self._last_material_raw = getattr(wf, "_last_material", None)
             self.cli.print_output(result)
             self._stop_agent_loop = True
-            return "(先验知识已生成)"
+            return "(材料清单已生成，请确认)"
 
         if name == "call_plot_workflow":
             from tools.plot_workflow import PlotWorkflow
@@ -472,9 +474,10 @@ class MuseAgent(BaseAgent):
             if result.startswith("错误"):
                 return result
             self._last_subagent_output = result
+            self._last_material_raw = getattr(wf, "_last_material", None)
             self.cli.print_output(result)
             self._stop_agent_loop = True
-            return "(前情提要已生成)"
+            return "(材料清单已生成，请确认)"
 
         # 通用工具路由
         from tools import chapter as chapter_tools
@@ -541,6 +544,8 @@ class MuseWorkflow:
         self.plot_summary: str = ""
         self.current_draft: str = ""
         self.issues: list = []  # 携带到下一轮的 issue 列表
+        self._knowledge_material = None
+        self._plot_material = None
         self._token_stats = {}  # step_name -> {input, output, total}
         self._token_total = {"input": 0, "output": 0, "total": 0}
 
@@ -665,22 +670,18 @@ class MuseWorkflow:
     # ---- 步骤②：知识准备 ----
 
     def _step_knowledge_prep(self):
-        """② 知识准备
-
-        顺序：先生成先验知识 → 用户确认 → 再生成前情提要 → 用户确认
-        """
+        """② 知识准备 — 先验知识 + 前情提要（材料清单模式）"""
         print("=" * 40)
         print("第二步：知识准备")
 
         # ---- 先验知识 ----
         while True:
-            print("正在生成先验知识...")
+            print("正在生成先验知识材料清单...")
             self.prior_knowledge = self._run_researcher()
             self.io.save_prior_knowledge(self.prior_knowledge)
-            print("\n" + "=" * 40)
-            print("先验知识：")
+            print(f"\n先验知识材料清单已生成，请查看：")
             print(self.prior_knowledge)
-            print("\n确认知识准备通过？[y/n]")
+            print("\n确认清单通过？[y/n]")
             try:
                 choice = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -688,24 +689,22 @@ class MuseWorkflow:
             if choice == "y":
                 break
             elif choice == "n":
-                print("请输入打回理由：")
+                print("请输入修改建议（增删条目）：")
                 try:
-                    reason = input().strip()
+                    suggestion = input().strip()
                 except (EOFError, KeyboardInterrupt):
-                    reason = ""
-                print("正在根据反馈增量修正...")
-                self._revise_knowledge(reason)
+                    suggestion = ""
+                self._revise_material(suggestion, "knowledge")
+                continue
 
         # ---- 前情提要 ----
         while True:
-            print("正在生成前情提要...")
+            print("正在生成前情提要材料清单...")
             self.plot_summary = self._run_plot_summary()
             self.io.save_plot_summary(self.plot_summary)
-            print("\n" + "=" * 40)
-            print("前情提要：")
-            self.plot_summary = textwrap.dedent(self.plot_summary)
+            print(f"\n前情提要材料清单已生成，请查看：")
             print(self.plot_summary)
-            print("\n确认前情提要通过？[y/n]")
+            print("\n确认清单通过？[y/n]")
             try:
                 choice = input().strip().lower()
             except (EOFError, KeyboardInterrupt):
@@ -713,13 +712,13 @@ class MuseWorkflow:
             if choice == "y":
                 break
             elif choice == "n":
-                print("请输入打回理由：")
+                print("请输入修改建议（增删条目）：")
                 try:
-                    reason = input().strip()
+                    suggestion = input().strip()
                 except (EOFError, KeyboardInterrupt):
-                    reason = ""
-                print("正在根据反馈增量修正...")
-                self._revise_knowledge(reason)
+                    suggestion = ""
+                self._revise_material(suggestion, "plot")
+                continue
 
     @staticmethod
     def _check_word_count(text: str) -> list[dict]:
@@ -791,6 +790,8 @@ class MuseWorkflow:
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("knowledge_prep", agent)
         self._save_token_stats()
+        # 捕获结构化材料
+        self._knowledge_material = getattr(agent, "_last_material_raw", None)
         # 优先取 workflow 输出（call_knowledge_workflow 存入了 _last_subagent_output）
         if agent._last_subagent_output:
             return agent._last_subagent_output
@@ -804,34 +805,31 @@ class MuseWorkflow:
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("plot_summary", agent)
         self._save_token_stats()
+        # 捕获结构化材料
+        self._plot_material = getattr(agent, "_last_material_raw", None)
         # 优先取 workflow 输出
         if agent._last_subagent_output:
             return agent._last_subagent_output
         return self._extract_last_text(messages)
 
-    def _revise_knowledge(self, reason: str):
-        """增量修正知识准备"""
-        context = (
-            f"## 当前先验知识\n{self.prior_knowledge}\n\n"
-            f"## 当前前情提要\n{self.plot_summary}\n\n"
-            f"## 打回理由\n{reason}"
+    def _revise_material(self, suggestion: str, material_type: str):
+        """根据用户建议修改材料清单"""
+        agent = self._create_agent([])
+        msg = (
+            f"用户对当前{'先验知识' if material_type == 'knowledge' else '前情提要'}的材料清单提出了修改建议：\n"
+            f"{suggestion}\n\n"
+            f"请根据建议重新调用相应的 workflow 工具调整材料清单。"
         )
-        agent = self._create_agent(["muse_knowledge.skill.md", "muse_plot.skill.md"])
-        messages = [{"role": "user", "content": context + "\n\n请根据打回理由修正上述知识文档。"}]
+        messages = [{"role": "user", "content": msg}]
         messages = agent_loop(agent, messages)
         self.io.save_session_log(messages)
-        self._update_token_stats_from_agent("knowledge_revise", agent)
-        self._save_token_stats()
-        result = self._extract_last_text(messages)
-        # 简单分成先验知识和前情提要（按段落分割）
-        parts = result.split("\n## ")
-        if len(parts) >= 2:
-            self.prior_knowledge = parts[0]
-            self.plot_summary = "\n## ".join(parts[1:])
-        else:
-            self.prior_knowledge = result
-        self.io.save_prior_knowledge(self.prior_knowledge)
-        self.io.save_plot_summary(self.plot_summary)
+        if agent._last_subagent_output:
+            if material_type == "knowledge":
+                self.prior_knowledge = agent._last_subagent_output
+                self.io.save_prior_knowledge(self.prior_knowledge)
+            else:
+                self.plot_summary = agent._last_subagent_output
+                self.io.save_plot_summary(self.plot_summary)
 
     # ---- 步骤③→④：写作与审阅循环 ----
 
@@ -944,16 +942,14 @@ class MuseWorkflow:
             cli=None,
         )
 
-        last_chapter = self._get_last_chapter_full()
-
-        # 如果是重写轮次（round > 1），传入上一轮草稿
+        knowledge_material = self._knowledge_material
+        plot_material = self._plot_material
         previous_draft = self.current_draft if self.io.round > 1 else ""
 
         result = wf.run(
             outline=self.outline,
-            prior_knowledge=self.prior_knowledge,
-            plot_summary=self.plot_summary,
-            last_chapter=last_chapter,
+            knowledge_material=knowledge_material,
+            plot_material=plot_material,
             review_issues=self.issues if self.issues else None,
             previous_draft=previous_draft,
         )

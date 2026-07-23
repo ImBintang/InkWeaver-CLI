@@ -355,6 +355,8 @@ class ReviewSubagent:
         self.cli = cli
         self.messages: list = []
         self.tool_defs = _build_review_tool_defs()
+        self._input_tokens = 0
+        self._output_tokens = 0
 
     def _build_system_prompt(self) -> str:
         """构建审核专用 system prompt"""
@@ -535,8 +537,11 @@ class ReviewSubagent:
                 usage = response["usage"]
                 pt = usage.get("prompt_tokens") or usage.get("input_tokens", 0)
                 ct = usage.get("completion_tokens") or usage.get("output_tokens", 0)
+                self._input_tokens += pt
+                self._output_tokens += ct
                 self._log("REVIEW_TOKEN",
-                          f"轮次={turn+1}, input={pt}, output={ct}, total={pt+ct}")
+                          f"轮次={turn+1}, input={pt}, output={ct}, total={pt+ct} | "
+                          f"累计: input={self._input_tokens}, output={self._output_tokens}")
 
             # 检查是否完成
             if response["stop_reason"] != "tool_use":
@@ -589,7 +594,8 @@ class ReviewSubagent:
 
 
 def run_review(llm: LLMClient, workspace: Path,
-               chapters: str, cli=None) -> str:
+               chapters: str, cli=None,
+               token_callback=None) -> str:
     """便捷函数：创建并运行 ReviewSubagent
 
     Args:
@@ -607,4 +613,10 @@ def run_review(llm: LLMClient, workspace: Path,
         chapters=chapters,
         cli=cli,
     )
-    return subagent.run()
+    result = subagent.run()
+
+    # 将 subagent 的 token 用量回调给主 agent
+    if token_callback and (subagent._input_tokens or subagent._output_tokens):
+        token_callback(subagent._input_tokens, subagent._output_tokens)
+
+    return result
