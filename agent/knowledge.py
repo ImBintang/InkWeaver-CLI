@@ -452,7 +452,7 @@ class KnowledgeAgent(JianzhiAgent):
                      "new_plot", "edit_plot", "end_plot", "delete_plot", "plot_task",
                      "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
                      "delete_doc"):
-            result = self.permission.check(name)
+            result = self.permission.check(name, args)
             if result == "__HANDOFF_KNOWLEDGE__":
                 return "你已在 Knowledge 专家模式中。"
             if result is not None:

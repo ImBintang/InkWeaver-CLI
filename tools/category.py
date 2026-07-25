@@ -87,6 +87,14 @@ def new_category(workspace: Path, name: str, description: str = "",
     Returns:
         操作结果消息
     """
+    # 防御拦截：禁止创建"宝物"类别，引导使用"世界观"
+    if name == "宝物":
+        return (
+            f"错误：禁止创建「宝物」类别。\n"
+            f"「宝物」是模糊归类，物品实体应优先归入「法宝」「丹药」「灵草」等具体类别。\n"
+            f"如确实无法归入任何现有类别，请使用「世界观」类别作为兜底。"
+        )
+
     wiki_root = _wiki_root(workspace)
     wiki_root.mkdir(exist_ok=True)
 

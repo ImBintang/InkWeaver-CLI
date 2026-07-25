@@ -4,8 +4,15 @@ import re
 from pathlib import Path
 
 
+def _extract_digits(text: str) -> int:
+    """从字符串中提取数字，如 "第1章" → 1, "第10" → 10"""
+    nums = re.findall(r"\d+", text)
+    return int(nums[0]) if nums else 0
+
+
 def parse_chapter_spec(spec: str) -> list[int]:
-    """解析范围表达式 "1-3,5,7-9" → [1,2,3,5,7,8,9]"""
+    """解析范围表达式 "1-3,5,7-9" → [1,2,3,5,7,8,9]
+    兼容中文格式："第1章-第3章,第5,第7章-第9章" → [1,2,3,5,7,8,9]"""
     result = []
     if not spec or not spec.strip():
         return result
@@ -15,14 +22,18 @@ def parse_chapter_spec(spec: str) -> list[int]:
         if not part:
             continue
         if "-" in part:
-            start, end = part.split("-", 1)
-            start, end = int(start.strip()), int(end.strip())
+            start_str, end_str = part.split("-", 1)
+            start, end = _extract_digits(start_str.strip()), _extract_digits(end_str.strip())
+            if start == 0 and end == 0:
+                continue
             if start <= end:
                 result.extend(range(start, end + 1))
             else:
                 result.extend(range(end, start + 1))
         else:
-            result.append(int(part))
+            num = _extract_digits(part)
+            if num:
+                result.append(num)
     return sorted(set(result))
 
 
@@ -68,8 +79,6 @@ def chapter_list(workspace_path: Path) -> str:
 def read_chapters(workspace_path: Path, chapters: str) -> str:
     """读取指定章节正文
 
-    每章至多读入前5000字（不含章节标题）。
-
     Args:
         chapters: 范围表达式，如 "1-3,5,7-9"
 
@@ -81,16 +90,12 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
     if not nums:
         return "错误：章节号格式无效"
 
-    MAX_BODY_CHARS = 5000
-
     parts = []
     for num in nums:
         title, body = _read_chapter_file(doc_dir, num)
         if title is None:
             parts.append(f"## 第{num}章（不存在）")
         else:
-            if len(body) > MAX_BODY_CHARS:
-                body = body[:MAX_BODY_CHARS] + "\n\n...（后续内容已截断）"
             parts.append(f"## {title}\n\n{body}")
 
     return "\n\n".join(parts)

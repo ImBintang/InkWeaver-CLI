@@ -1,100 +1,305 @@
-"""统一权限管家 — 集中管理所有审核判定
+"""v4 权限管家 — pipeline: deny → whitelist → allow
 
 参考 learn-claude-code s07_permission_system.py 的 pipeline 设计：
   deny_rules → mode_check → allow_rules → ask_user
 
-在 InkWeaver 中简化为统一 check() 入口，覆盖两类审核：
-  1. 模式切换审核（handoff_knowledge）— 需要用户确认后才能进入 Knowledge 模式
-  2. 写操作审核（planning/executing）— 规划阶段拦截所有写操作
-
-所有需要审核的工具集中在 TOOL_CATEGORIES 中管理，
-新增审核工具只需在对应集合中添加工具名即可。
+在 InkWeaver v4 中简化为：
+  planning 阶段 → 写操作全拦截
+  executing 阶段 → 写操作白名单检查
+  review 模式 → 读操作白名单检查
 """
 
-# 写工具（Knowledge 专属，planning 阶段拦截）
+import json
+from tools.chapter import parse_chapter_spec
+
+
+# 写工具（planning 阶段 + executing 阶段白名单检查）
 WRITE_TOOLS = {
     "new_wiki", "edit_wiki", "delete_wiki",
+    "batch_create_wiki", "batch_edit_wiki",
     "new_category", "edit_category",
     "new_rule", "edit_rule", "delete_rule",
-    "knowledge_task",
-    "edit_index",
     "new_plot", "edit_plot", "end_plot", "delete_plot",
-    "plot_task",
-    # 统一文档管理工具
-    "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
-    "delete_doc",
+    "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink", "delete_doc",
 }
 
-# 模式切换工具（需用户确认后才放行）
-MODE_SWITCH_TOOLS = {"handoff_knowledge"}
+# Review 模式下禁止的新建操作
+# new_wiki / batch_create_wiki 不在此列 — 审核阶段需灵活补建漏建和遗漏词条，
+# 由 Step 2 的例外逻辑放行
+REVIEW_NEW_TOOLS = {
+    "new_rule", "new_plot", "new_category",
+    "create_doc",
+}
+
+# Review 模式读锁工具（计划外的内容不可读）
+READ_LOCK_TOOLS = {
+    "read_chapters", "read_wiki", "read_plot",
+}
+
+# 模式切换工具（不被规划阶段拦截）
+MODE_SWITCH_TOOLS = {"submit_plan", "review_workflow", "finish_task"}
+
+
+class Whitelist:
+    """从 plan JSON 构建的白名单"""
+
+    def __init__(self):
+        # 写白名单
+        self.new_wiki: set[tuple[str, str]] = set()
+        self.edit_wiki: set[tuple[str, str]] = set()
+        self.new_rule: set[str] = set()
+        self.edit_rule: set[str] = set()
+        self.new_plot: set[str] = set()
+        self.edit_plot: set[str] = set()
+        self.new_category: set[str] = set()
+        self.edit_category: set[str] = set()
+        # Review 读白名单
+        self.read_chapters: set[int] = set()
+        self.read_wiki: set[tuple[str, str]] = set()
+        self.read_plot: set[str] = set()
+
+    def build(self, plan: dict):
+        """从 plan JSON 构建所有白名单集合"""
+        for item in plan.get("new_wiki", []):
+            self.new_wiki.add((item["category"], item["name"]))
+            self.read_wiki.add((item["category"], item["name"]))
+        for item in plan.get("edit_wiki", []):
+            self.edit_wiki.add((item["category"], item["name"]))
+            self.read_wiki.add((item["category"], item["name"]))
+        for item in plan.get("new_rule", []):
+            self.new_rule.add(item["name"])
+        for item in plan.get("edit_rule", []):
+            self.edit_rule.add(item["name"])
+        for item in plan.get("new_plot", []):
+            self.new_plot.add(item["name"])
+            self.read_plot.add(item["name"])
+        for item in plan.get("edit_plot", []):
+            self.edit_plot.add(item["name"])
+            self.read_plot.add(item["name"])
+        for item in plan.get("new_category", []):
+            self.new_category.add(item["name"])
+        for item in plan.get("edit_category", []):
+            self.edit_category.add(item["name"])
+        self.read_chapters.update(parse_chapter_spec(plan.get("scope", "")))
+
+    def merge(self, other: "Whitelist"):
+        """合并两个白名单（提取计划 ∪ review 修改计划）"""
+        for attr in ("new_wiki", "edit_wiki", "new_rule", "edit_rule",
+                     "new_plot", "edit_plot", "new_category", "edit_category",
+                     "read_wiki", "read_plot", "read_chapters"):
+            getattr(self, attr).update(getattr(other, attr))
+
+    def _check_doc_write(self, params: dict, wiki_set: set, rule_set: set, plot_set: set) -> bool:
+        """统一检查 create_doc / edit_doc 等工具的白名单
+
+        doc_type="wiki" → 检查 (category, name) in wiki_set
+        doc_type="rule" → 检查 name in rule_set
+        doc_type="plot" → 检查 name in plot_set
+        """
+        doc_type = params.get("doc_type", "")
+        name = params.get("name", "")
+        if doc_type == "wiki":
+            return (params.get("category"), name) in wiki_set
+        elif doc_type == "rule":
+            return name in rule_set
+        elif doc_type == "plot":
+            return name in plot_set
+        return False
+
+    def allows_write(self, tool_name: str, params: dict) -> bool:
+        """检查写操作是否在白名单内"""
+        checks = {
+            "new_wiki": lambda: (
+                params.get("category"), params.get("name")
+            ) in self.new_wiki,
+            "edit_wiki": lambda: (
+                params.get("category"), params.get("name")
+            ) in self.edit_wiki,
+            "batch_create_wiki": lambda: all(
+                (item.get("category"), item.get("name")) in self.new_wiki
+                for item in params.get("items", [])
+            ),
+            "batch_edit_wiki": lambda: all(
+                (item.get("category"), item.get("name")) in self.edit_wiki
+                for item in params.get("items", [])
+            ),
+            "new_rule": lambda: params.get("name") in self.new_rule,
+            "edit_rule": lambda: params.get("name") in self.edit_rule,
+            "new_plot": lambda: params.get("name") in self.new_plot,
+            "edit_plot": lambda: params.get("name") in self.edit_plot,
+            "new_category": lambda: params.get("name") in self.new_category,
+            "edit_category": lambda: params.get("name") in self.edit_category,
+            # 统一文档工具 → 映射到对应白名单
+            "create_doc": lambda: self._check_doc_write(
+                params, self.new_wiki, self.new_rule, self.new_plot
+            ),
+            "edit_doc": lambda: self._check_doc_write(
+                params, self.edit_wiki, self.edit_rule, self.edit_plot
+            ),
+            "edit_doc_text": lambda: self._check_doc_write(
+                params, self.edit_wiki, self.edit_rule, self.edit_plot
+            ),
+            "edit_doc_wikilink": lambda: self._check_doc_write(
+                params, self.edit_wiki, self.edit_rule, self.edit_plot
+            ),
+            "delete_doc": lambda: self._check_doc_write(
+                params, self.edit_wiki, self.edit_rule, self.edit_plot
+            ),
+        }
+        check = checks.get(tool_name)
+        return check() if check else True
+
+    def allows_read(self, tool_name: str, params: dict) -> bool:
+        """检查读操作是否在白名单内（review 模式用）"""
+        checks = {
+            "read_chapters": lambda: self._chapters_in_scope(
+                params.get("chapters", "")
+            ),
+            "read_wiki": lambda: (
+                params.get("category"), params.get("name")
+            ) in self.read_wiki,
+            "read_plot": lambda: params.get("name") in self.read_plot,
+        }
+        check = checks.get(tool_name)
+        return check() if check else True
+
+    def _chapters_in_scope(self, spec: str) -> bool:
+        """检查章节范围是否在白名单内"""
+        requested = set(parse_chapter_spec(spec))
+        return requested.issubset(self.read_chapters)
+
+    def allow_review_edits(self):
+        """审核模式下允许编辑新建的条目（new → edit 白名单）"""
+        self.edit_wiki.update(self.new_wiki)
+        self.edit_rule.update(self.new_rule)
+        self.edit_plot.update(self.new_plot)
 
 
 class PermissionManager:
-    """统一审核管理器
+    """v4 权限管家 — pipeline: deny → whitelist → allow
 
-    工作流：
-      模式切换:  LLM 调 handoff_knowledge → check() 记录请求 → chat() 返回 True
-                → 主循环询问用户 → 用户确认后切换 KnowledgeAgent
-
-      写操作:    LLM 调 new_wiki → check() 拦截 → LLM 输出计划等用户确认
-                → 用户确认后 LLM 调 confirm_plan → 写操作放行
+    状态流转：
+      extract mode: planning → (submit_plan) → executing
+      review mode:  planning → (submit_plan) → executing → (finish_task) → reset
     """
 
     def __init__(self):
-        self._plan_phase = "planning"      # planning | executing
-        self._handoff_blocked = True        # True=首次 handoff 需确认
-        self._handoff_ever_passed = False   # 本 session 内是否已确认过
+        self.phase = "planning"          # planning | executing
+        self.mode = "extract"            # extract | review
+        self.whitelist = Whitelist()
 
-    @property
-    def handoff_requested(self) -> bool:
-        """主循环检测：LLM 是否请求了模式切换且需用户确认"""
-        return not self._handoff_blocked and not self._handoff_ever_passed
+    def submit_plan(self, plan_json: dict) -> str:
+        """提交计划，构建白名单，切换至执行阶段"""
+        self.whitelist.build(plan_json)
+        # 将 new_* 同步到 edit_*：能创建就应该能编辑（如 batch_create 后补内容）
+        self.whitelist.allow_review_edits()
+        self.phase = "executing"
+        return "OK"
 
-    @property
-    def phase(self) -> str:
-        return self._plan_phase
+    def submit_review_plan(self, plan_json: dict) -> str:
+        """审核阶段补充计划：合并到现有白名单，不切换阶段
 
-    def confirm_handoff(self):
-        """用户确认模式切换后调用"""
-        self._handoff_ever_passed = True
-        self._handoff_blocked = True  # 重置请求标记
+        用于审核过程中 LLM 发现计划外重要遗漏词条时的白名单扩展。
+        与 submit_plan 不同——不重置 whitelist，只追加项目，保持 phase=planning。
+        """
+        if self.mode != "review":
+            return "错误：submit_review_plan 仅能在 review 模式下使用"
+        for item in plan_json.get("new_wiki", []):
+            key = (item["category"], item["name"])
+            self.whitelist.new_wiki.add(key)
+            self.whitelist.edit_wiki.add(key)  # 创建后需能编辑补内容
+            self.whitelist.read_wiki.add(key)
+        for item in plan_json.get("edit_wiki", []):
+            key = (item["category"], item["name"])
+            self.whitelist.edit_wiki.add(key)
+            self.whitelist.read_wiki.add(key)
+        for item in plan_json.get("new_rule", []):
+            self.whitelist.new_rule.add(item["name"])
+        for item in plan_json.get("edit_rule", []):
+            self.whitelist.edit_rule.add(item["name"])
+        for item in plan_json.get("new_plot", []):
+            self.whitelist.new_plot.add(item["name"])
+            self.whitelist.read_plot.add(item["name"])
+        for item in plan_json.get("edit_plot", []):
+            self.whitelist.edit_plot.add(item["name"])
+            self.whitelist.read_plot.add(item["name"])
+        return json.dumps({
+            "status": "approved",
+            "message": "补充计划已合并到白名单，可以继续执行。"
+        }, ensure_ascii=False)
 
-    def confirm_plan(self):
-        """用户确认计划后放行写操作"""
-        self._plan_phase = "executing"
+    def switch_review(self):
+        """切换到 review 模式"""
+        self.mode = "review"
+        self.phase = "planning"
+        # 允许编辑新建的条目（lint 修复需要）
+        self.whitelist.allow_review_edits()
 
     def reset(self):
-        """重置为初始状态（新 session）"""
-        self._plan_phase = "planning"
-        self._handoff_blocked = True
-        self._handoff_ever_passed = False
+        """重置为初始状态"""
+        self.phase = "planning"
+        self.mode = "extract"
+        self.whitelist = Whitelist()
 
-    def check(self, tool_name: str) -> str | None:
+    def _param_summary(self, tool_name: str, params: dict) -> str:
+        """生成参数摘要用于拦截信息"""
+        if tool_name in ("new_wiki", "edit_wiki", "read_wiki"):
+            return f"{params.get('category', '?')}/{params.get('name', '?')}"
+        if tool_name in ("read_chapters",):
+            return f"章节 {params.get('chapters', '?')}"
+        if tool_name in ("read_plot", "new_plot", "edit_plot"):
+            return f"剧情卡片 {params.get('name', '?')}"
+        if tool_name in ("new_rule", "edit_rule"):
+            return f"规则 {params.get('name', '?')}"
+        if tool_name in ("batch_create_wiki", "batch_edit_wiki"):
+            items = params.get("items", [])
+            return f"{len(items)} 个条目"
+        if tool_name in ("create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink", "delete_doc"):
+            return f"{params.get('doc_type', '?')}/{params.get('name', '?')}"
+        return str(params)[:60]
+
+    def check(self, tool_name: str, params: dict) -> str | None:
         """统一检查入口
-
-        Args:
-            tool_name: 工具名
 
         Returns:
             None — 允许执行
-            "__HANDOFF_KNOWLEDGE__" — 特殊标记，通知主循环切换模式
-            其他字符串 — 被拦截的原因
+            str — 被拦截的原因
         """
-        # 1) 模式切换审核
-        if tool_name in MODE_SWITCH_TOOLS:
-            if not self._handoff_ever_passed:
-                # 首次 handoff：记录请求，由 chat() 返回给主循环处理
-                self._handoff_blocked = False
-                return "__HANDOFF_KNOWLEDGE__"
-            # 已确认过，直接放行
-            return None
 
-        # 2) 写操作审核（planning 阶段拦截）
-        if tool_name in WRITE_TOOLS and self._plan_phase == "planning":
+        # Step 1: 规划阶段 → 写操作全拦截（review 模式下允许白名单内写操作）
+        if self.phase == "planning" and self.mode != "review":
+            if tool_name in WRITE_TOOLS:
+                return (
+                    f"[权限拦截] 当前处于「规划阶段」，{tool_name} 是写操作，已被阻止。\n"
+                    f"请先调 submit_plan 提交计划，用户确认后写权限才会开放。"
+                )
+
+        # Step 1.5: Review 模式 → 禁止新建操作（仅允许修改已有条目）
+        if self.mode == "review" and tool_name in REVIEW_NEW_TOOLS:
+            param_info = self._param_summary(tool_name, params)
             return (
-                f"[权限拦截] 当前处于「规划阶段」，{tool_name} 是写操作，已被阻止。\n"
-                f"请先使用 agent_output 输出完整计划并等待用户确认，\n"
-                f"用户确认后调用 confirm_plan 切换到执行阶段。"
+                f"[权限拦截] review 模式下禁止新建操作。"
+                f"{tool_name}({param_info}) 是创建行为，如需新增请退出审核后重新提交计划。\n"
+                f"审核阶段仅允许修改已存在的条目（edit_doc/edit_doc_text 等）。"
             )
 
-        return None
+        # Step 2: 执行阶段 / Review 模式 → 写操作白名单检查
+        if (self.phase == "executing" or self.mode == "review") and tool_name in WRITE_TOOLS:
+            if not self.whitelist.allows_write(tool_name, params):
+                param_info = self._param_summary(tool_name, params)
+                return (
+                    f"[权限拦截] {tool_name}({param_info}) 不在计划白名单内。\n"
+                    f"只有计划内允许的操作才可执行。"
+                )
+
+        # Step 3: Review 模式 → 读操作白名单检查
+        if self.mode == "review" and tool_name in READ_LOCK_TOOLS:
+            if not self.whitelist.allows_read(tool_name, params):
+                param_info = self._param_summary(tool_name, params)
+                return (
+                    f"[权限拦截] review 模式下，{tool_name}({param_info}) "
+                    f"不在本次计划范围内，无权读取。\n"
+                    f"可以使用 wiki_list/plot_list/chapter_list 等工具查看存在性。"
+                )
+
+        return None  # 放行

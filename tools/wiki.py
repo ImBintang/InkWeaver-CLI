@@ -378,3 +378,121 @@ def get_wiki_body(workspace: Path, category: str, name: str) -> str:
         return ""
     _, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
     return body
+
+
+def batch_create_wiki(workspace: Path, items: list[dict]) -> str:
+    """批量创建 wiki 词条（部分成功模式）
+
+    items 每个元素：{"category", "name", "content", "description"(opt), "state"(opt), "tags"(opt)}
+    调用现有的 new_wiki 函数，返回 JSON 统计结果。
+
+    Returns:
+        JSON: {"success": N, "failed": M, "items": [...]}
+    """
+    import json
+
+    results = []
+    success_count = 0
+    failed_count = 0
+
+    for item in items:
+        category = item.get("category", "")
+        name = item.get("name", "")
+        try:
+            result = new_wiki(
+                workspace,
+                category=category,
+                name=name,
+                content=item.get("content", ""),
+                description=item.get("description", ""),
+                state=item.get("state", ""),
+                tags=item.get("tags"),
+            )
+            if result.startswith("错误："):
+                results.append({
+                    "category": category,
+                    "name": name,
+                    "status": "failed",
+                    "error": result,
+                })
+                failed_count += 1
+            else:
+                results.append({
+                    "category": category,
+                    "name": name,
+                    "status": "created",
+                })
+                success_count += 1
+        except Exception as e:
+            results.append({
+                "category": category,
+                "name": name,
+                "status": "failed",
+                "error": str(e),
+            })
+            failed_count += 1
+
+    return json.dumps({
+        "success": success_count,
+        "failed": failed_count,
+        "items": results,
+    }, ensure_ascii=False)
+
+
+def batch_edit_wiki(workspace: Path, items: list[dict]) -> str:
+    """批量编辑 wiki 词条（部分成功模式）
+
+    items 每个元素：{"category", "name", "content"(opt), "description"(opt), "state"(opt), "tags"(opt)}
+    调用现有的 edit_wiki 函数，返回 JSON 统计结果。
+
+    Returns:
+        JSON: {"success": N, "failed": M, "items": [...]}
+    """
+    import json
+
+    results = []
+    success_count = 0
+    failed_count = 0
+
+    for item in items:
+        category = item.get("category", "")
+        name = item.get("name", "")
+        try:
+            result = edit_wiki(
+                workspace,
+                category=category,
+                name=name,
+                content=item.get("content"),
+                description=item.get("description"),
+                state=item.get("state"),
+                tags=item.get("tags"),
+            )
+            if result.startswith("错误："):
+                results.append({
+                    "category": category,
+                    "name": name,
+                    "status": "failed",
+                    "error": result,
+                })
+                failed_count += 1
+            else:
+                results.append({
+                    "category": category,
+                    "name": name,
+                    "status": "edited",
+                })
+                success_count += 1
+        except Exception as e:
+            results.append({
+                "category": category,
+                "name": name,
+                "status": "failed",
+                "error": str(e),
+            })
+            failed_count += 1
+
+    return json.dumps({
+        "success": success_count,
+        "failed": failed_count,
+        "items": results,
+    }, ensure_ascii=False)

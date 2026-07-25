@@ -3,7 +3,9 @@
 import json
 import time
 
-MAX_TURNS = 20
+from agent.compact import micro_compact
+
+MAX_TURNS = 50
 
 
 def agent_loop(jianzhi, messages: list) -> list:
@@ -31,6 +33,9 @@ def agent_loop(jianzhi, messages: list) -> list:
             return agent_loop(jianzhi, messages)
 
     for turn in range(MAX_TURNS):
+        # 每轮开始前执行 micro-compact，压缩旧工具结果
+        messages = micro_compact(messages)
+
         start = time.time()
         response = jianzhi.llm.chat(
             messages=jianzhi._normalize_messages(messages),
@@ -65,6 +70,8 @@ def agent_loop(jianzhi, messages: list) -> list:
         tool_results = []
         for tc in response["tool_calls"]:
             tc_id = tc["id"]
+            # 记录 tool_call_id 供 PersistCache 使用
+            jianzhi._last_tool_call_id = tc_id
             func = tc["function"]
             tool_name = func["name"]
 
@@ -81,7 +88,7 @@ def agent_loop(jianzhi, messages: list) -> list:
                 result = "(已输出)"
             else:
                 # 打印工具调用（显示简要参数）
-                brief = str(tool_input.get("chapters", tool_input.get("name", "")))
+                brief = str(tool_input.get("name") or tool_input.get("chapters", ""))
                 jianzhi.cli.print_tool_call(tool_name, brief)
 
                 # 调度执行
@@ -94,6 +101,7 @@ def agent_loop(jianzhi, messages: list) -> list:
                 "role": "tool",
                 "tool_call_id": tc_id,
                 "content": result,
+                "tool_name": tool_name,  # 供 micro_compact 判断是否可压缩
             })
 
         if tool_results:

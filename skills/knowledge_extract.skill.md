@@ -29,19 +29,23 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
    c. 禁止在已有 wiki 词条的情况下跳过 wiki 直接翻原文
 3. 查询现有 wiki（wiki_list 获取列表 → read_wiki 按需深入）
 4. 分析并制定计划（新增/修改哪些词条，分类规则参见下文）
-5. 展示结构化计划 → 等待用户确认（此阶段所有写工具被权限系统自动拦截）
-6. 用户确认后，调用 confirm_plan 切换到执行阶段
-7. 按类别分组，调用 knowledge_task 派发 subagent
-8. 每个 subagent：
-   a. 读取该类别现有 wiki 文档
-   b. 读取相关章节文本（先 wiki 后章节，尽量复用 wiki 信息）
-   c. 读取类别 index.md 了解写作规范
-   d. 生成/更新 wiki 文档（含 wikilink 交叉引用）
-   e. 写入 wiki/ 目录
-9. **审核**：调用 review_knowledge 进行自审
-   （先 check_wiki_yaml 检查 YAML 结构，再逐项检查 wikilink 悬空、信息矛盾、描述/状态混淆、
-   规则混入关系、state 缺失/简洁性、类别归属约束、文档篇幅、剧情卡片等）
-10. **完成任务记录**：调用 finish_task 记录本次提取的章节区间和所有操作（自动校验存在性、写入 log.json、构建关系图）
+5. 调用 submit_plan 提交计划（传递 plan_json 字符串）
+   → 系统展示计划并等待用户 y/n 确认
+   → 用户确认后自动切换至执行阶段（写权限开放）
+   → 若被打回，根据理由修改后重新提交
+6. 使用 batch_create_wiki / batch_edit_wiki 批量操作（或 new_wiki / edit_wiki 单个操作）
+   - 每个词条需包含 category、name、content（正文含 [[wikilink]] 交叉引用）
+   - 读取类别 index.md 了解写作规范
+6. **收尾旧剧情卡片**：在创建**新**剧情卡片前，应先调用 `plot_list` 查看已有的未结束卡片，
+   对其中章节范围已远落后于最新章节（差值 ≥ 10）的卡片，调用 `end_plot` 结束。
+   这样可以避免剧情卡片越积越多永不收尾。
+7. **审核**：调用 review_workflow 进入审核模式
+   → 系统自动运行 lint 检查，注入债务清单到对话上下文
+   → 根据 lint 结果逐项检查 wikilink 悬空、信息矛盾、描述/状态混淆、
+     规则混入关系、state 缺失/简洁性、类别归属约束、文档篇幅、剧情卡片等
+   → 注意 unended_plots 债务：lint 已自动检测，按提示用 `end_plot` 结束
+8. **完成任务记录**：调用 finish_task 记录本次提取的章节区间和所有操作
+   （自动校验存在性、写入 log.json、构建关系图）
 ```
 
 ## 规则文档与 Wiki 词条的区分
@@ -60,22 +64,47 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 首次知识提取时，wiki 目录为空。流程如下：
 
 1. LLM 分析章节内容，提出类别建议（如：人物、势力、地图、设定图鉴）
-2. 用户确认后，调用 `new_category` 创建类别和对应的 `index.md`
-3. 后续提取复用已有类别
+2. **创建类别前必须先调用 `category_design` 技能**，获取 PRD 定义的类别写作规范（index.md 模板、字段要求等）
+3. 用户确认后，根据 `category_design` 的规范调用 `new_category` 创建类别和对应的 `index.md`
+4. 后续提取复用已有类别
 
 ## 计划确认格式
 
+调用 submit_plan 时，plan_json 需遵循以下结构，**每项必须包含对应字段**，否则会被标记警告：
+
+```json
+{
+  "scope": "1-5",
+  "new_category": [
+    {"name": "人物", "reason": "故事出现多个关键人物需分类管理"}
+  ],
+  "new_wiki": [
+    {"category": "人物", "name": "叶匀", "chapters": "1", "reason": "首次出场"}
+  ],
+  "edit_wiki": [
+    {"category": "人物", "name": "张三", "chapters": "5", "reason": "境界从筑基→金丹"}
+  ],
+  "new_rule": [
+    {"name": "境界体系", "reason": "第1章描述了完整的修炼境界划分"}
+  ],
+  "new_plot": [
+    {"name": "天才陨落", "chapters": "1", "reason": "开篇核心事件"}
+  ],
+  "edit_plot": [
+    {"name": "天才陨落", "chapters": "1-5", "reason": "补充后续发展"}
+  ]
+}
 ```
-知识提取计划：
-- 新增词条（3个）：
-  · 人物：王五（第12章首次出现）
-  · 势力：玄天宗（第15章提及）
-  · 法宝：噬魂枪（第18章出现）
-- 修改词条（2个）：
-  · 张三：境界从筑基→金丹（第20章）
-  · 青云宗：新增代表人物李四（第22章）
-确认执行？
-```
+
+| 字段 | 所属项 | 说明 |
+|------|--------|------|
+| `scope` | 顶层 | 提取范围，纯数字格式如 `"1-5"` |
+| `category` | new_wiki / edit_wiki | 词条所属类别 |
+| `name` | 所有项 | 词条/规则/卡片名称 |
+| `chapters` | new_wiki / edit_wiki / new_plot / edit_plot | 关联章节号 |
+| `reason` | 所有项 | 为什么新增/修改，让用户理解必要性 |
+
+每个字段的值**不能为空**，缺少必要字段会被系统标记警告。
 
 ## Wiki 优先 RAG 原则（重要）
 
@@ -95,10 +124,12 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 
 ## 自审检查项
 
+进入 review_workflow 后，自动 lint 会生成债务清单。在此基础上进行语义审查：
+
 | 检查项 | 说明 |
 |--------|------|
-| **YAML 结构完整性** | 使用 `check_wiki_yaml` 检查 frontmatter 是否存在/重复、正文是否为空（审核必须最先调用） |
-| wikilink 悬空检查 | 检查 `[[wikilink]]` 是否指向已存在的词条 |
+| **YAML 结构完整性** | 手动检查 frontmatter 是否存在/重复、正文是否为空 |
+| wikilink 悬空检查 | 检查 `[[wikilink]]` 是否指向已存在的词条（lint 已覆盖） |
 | 规则文档检查 | 检查 rules/ 下的规则文档是否包含 `[[wikilink]]`，以及是否需要新增规则 |
 | state 缺失检查 | 检查人物/势力类词条是否缺少 state 字段（类别 index.md 定义了是否需要 state） |
 | **state 简洁性检查** | state 字段应简明扼要（建议 ≤100 字），不应堆叠剧情流水账 |
@@ -106,7 +137,7 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 | 信息矛盾检查 | 检查前后信息是否矛盾（如境界变化是否符合逻辑） |
 | 描述/状态混淆检查 | 检查 description 和 state 是否混淆 |
 | 关系遗漏检查 | 检查是否遗漏了重要关系（如人物归属势力、持有物品等） |
-| 文档篇幅检查 | wiki/规则文档超过 1500 字时需发起压缩请求 |
+| 文档篇幅检查 | wiki/规则文档超过 1500 字时使用 `edit_doc` 压缩 |
 | 剧情卡片 Wikilink 悬空检查 | 检查剧情卡片中的 `[[wikilink]]` 是否指向存在的词条 |
 | 剧情区间越界检查 | 检查剧情卡片的 chapters 是否超出原文实际范围 |
 | 未结束卡片收尾遗漏检查 | 对照最新章节判断是否应有收尾操作 |
@@ -124,10 +155,9 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
   - `edit_doc_wikilink` 支持 `mode="unlink"` 取消链接：`[[肉仙]]` → `肉仙`，`[[肉仙|肉仙六重]]` → `肉仙六重`
     - 适用于被 rules/ 覆盖的概念（境界名、通用物品等不需要建词条的场景）
   - **Unlink 黑名单**：取消链接时加 `remember=true`（如 `edit_doc_wikilink(…, mode="unlink", remember=true)`），会将该目标记入 `unlink-blacklist.json`。后续 lint 运行到此断链自动跳过，不再报债务。适用于跨词条频繁出现的境界名、通用物品等高频误报。
-- subagent 使用 fresh messages=[]，不共享父对话上下文
-- subagent 无法调用 knowledge_task、new_category 等管理工具
-- subagent 完成时调用 agent_output 输出完整操作摘要
-- **知识提取完成后必须调用 review_knowledge 进行审核**，审核通过后才算完成
+- **知识提取完成后必须调用 review_workflow 进行审核**，审核通过后调用 finish_task 结束
+- 审核时 lint 已自动运行并注入上下文，无需手动调用 lint 工具
+- 审核阶段只读白名单内的章节/wiki/plot，使用 wiki_list / plot_list 可查看存在性但不可读内容
 
 ## 词条命名约定
 

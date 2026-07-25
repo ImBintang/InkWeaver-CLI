@@ -1,10 +1,12 @@
 """鉴知 Agent — 组装 system prompt、tool defs、工具路由"""
 
+import json
+import time
 from pathlib import Path
 
 from agent.base import BaseAgent
 from agent.todo import TodoManager
-from agent.compact import ContextManager
+from agent.compact import ContextManager, PersistCache
 from agent.skill import SkillRegistry
 from agent.loop import agent_loop
 from agent.permission import PermissionManager
@@ -22,6 +24,47 @@ from tools import editor as editor_tools
 TOOL_RESULTS_DIR = Path(".task_outputs") / "tool-results"
 
 
+DEBT_FILE = "lint-debt.json"
+
+
+def _read_lint_report(workspace: Path) -> str:
+    """读取 lint-debt.json 返回完整债务报告"""
+    fp = workspace / DEBT_FILE
+    if not fp.exists():
+        return "（lint 报告不存在，请先运行 lint 检查）"
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        lines = ["## 完整 Lint 债务报告", ""]
+        for debt_type, items in data.items():
+            if items:
+                lines.append(f"### {debt_type}（{len(items)} 项）")
+                for item in items:
+                    if debt_type == "broken_links":
+                        lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
+                    elif debt_type == "plot_broken_links":
+                        lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
+                    elif debt_type == "state_missing":
+                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "state_verbose":
+                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "length_overage":
+                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "desc_verbose":
+                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "file_errors":
+                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "unended_plots":
+                        lines.append(f"  ⚠️ {item.get('name', '?')}（{item.get('detail', '')}）")
+                    elif debt_type == "appearance":
+                        lines.append(f"  {item.get('file', '?')}（{item.get('detail', '')}）")
+                    else:
+                        lines.append(f"  ⚠️ {json.dumps(item, ensure_ascii=False)}")
+                lines.append("")
+        return "\n".join(lines) if len(lines) > 1 else "（lint 报告为空，无债务）"
+    except Exception as e:
+        return f"（读取 lint 报告失败：{e}）"
+
+
 class JianzhiAgent(BaseAgent):
     """写作智能体 — 组装各模块并提供统一入口"""
 
@@ -31,6 +74,8 @@ class JianzhiAgent(BaseAgent):
         self.context = ContextManager()
         self.skills = SkillRegistry(skills_dir)
         self.permission = PermissionManager()
+        self._persist_cache = PersistCache(workspace)
+        self._last_tool_call_id = ""
         self.review_session = None  # 妙笔审阅会话（由 MuseWorkflow 设置）
 
         self.system_prompt = self.build_system_prompt()
@@ -47,7 +92,8 @@ class JianzhiAgent(BaseAgent):
             "技能是封装了完整工作流程的知识包。调用技能时，系统会加载该技能的详细步骤说明到上下文中。",
             "**何时调用技能**：遇到以下关键词或场景时，调用对应的技能而非自行推断步骤：\n",
             "- 触发词「提取知识、更新wiki、/update、新章节」→ 调用 `knowledge_extract` 技能\n",
-            "- 触发词「创建类别、新建分类、类别规范、设计类别」→ 调用 `category_design` 技能\n",
+            "- 触发词「创建类别、新建分类、类别规范、设计类别、首次提取」→ 调用 `category_design` 技能\n"
+            "- 知识提取流程中，首次创建类别前**必须先调用** `category_design` 技能获取规范，不能直接用 new_category\n",
             "调用方式：直接在响应中使用工具名，传入 query 参数说明意图。\n",
             "",
             "当前可用技能：",
@@ -60,15 +106,15 @@ class JianzhiAgent(BaseAgent):
             "- 使用 update_todo 管理当前任务计划",
             "- 使用 agent_output 进行中间轮输出",
             "- 使用 tools_log_check 查询被压缩的工具调用记录",
-            "- 使用 handoff_knowledge 进入 Knowledge 专家模式（知识提取、Wiki管理）",
+            "- 使用 submit_plan 提交知识提取/修改计划（**禁止直接文本输出计划**，必须通过此工具提交）",
             "",
             "# 知识库（只读）",
             "工作区可能包含知识库（wiki/目录 和 plot/目录），其中存储了已提取的结构化知识和剧情事件。",
             "当用户询问故事相关的问题时，**优先使用知识库进行检索**，而不是直接翻原文。",
             "",
             "### 知识库查询工具",
-            "- 使用 category_list 查看 wiki 有哪些类别（人物/势力/地点/功法/宝物）",
-            "- 使用 wiki_list <类别> 查看某类别下的所有词条",
+            "- 使用 category_list 查看 wiki 有哪些类别",
+            "- 使用 wiki_list <类别> 查看某类别下的所有词条。**注意：结果可能有多页**（如显示「第 1/3 页」），必须逐页翻完再判断某词条是否存在",
             "- 使用 read_wiki <类别> <词条名> 读取词条完整内容（含 frontmatter）",
             "- 使用 read_plot <名称> 读取剧情卡片（了解故事事件）",
             "- 使用 plot_list 浏览剧情卡片列表（支持 ended 参数过滤）",
@@ -96,11 +142,31 @@ class JianzhiAgent(BaseAgent):
             "- ❌ 已有知识库词条的情况下，不查知识库就去翻原文",
             "- ❌ 把知识库能解答的问题变成大段章节阅读",
             "",
-            "# 模式切换",
-            "- 当用户要求「提取知识」「更新 wiki」「管理知识库」等知识相关任务时，",
-            "  调用 handoff_knowledge 进入 Knowledge 专家模式",
-            "- Knowledge 模式拥有完整的 Wiki 管理工具集（new_wiki / knowledge_task 等）",
-            "- 切换后会询问用户确认，确认后方可执行",
+            "# 工作流模式",
+            "本 Agent 使用计划驱动的工作流模式，分为两个阶段：",
+            "",
+            "### 阶段一：规划阶段（planning）— 默认状态",
+            "- ✅ 允许：所有只读工具（read_chapters / wiki_list / read_wiki / 等）",
+            "- ❌ 禁止：所有写工具（new_wiki / edit_wiki / batch_create_wiki / 等）",
+            "- 请先阅读章节和已有知识库，制定提取计划",
+            "- 通过 submit_plan 提交计划，等待用户审阅",
+            "",
+            "### 🔴 计划提交强制规则（重要）",
+            "当你完成分析、准备好知识提取计划后，**必须**调用 submit_plan 工具提交计划（传入 plan_json 字符串），",
+            "**禁止**将计划内容以文本形式直接输出。",
+            "直接输出文本会导致工作流断裂——用户无法通过系统流程审阅和确认计划，权限也无法切换到执行阶段。",
+            "",
+            "### 阶段二：执行阶段（executing）— 用户确认后",
+            "- 所有写工具放行，但仅限计划白名单内的操作",
+            "- 白名单外的写操作会被拦截",
+            "- 使用 batch_create_wiki / batch_edit_wiki 批量操作",
+            "- 完成后调用 review_workflow 进入审核",
+            "",
+            "### Review 审核模式（review_workflow）",
+            "- 进入后上下文清空，只能读取计划内的章节/wiki/plot",
+            "- 先运行自动 lint 获取债务清单（摘要），使用 lint_report 查看断链等债务的全量明细",
+            "- 检查语义问题，制定修改计划",
+            "- 修改完成后调用 finish_task 结束",
             "",
             "# 规则",
             "- 需要多步骤工作时，先用 update_todo 制定计划",
@@ -146,13 +212,13 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "tools_log_check",
-                    "description": "查询被压缩的历史工具调用记录",
+                    "description": "查询被压缩/缓存的历史工具调用记录。传入工具名（如 batch_create_wiki）可查看最近一次该工具的完整执行结果。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "tool_use_id": {
                                 "type": "string",
-                                "description": "要查询的工具调用 ID",
+                                "description": "工具名（如 batch_create_wiki）或工具调用 ID（如 call_xxx）",
                             }
                         },
                         "required": ["tool_use_id"],
@@ -214,17 +280,6 @@ class JianzhiAgent(BaseAgent):
                 "function": {
                     "name": "chapter_list",
                     "description": "获取当前工作区的章节列表（含标题）",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {},
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "handoff_knowledge",
-                    "description": "切换到 Knowledge 专家模式（用于知识提取、Wiki 管理）。当用户需要提取章节知识、管理 wiki、更新知识库时调用此工具。调用后系统会询问用户确认。",
                     "parameters": {
                         "type": "object",
                         "properties": {},
@@ -389,6 +444,210 @@ class JianzhiAgent(BaseAgent):
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "lint_report",
+                    "description": "返回完整的 lint 检查债务报告（从 lint-debt.json 读取），包含全部 broken_links 等债务明细。查看具体断链的完整列表。",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            # 遗留写工具（v4 统一管理，保留向后兼容）
+            {
+                "type": "function",
+                "function": {
+                    "name": "new_wiki",
+                    "description": "新建 wiki 词条（规则文档请用 new_rule）。规划阶段被权限系统拦截。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "description": "类别名"},
+                            "name": {"type": "string", "description": "词条名"},
+                            "content": {"type": "string", "description": "正文内容"},
+                            "description": {"type": "string", "description": "描述"},
+                            "state": {"type": "string", "description": "状态"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
+                        },
+                        "required": ["category", "name", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_wiki",
+                    "description": "编辑 wiki 词条。也可使用 edit_doc(doc_type=\"wiki\")。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "description": "类别名"},
+                            "name": {"type": "string", "description": "词条名"},
+                            "content": {"type": "string", "description": "新正文"},
+                            "description": {"type": "string", "description": "新描述"},
+                            "state": {"type": "string", "description": "新状态"},
+                            "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
+                        },
+                        "required": ["category", "name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_wiki",
+                    "description": "删除 wiki 词条。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "description": "类别名"},
+                            "name": {"type": "string", "description": "词条名"},
+                        },
+                        "required": ["category", "name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "new_rule",
+                    "description": "新建规则文档（rules/ 目录，不参与关系系统）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "规则名"},
+                            "content": {"type": "string", "description": "文档全文"},
+                        },
+                        "required": ["name", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_rule",
+                    "description": "编辑规则文档。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "规则名"},
+                            "content": {"type": "string", "description": "新全文"},
+                        },
+                        "required": ["name", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_rule",
+                    "description": "删除规则文档。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "规则名"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "new_plot",
+                    "description": "新建剧情卡片。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片名"},
+                            "content": {"type": "string", "description": "正文（需包含 [[wikilink]]）"},
+                            "chapters": {"type": "string", "description": "覆盖章节范围，如 \"1-5,7-10\""},
+                            "description": {"type": "string", "description": "描述"},
+                            "state": {"type": "string", "description": "状态"},
+                        },
+                        "required": ["name", "content", "chapters"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_plot",
+                    "description": "编辑剧情卡片。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片名"},
+                            "content": {"type": "string", "description": "新正文"},
+                            "chapters": {"type": "string", "description": "新章节范围"},
+                            "description": {"type": "string", "description": "新描述"},
+                            "state": {"type": "string", "description": "新状态"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "end_plot",
+                    "description": "结束剧情卡片（设置 ended=true）。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片名"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "delete_plot",
+                    "description": "删除剧情卡片。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "剧情卡片名"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "new_category",
+                    "description": "创建新类别。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "类别名"},
+                            "description": {"type": "string", "description": "类别描述"},
+                            "writing_guide": {"type": "string", "description": "写作规范"},
+                            "has_state": {"type": "boolean", "description": "是否需要 state 字段"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "edit_category",
+                    "description": "编辑类别。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "类别名"},
+                            "description": {"type": "string", "description": "新描述"},
+                            "writing_guide": {"type": "string", "description": "新写作规范"},
+                            "has_state": {"type": "boolean", "description": "新 state 配置"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+            },
             # 统一文档管理工具（通过 doc_type 参数指定类型：wiki / plot / rule）
             {
                 "type": "function",
@@ -522,6 +781,117 @@ class JianzhiAgent(BaseAgent):
             },
         })
 
+        # === v4 工作流工具 ===
+        # submit_plan — 提交计划
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "submit_plan",
+                "description": "提交知识提取/修改计划。调用后 Agent 暂停，用户审阅计划。"
+                                "计划通过后写权限开放，白名单外的写操作会被拦截。"
+                                "单次提取不得超过 20 章。若用户未指定，默认 10 章。"
+                                "计划 JSON 包括：scope（提取范围）, new_category, new_wiki, "
+                                "edit_wiki, new_rule, edit_rule, new_plot, edit_plot。"
+                                "每项字段说明："
+                                "new_wiki/edit_wiki 每项需含 category（类别）, name（词条名）, chapters（章节号）, reason（理由）；"
+                                "new_rule/edit_rule 每项需含 name（规则名）, reason（规则说明）；"
+                                "new_plot/edit_plot 每项需含 name（卡片名）, chapters（章节范围）, reason（理由）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "plan_json": {
+                            "type": "string",
+                            "description": "完整的计划 JSON 字符串",
+                        }
+                    },
+                    "required": ["plan_json"],
+                },
+            },
+        })
+        # batch_create_wiki — 批量创建 wiki 词条
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "batch_create_wiki",
+                "description": "批量创建 wiki 词条（部分成功模式）。"
+                                "每个词条需指定类别、名称、正文。"
+                                "返回成功/失败统计。适用于执行阶段批量操作。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "category": {"type": "string", "description": "类别名"},
+                                    "name": {"type": "string", "description": "词条名"},
+                                    "content": {"type": "string", "description": "正文内容"},
+                                    "description": {"type": "string", "description": "描述（可选）"},
+                                    "state": {"type": "string", "description": "状态（可选）"},
+                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
+                                },
+                                "required": ["category", "name", "content"],
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                },
+            },
+        })
+        # batch_edit_wiki — 批量编辑 wiki 词条
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "batch_edit_wiki",
+                "description": "批量编辑 wiki 词条（部分成功模式）。"
+                                "只传需要修改的字段，category+name 为必填，content 可选。"
+                                "返回成功/失败统计。适用于执行阶段批量操作。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "category": {"type": "string", "description": "类别名"},
+                                    "name": {"type": "string", "description": "词条名"},
+                                    "content": {"type": "string", "description": "正文内容（可选）"},
+                                    "description": {"type": "string", "description": "描述（可选）"},
+                                    "state": {"type": "string", "description": "状态（可选）"},
+                                    "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
+                                },
+                                "required": ["category", "name"],
+                            },
+                        }
+                    },
+                    "required": ["items"],
+                },
+            },
+        })
+        # review_workflow — 切换到审核工作流
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "review_workflow",
+                "description": "切换到 Review 审核工作流。调用后当前上下文将存档并清空，"
+                                "进入审核阶段。审核阶段只能读取计划内的章节/wiki/plot。"
+                                "知识提取完成后必须调用此工具。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })
+        # finish_task — 完成任务
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "finish_task",
+                "description": "完成任务。自动校验、记录日志，然后清空上下文返回初始状态。"
+                                "Review 修改完成后调用。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        })
+
         # 为每个 skill 生成一个工具（渐进式披露：只暴露 name+description，调用时加载全文）
         for skill_name in self.skills.skill_names():
             doc = self.skills.documents.get(skill_name)
@@ -547,18 +917,10 @@ class JianzhiAgent(BaseAgent):
 
     def dispatch_tool(self, name: str, args: dict) -> str:
         """工具分发路由"""
-        # 统一权限检查
-        write_tools = {
-            "handoff_knowledge", "new_wiki", "edit_wiki", "delete_wiki",
-            "new_category", "edit_category", "new_rule", "edit_rule",
-            "delete_rule", "knowledge_task", "edit_index",
-            "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink",
-            "delete_doc",
-        }
-        if name in write_tools:
-            result = self.permission.check(name)
-            if result is not None:
-                return result
+        # 统一权限检查（v4 pipeline: deny → whitelist → allow）
+        result = self.permission.check(name, args)
+        if result is not None:
+            return result
 
         # skill 调用
         if name in self.skills.skill_names():
@@ -574,8 +936,68 @@ class JianzhiAgent(BaseAgent):
             if self.review_session is None:
                 return "错误：review_done 仅在妙笔审阅模式下可用"
             result = self.review_session.review_done()
-            import json
             return json.dumps(result, ensure_ascii=False)
+
+        # === v4 工作流工具 ===
+        if name == "submit_plan":
+            from tools.workflow import submit_plan as _submit_plan
+            plan_str = args.get("plan_json", "{}")
+            result = _submit_plan(self.workspace, plan_str)
+            try:
+                result_data = json.loads(result)
+                if result_data.get("status") == "pending_review":
+                    self.cli.print_plan(result_data)
+                    self.cli.print_info("请确认是否执行此计划 (y/n)：")
+                    confirm = input().strip().lower()
+                    if confirm == "y":
+                        plan = result_data.get("plan", {})
+                        if self.permission.mode == "review":
+                            # 审核阶段：合并到现有白名单，不重置
+                            return self.permission.submit_review_plan(plan)
+                        else:
+                            self.permission.submit_plan(plan)
+                            return json.dumps({
+                                "status": "approved",
+                                "message": "计划已通过，写权限已开放，可以开始执行。"
+                            }, ensure_ascii=False)
+                    else:
+                        self.cli.print_info("请输入打回理由：")
+                        reason = input().strip()
+                        return json.dumps({
+                            "status": "rejected",
+                            "reason": reason,
+                            "message": f"计划被打回，理由：{reason}。请根据理由修改后重新提交。"
+                        }, ensure_ascii=False)
+            except (json.JSONDecodeError, Exception):
+                pass
+            return result
+
+        if name == "review_workflow":
+            from tools.workflow import review_workflow as _review_workflow
+            self._archive_context()
+            self.permission.switch_review()
+            # 自动运行 lint
+            try:
+                from tools.lint import run_lint
+                lint_result = run_lint(self.workspace)
+            except Exception:
+                lint_result = "（lint 检查异常）"
+            # 标记等待 chat() 清理上下文（不清 self.messages，避免 agent_loop 的 tool result 链断裂）
+            self._review_pending = {"lint_result": lint_result}
+            self._stop_agent_loop = True
+            return _review_workflow(self.workspace)
+
+        if name == "finish_task":
+            from tools.workflow import finish_task as _wf_finish
+            from tools.diff import finish_task as _diff_finish
+            # 沿用旧 finish_task 逻辑：校验存在性 + 记录 log.json + 构建关系图
+            scope = str(sorted(self.permission.whitelist.read_chapters or [0]))
+            _diff_finish(self.workspace, scope)
+            self.permission.reset()
+            # 标记等待 chat() 清理上下文
+            self._finish_pending = True
+            self._stop_agent_loop = True
+            return _wf_finish(self.workspace)
 
         dispatch = {
             "update_todo": self._handle_todo,
@@ -598,12 +1020,29 @@ class JianzhiAgent(BaseAgent):
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),
             "doc_diff": lambda **kw: diff_tools.doc_diff(self.workspace),
             "context_query": lambda **kw: self.context.query_context(**kw),
+            "lint_report": lambda **kw: _read_lint_report(self.workspace),
             # 统一文档管理工具
             "create_doc": lambda **kw: editor_tools.create_doc(self.workspace, **kw),
             "edit_doc": lambda **kw: editor_tools.edit_doc(self.workspace, **kw),
             "edit_doc_text": lambda **kw: editor_tools.edit_doc_text(self.workspace, **kw),
             "edit_doc_wikilink": lambda **kw: editor_tools.edit_doc_wikilink(self.workspace, **kw),
             "delete_doc": lambda **kw: editor_tools.delete_doc(self.workspace, **kw),
+            # v4 批量工具
+            "batch_create_wiki": lambda **kw: wiki_tools.batch_create_wiki(self.workspace, kw.get("items", [])),
+            "batch_edit_wiki": lambda **kw: wiki_tools.batch_edit_wiki(self.workspace, kw.get("items", [])),
+            # 遗留写工具（代理到具体模块）
+            "new_wiki": lambda **kw: wiki_tools.new_wiki(self.workspace, **kw),
+            "edit_wiki": lambda **kw: wiki_tools.edit_wiki(self.workspace, **kw),
+            "delete_wiki": lambda **kw: wiki_tools.delete_wiki(self.workspace, **kw),
+            "new_rule": lambda **kw: rules_tools.new_rule(self.workspace, **kw),
+            "edit_rule": lambda **kw: rules_tools.edit_rule(self.workspace, **kw),
+            "delete_rule": lambda **kw: rules_tools.delete_rule(self.workspace, **kw),
+            "new_plot": lambda **kw: plot_tools.new_plot(self.workspace, **kw),
+            "edit_plot": lambda **kw: plot_tools.edit_plot(self.workspace, **kw),
+            "end_plot": lambda **kw: plot_tools.end_plot(self.workspace, **kw),
+            "delete_plot": lambda **kw: plot_tools.delete_plot(self.workspace, **kw),
+            "new_category": lambda **kw: category_tools.new_category(self.workspace, **kw),
+            "edit_category": lambda **kw: category_tools.edit_category(self.workspace, **kw),
         }
 
         handler = dispatch.get(name)
@@ -625,6 +1064,10 @@ class JianzhiAgent(BaseAgent):
                 name_val = args.get("name", "")
                 if name_val and not result.startswith("错误"):
                     self.context.track_entity("plot", [name_val])
+            # PersistCache：大输出/写工具结果持久化
+            if hasattr(self, '_persist_cache') and self._persist_cache.should_persist(name, result):
+                tc_id = self._last_tool_call_id or f"{name}_{int(time.time())}"
+                result = self._persist_cache.persist_result(name, args, result, tc_id)
             return result
         except Exception as e:
             return f"错误：{e}"
@@ -634,10 +1077,27 @@ class JianzhiAgent(BaseAgent):
         return self.todo.update(items)
 
     def _handle_tools_log_check(self, tool_use_id: str) -> str:
+        # 先查 TOOL_RESULTS_DIR（精确 tool_call_id 匹配）
         path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"
         if path.exists():
             text = path.read_text(encoding="utf-8")
             return text[:30000]
+        # 再查 PersistCache（按工具名搜最近一次）
+        if hasattr(self, '_persist_cache'):
+            try:
+                cache = json.loads(self._persist_cache.cache_path.read_text(encoding="utf-8"))
+                # 按 tool name 匹配，取最新的
+                matches = [(k, v) for k, v in cache.items()
+                           if isinstance(v, dict) and v.get("tool") == tool_use_id]
+                if matches:
+                    # 取最后一条（最新的）
+                    _, data = matches[-1]
+                    full = data.get("full_output", "")
+                    if full:
+                        return full[:30000]
+                    return data.get("result_preview", "(缓存无完整输出)")
+            except Exception:
+                pass
         return f"未找到工具调用记录：{tool_use_id}"
 
     def _handle_read_chapters(self, chapters: str) -> str:
@@ -664,10 +1124,35 @@ class JianzhiAgent(BaseAgent):
         """处理一条用户输入
 
         Returns:
-            True 如果请求了切换到 Knowledge 模式，否则 False
+            bool: 始终返回 False（v4 不再有 handoff 机制）
         """
         self.messages.append({"role": "user", "content": user_input})
         self.messages = agent_loop(self, self.messages)
+
+        # review_workflow / finish_task 过渡：agent_loop 结束后清理上下文
+        if hasattr(self, '_review_pending') and self._review_pending:
+            lint_result = self._review_pending.get("lint_result", "")
+            self.messages.clear()
+            self._inject_review_context(lint_result)
+            del self._review_pending
+            # 清除上一轮 dispatch 设置的停止标记，否则自动审核也跑不起来
+            self._stop_agent_loop = False
+            # 注入用户提示引导 LLM 主动执行审核，避免只有 system 消息导致 LLM 只输出文本
+            self.messages.append({
+                "role": "user",
+                "content": "请根据以上信息逐项检查所有新建词条、剧情卡片、规则文档的语义质量。"
+                           "对于 broken_link，严格按「断链处理规则」的四个分类处理："
+                           "计划内漏建（①）直接 new_wiki 补建；"
+                           "规则概念（②）用 edit_doc_wikilink(mode='unlink', remember=true) 取消链接并记黑名单；"
+                           "计划外重要遗漏（③）先用 submit_plan 提交补充计划，用户确认后再 new_wiki 补建；"
+                           "次要实体（④）用 edit_doc_wikilink(mode='unlink', remember=false) 取消链接不加黑名单。"
+                           "对于 unended_plots，用 end_plot 结束已完结的剧情卡片。"
+                           "完成后调用 finish_task 结束。"
+            })
+            self.messages = agent_loop(self, self.messages)
+        elif hasattr(self, '_finish_pending') and self._finish_pending:
+            self.messages.clear()
+            del self._finish_pending
 
         # 打印最终输出（取最后一条 assistant 的文本回复）
         for msg in reversed(self.messages):
@@ -677,7 +1162,7 @@ class JianzhiAgent(BaseAgent):
                     self.cli.print_output(text)
                 break
 
-        return self.permission.handoff_requested
+        return False
 
     def context_report(self) -> str:
         """/context 指令"""
@@ -691,3 +1176,73 @@ class JianzhiAgent(BaseAgent):
             "content": "（上下文已压缩，继续当前工作）"
         }]
         self.cli.print_info("上下文已压缩。")
+
+    # ---- v4 工作流辅助方法 ----
+
+    def _archive_context(self):
+        """存档当前上下文到 session/transcript_{timestamp}.jsonl"""
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive_dir = self.workspace / "session"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        path = archive_dir / f"transcript_{ts}.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for msg in self.messages:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        self.cli.print_info(f"上下文已存档至：{path}")
+
+    def _inject_review_context(self, lint_result: str = ""):
+        """注入 review 首轮信息：计划JSON + lint 结果 + 已创建条目快照"""
+        parts = ["【系统】你已进入 Review 审核工作流。"]
+        parts.append("")
+        parts.append("以下是本次知识提取计划所涉及的章节和条目信息：")
+        parts.append("")
+
+        # 注入已创建的 wiki 条目列表
+        wiki_entries = []
+        for cat, name in sorted(self.permission.whitelist.new_wiki):
+            wiki_entries.append(f"[{cat}] {name}（新建）")
+        for cat, name in sorted(self.permission.whitelist.edit_wiki):
+            wiki_entries.append(f"[{cat}] {name}（修改）")
+
+        if wiki_entries:
+            parts.append("### 计划内的知识条目")
+            parts.extend(f"- {e}" for e in wiki_entries)
+
+        # 注入 lint 结果
+        if lint_result and lint_result != "（lint 检查异常）":
+            parts.append("")
+            parts.append("### 自动 Lint 检查结果")
+            parts.append(lint_result[:8000])
+
+        parts.append("")
+        parts.append("### 注意事项")
+        parts.append("- 你只能读取计划范围内的章节、wiki 和剧情卡片")
+        parts.append("- 使用 wiki_list / plot_list / chapter_list 可查看存在性但不可读内容")
+        parts.append("- 以上是自动 lint 的债务清单，请据此进行语义审查和修复")
+        parts.append("")
+        parts.append("### 断链（broken_link）处理规则")
+        parts.append("lint 报告的 broken_link 需要按以下规则区分处理：")
+        parts.append("")
+        parts.append("**① 计划内漏建词条** — 该实体在本轮提取计划（上方「计划内的知识条目」）的 new_wiki 列表中，")
+        parts.append("   但实际未创建（词条文件不存在）。→ 直接使用 `new_wiki` 补建（白名单已存在）。")
+        parts.append("")
+        parts.append("**② 规则文档已覆盖的概念** — 如通用境界名、通用物品、世界观底层设定等，规则文档已定义无需重复建词条。")
+        parts.append("   → 使用 `edit_doc_wikilink(mode=\"unlink\", remember=true)` 取消链接并记入 unlink 黑名单。")
+        parts.append("")
+        parts.append("**③ 计划外的重要遗漏词条** — 不属于以上两类，但实体本身值得建词条（如重要人物、独特宝物、核心势力等）。")
+        parts.append("   → 先通过 `submit_plan` 提交补充计划申请白名单扩展（只需包含该词条的 new_wiki），")
+        parts.append("    用户确认后白名单自动扩展，再使用 `new_wiki` 创建。")
+        parts.append("")
+        parts.append("**④ 次要实体** — 一次性配角、普通妖兽、泛称物品等，不值得独立建词条。")
+        parts.append("   → 使用 `edit_doc_wikilink(mode=\"unlink\", remember=false)` 取消链接，**不**记入黑名单。")
+        parts.append("")
+        parts.append("### 未结束剧情卡片处理规则")
+        parts.append("lint 报告的 unended_plots 表示剧情卡片章节范围已结束但未标记收尾。")
+        parts.append("对于这些卡片，调用 `end_plot(name=\"...\", end_notes=\"...\")` 结束。")
+        parts.append("判断标准：卡片的最大章节号 ≤ 最新章节号 - 10，且卡片故事内容已自然完结。")
+
+        self.messages.append({
+            "role": "system",
+            "content": "\n".join(parts)
+        })

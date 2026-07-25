@@ -8,7 +8,6 @@ from pathlib import Path
 
 from cli import CLI
 from Jianzhi import JianzhiAgent
-from agent.knowledge import KnowledgeAgent
 from tools import workspace as workspace_tools
 
 
@@ -162,8 +161,6 @@ _HELP_TEXT = """可用指令：
     /token                查询本会话累计 token 用量
 
   知识管理：
-    /knowledge            进入 Knowledge 专家模式
-    /exit                 退出 Knowledge 模式（回到普通模式）
     /update               触发知识提取
     /diff                 查看新增/修改的章节
     /memory               查看记忆索引
@@ -443,45 +440,17 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         cli.print_info(_HELP_TEXT)
 
     elif command == "exit":
-        # 如果在 Knowledge 模式中，退出到普通模式
-        if isinstance(jianzhi, KnowledgeAgent):
-            # 自动构建关系图（兜底：确保 wiki 关系是最新的）
-            cli.print_info("正在构建关系图...")
-            try:
-                from auto.relation_extractor import build_relations, save_relations
-                relations = build_relations(jianzhi.workspace)
-                if relations:
-                    save_relations(jianzhi.workspace, relations)
-                    total = sum(len(t) for t in relations.values())
-                    cli.print_info(f"关系图已构建：共 {len(relations)} 个词条，{total} 条关系")
-                else:
-                    cli.print_info("（未发现 wikilink 关系）")
-            except Exception as e:
-                cli.print_info(f"（构建关系图失败：{e}）")
-
-            cli.print_info("退出 Knowledge 模式，回到普通模式。")
-            saved_messages = jianzhi.messages
-            jianzhi = JianzhiAgent(config, jianzhi.workspace, SKILLS_DIR, cli)
-            jianzhi.messages = saved_messages
-        else:
-            return False, jianzhi
+        return False, jianzhi
 
     elif command == "knowledge":
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        if isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("你已在 Knowledge 模式中。")
-            return True, jianzhi
-        cli.print_info("进入 Knowledge 专家模式。")
-        jianzhi = KnowledgeAgent(config, jianzhi.workspace, SKILLS_DIR, cli, messages=jianzhi.messages)
+        cli.print_info("v4 不再有单独的 Knowledge 模式，知识管理功能已整合到鉴知 Agent 中。")
 
     elif command == "update":
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
-            return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
             return True, jianzhi
         cli.print_info("触发知识提取...")
         jianzhi.chat("请执行知识提取流程")
@@ -490,18 +459,12 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
-            return True, jianzhi
         from tools.diff import doc_diff
         cli.print_info(doc_diff(jianzhi.workspace))
 
     elif command == "memory":
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
-            return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
             return True, jianzhi
         name = _get_flag_value(parts, "-n")
         from tools.memory import read_memory
@@ -510,9 +473,6 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
     elif command == "wiki":
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
-            return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
             return True, jianzhi
         name = _get_flag_value(parts, "-n")
         if not name:
@@ -539,9 +499,6 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
-            return True, jianzhi
         name = _get_flag_value(parts, "-n")
         from tools.rules import rules_list, read_rule
         if name:
@@ -553,9 +510,6 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
-            return True, jianzhi
         name = _get_flag_value(parts, "-n")
         if not name:
             cli.print_info("用法：/relation -n <词条名>")
@@ -566,9 +520,6 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
     elif command == "link":
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
-            return True, jianzhi
-        if not isinstance(jianzhi, KnowledgeAgent):
-            cli.print_info("请先使用 /knowledge 进入 Knowledge 模式")
             return True, jianzhi
         from auto.relation_extractor import build_relations, save_relations
         relations = build_relations(jianzhi.workspace)
@@ -686,16 +637,7 @@ def main():
             if jianzhi is None:
                 cli.print_info("请先创建或切换到某个工作区。")
                 continue
-            needs_handoff = jianzhi.chat(text)
-            if needs_handoff and not isinstance(jianzhi, KnowledgeAgent):
-                cli.print_info("\n检测到知识提取需求，是否进入 Knowledge 专家模式？(Y/n)")
-                confirm = input().strip().lower()
-                if confirm in ("", "y", "yes"):
-                    jianzhi.permission.confirm_handoff()
-                    cli.print_info("进入 Knowledge 专家模式。")
-                    jianzhi = KnowledgeAgent(config, jianzhi.workspace, SKILLS_DIR, cli, messages=jianzhi.messages)
-                else:
-                    cli.print_info("已取消。")
+            jianzhi.chat(text)
 
     # 退出
     cli.close_logger()

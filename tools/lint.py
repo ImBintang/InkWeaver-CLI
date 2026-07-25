@@ -612,6 +612,60 @@ def _compact_chapter_list(nums: list[int]) -> str:
     return ",".join(ranges)
 
 
+# ── 未结束剧情卡片检测 ──────────────────────────────────────────
+
+UNENDED_PLOT_GAP = 10  # 卡片最大章节比最新章节落后超过此值即判定可收尾
+
+
+def check_unended_plots(workspace: Path) -> list[dict]:
+    """检测可收尾但未结束的剧情卡片
+
+    判定条件：
+    - ended=false（或缺失）
+    - chapters 中的最大数值 ≤ 最新章节号 - UNENDED_PLOT_GAP
+    """
+    max_chapter = _get_max_chapter(workspace)
+    if max_chapter <= UNENDED_PLOT_GAP:
+        return []
+
+    plot_root = workspace / "plot"
+    if not plot_root.exists():
+        return []
+
+    debts: list[dict] = []
+    threshold = max_chapter - UNENDED_PLOT_GAP
+
+    for fp in sorted(plot_root.rglob("*.md")):
+        if fp.name == "index.md":
+            continue
+        text = fp.read_text(encoding="utf-8")
+        meta, _ = _parse_frontmatter(text)
+
+        # 已结束则跳过
+        ended = meta.get("ended", meta.get("end", False))
+        if ended in (True, "true", "True", "是", "yes"):
+            continue
+
+        chapters_raw = meta.get("chapters", meta.get("chapter", ""))
+        if not chapters_raw:
+            continue
+
+        numbers = re.findall(r"\d+", str(chapters_raw))
+        if not numbers:
+            continue
+
+        max_in_card = max(int(n) for n in numbers)
+        if max_in_card <= threshold:
+            debts.append({
+                "type": "unended_plot",
+                "file": fp.relative_to(workspace).as_posix(),
+                "name": meta.get("title", fp.stem),
+                "detail": f"最新章节最大章节 {max_chapter}，本卡最大章节 {max_in_card}，建议使用 end_plot 结束",
+            })
+
+    return debts
+
+
 def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
     """检查 wiki 词条在最近章节中的出场情况
 
@@ -820,6 +874,9 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
     # 8. 剧情范围
     plot_range_fixes = check_plot_range(workspace)
 
+    # 8.5 未结束剧情卡片检测
+    unended_plot_debts = check_unended_plots(workspace)
+
     # 9. 出场检查
     appearance_results = check_appearance(workspace, changed_files)
 
@@ -832,7 +889,8 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         "desc_verbose": [d for d in desc_debts if d["type"] == "desc_verbose"],
         "plot_broken_links": [d for d in plot_link_debts if d["type"] == "plot_broken_link"],
         "appearance": appearance_results,
-        "file_errors": [d for d in yaml_debts if not d.get("auto_fixed")],
+        "file_errors": [d for d in yaml_debts if d.get("auto_fixed") is not True],
+        "unended_plots": unended_plot_debts,
     }
 
     # 写入 debt JSON
@@ -878,6 +936,7 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         ("length_overage", length_debts),
         ("desc_verbose", desc_debts),
         ("plot_broken_links", plot_link_debts),
+        ("unended_plots", unended_plot_debts),
     ]
     all_debt_items = []
     for _, items in debt_groups:
@@ -889,11 +948,9 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         for debt_type, items in debt_groups:
             if items:
                 lines.append(f"**{debt_type}**（{len(items)} 项）")
-                for item in items[:5]:
+                for item in items:
                     detail = item.get("detail", item.get("target", ""))
                     lines.append(f"  ⚠️ {detail}")
-                if len(items) > 5:
-                    lines.append(f"  ...还有 {len(items)-5} 项")
         lines.append("")
 
     if plot_range_fixes:
