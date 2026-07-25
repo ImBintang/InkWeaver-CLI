@@ -171,12 +171,12 @@ class MuseAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "wiki_list",
-                    "description": "查看指定类别下的 wiki 词条列表（分页，每页 20 个）",
+                    "description": "查看指定类别下的 wiki 词条列表（分页，每页 20 个）。注意：必须翻完所有页才能确认某个词条不存在！不要只看第一页就下结论！",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
-                            "page": {"type": "integer", "description": "页码（默认 1）"},
+                            "page": {"type": "integer", "description": "页码，默认 1。如需查看更多请传入 page=2、page=3 等继续翻页"},
                         },
                         "required": ["category"],
                     },

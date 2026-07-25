@@ -109,11 +109,17 @@ def edit_rule_text(workspace: Path, name: str,
 
 
 def edit_rule_wikilink(workspace: Path, name: str,
-                       old_target: str, new_target: str) -> str:
-    """替换规则文档正文中所有指向 old_target 的 [[wikilink]]"""
+                       old_target: str, new_target: str = "",
+                       mode: str = "redirect") -> str:
+    """替换规则文档正文中所有指向 old_target 的 [[wikilink]]
+
+    mode="redirect"（默认）：重定向目标
+    mode="unlink"：取消链接，new_target 忽略
+    """
     return _edit_doc_wikilink(
         workspace, doc_type="rule", name=name,
         old_target=old_target, new_target=new_target,
+        mode=mode,
     )
 
 

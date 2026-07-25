@@ -123,6 +123,7 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
   - Lint 债务修复时优先使用 `edit_doc_wikilink` 修复断链
   - `edit_doc_wikilink` 支持 `mode="unlink"` 取消链接：`[[肉仙]]` → `肉仙`，`[[肉仙|肉仙六重]]` → `肉仙六重`
     - 适用于被 rules/ 覆盖的概念（境界名、通用物品等不需要建词条的场景）
+  - **Unlink 黑名单**：取消链接时加 `remember=true`（如 `edit_doc_wikilink(…, mode="unlink", remember=true)`），会将该目标记入 `unlink-blacklist.json`。后续 lint 运行到此断链自动跳过，不再报债务。适用于跨词条频繁出现的境界名、通用物品等高频误报。
 - subagent 使用 fresh messages=[]，不共享父对话上下文
 - subagent 无法调用 knowledge_task、new_category 等管理工具
 - subagent 完成时调用 agent_output 输出完整操作摘要

@@ -17,6 +17,7 @@
   - 原有 dispatch 路由不变，新增工具通过 doc_type 参数路由
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -272,13 +273,49 @@ def edit_doc_text(workspace: Path, doc_type: str, name: str,
     return f"已更新{type_label}「{name}」正文（文本替换）"
 
 
+# ── Unlink 黑名单 ──────────────────────────────────────────────────────────
+
+UNLINK_BLACKLIST_FILE = "unlink-blacklist.json"
+
+
+def _load_unlink_blacklist(workspace: Path) -> set[str]:
+    """加载 unlink 黑名单，返回被规则覆盖、应取消链接的目标名集合"""
+    fp = workspace / UNLINK_BLACKLIST_FILE
+    if not fp.exists():
+        return set()
+    try:
+        data = json.loads(fp.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return set(data)
+    except (json.JSONDecodeError, Exception):
+        pass
+    return set()
+
+
+def _save_unlink_blacklist(workspace: Path, target: str) -> None:
+    """将目标名加入 unlink 黑名单"""
+    blacklist = _load_unlink_blacklist(workspace)
+    blacklist.add(target)
+    fp = workspace / UNLINK_BLACKLIST_FILE
+    fp.write_text(
+        json.dumps(sorted(blacklist), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def is_in_unlink_blacklist(workspace: Path, target: str) -> bool:
+    """检查目标名是否在 unlink 黑名单中"""
+    return target in _load_unlink_blacklist(workspace)
+
+
 # ── 手术刀式编辑：wikilink 定向替换 ─────────────────────────────────────────
 
 
 def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
                       old_target: str, new_target: str = "",
                       category: str | None = None,
-                      mode: str = "redirect") -> str:
+                      mode: str = "redirect",
+                      remember: bool = False) -> str:
     """替换正文中所有指向 old_target 的 [[wikilink]]
 
     mode="redirect"（默认）：[[旧目标]] → [[新目标]]，new_target 必填
@@ -342,8 +379,13 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
     fp.write_text(build_frontmatter(meta) + new_body, encoding="utf-8")
     _record_extraction_log(workspace, doc_type, name, operation="edit")
 
+    # 如果取消链接且要求记忆，则加入黑名单
+    if mode == "unlink" and remember:
+        _save_unlink_blacklist(workspace, old_target)
+
     type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    return f"已更新{type_label}「{name}」中的 wikilink：{action_label}"
+    return f"已更新{type_label}「{name}」中的 wikilink：{action_label}" + \
+        (f"（已记入 unlink 黑名单）" if mode == "unlink" and remember else "")
 
 
 # ── 统一删除 ──────────────────────────────────────────────────────────────────

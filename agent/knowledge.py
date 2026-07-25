@@ -52,6 +52,7 @@ class KnowledgeAgent(JianzhiAgent):
             "- 使用 create_doc / edit_doc / delete_doc（统一工具，通过 doc_type 参数指定类型）\n"
             "- 使用 edit_doc_text 在正文中精确替换文本（手术刀式，省 token）\n"
             "- 使用 edit_doc_wikilink 替换 [[wikilink]] 目标（支持 mode=\"unlink\" 取消链接，用于不需要建词条的断链）\n"
+            "- edit_doc_wikilink(mode=\"unlink\", remember=true) 取消链接的同时记入 unlink 黑名单，后续 lint 自动跳过该断链的债务报告\n"
             "- 使用 new_rule / edit_rule / delete_rule 管理规则文档（rules/ 目录）\n"
             "- 使用 new_category / edit_category 管理类别\n"
             "- 使用 rules_list / read_rule 查看规则文档\n"

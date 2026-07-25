@@ -244,12 +244,12 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "wiki_list",
-                    "description": "查看指定类别下的 wiki 词条列表（分页，每页 20 个）",
+                    "description": "查看指定类别下的 wiki 词条列表（分页，每页 20 个）。注意：必须翻完所有页才能确认某个词条不存在！不要只看第一页就下结论！",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
-                            "page": {"type": "integer", "description": "页码（默认 1）"},
+                            "page": {"type": "integer", "description": "页码，默认 1。如需查看更多请传入 page=2、page=3 等继续翻页"},
                         },
                         "required": ["category"],
                     },
@@ -454,7 +454,7 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "edit_doc_wikilink",
-                    "description": "【统一·wikilink 定向替换】替换正文中所有指向 old_target 的 [[wikilink]]。支持两种模式：redirect（重定向，默认）和 unlink（取消链接）。mode=unlink 时 [[目标]] → 目标 / [[目标|别名]] → 别名（new_target 忽略）。",
+                    "description": "【统一·wikilink 定向替换】替换正文中所有指向 old_target 的 [[wikilink]]。支持两种模式：redirect（重定向，默认）和 unlink（取消链接）。mode=unlink 时 [[目标]] → 目标 / [[目标|别名]] → 别名（new_target 忽略）。当 mode=unlink 且 remember=true 时，会将该目标记入 unlink 黑名单，后续 lint 自动跳过。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -464,6 +464,7 @@ class JianzhiAgent(BaseAgent):
                             "new_target": {"type": "string", "description": "新目标（mode=redirect 时必填，mode=unlink 时忽略）"},
                             "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
                             "mode": {"type": "string", "enum": ["redirect", "unlink"], "description": "操作模式：redirect（重定向，默认）| unlink（取消链接）"},
+                            "remember": {"type": "boolean", "description": "是否将 old_target 记入 unlink 黑名单（仅 mode=unlink 时有效）。黑名单内的断链会被 lint 自动跳过。"},
                         },
                         "required": ["doc_type", "name", "old_target"],
                     },

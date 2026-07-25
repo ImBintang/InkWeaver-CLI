@@ -249,7 +249,11 @@ def check_wikilinks(workspace: Path, changed_files: list[Path]) -> list[dict]:
 
     构建 wiki_map + rules_map，遍历 changed_files 中的 [[wikilink]]，
     检查目标是否存在于任一映射中。
+
+    额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
     """
+    from tools.editor import is_in_unlink_blacklist
+
     wiki_map = _build_wiki_map(workspace)
     rules_map = _build_rules_map(workspace)
 
@@ -263,6 +267,28 @@ def check_wikilinks(workspace: Path, changed_files: list[Path]) -> list[dict]:
         # 跳过 wiki map 的索引项（已通过文件名 stem 索引），直接扫描内容
         text = fp.read_text(encoding="utf-8")
         links = extract_wikilinks(text)
+
+        # 检查是否有黑名单目标需要自动取消链接
+        blacklist_targets = {link for link in links if link not in valid_targets
+                            and is_in_unlink_blacklist(workspace, link)}
+        if blacklist_targets:
+            meta, body = _parse_frontmatter(text)
+            for target in blacklist_targets:
+                old_lower = target.strip().lower()
+                def _make_unlinker(old_lower):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == old_lower:
+                            display = raw_alias.lstrip("|") if raw_alias else raw_target
+                            return display
+                        return match.group(0)
+                    return _replace
+                body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _make_unlinker(old_lower), body)
+            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
+            # 重新提取 links 用于债务检查（已取消链接的已不在）
+            links = extract_wikilinks(body)
+
         for link in links:
             if link not in valid_targets:
                 debts.append({
@@ -456,7 +482,10 @@ def check_plot_links(workspace: Path) -> list[dict]:
     """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标
 
     扫描 plot/ 目录，提取 [[wikilink]]，检查 wiki_map。
+    额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
     """
+    from tools.editor import is_in_unlink_blacklist
+
     wiki_map = _build_wiki_map(workspace)
     valid_targets = set(wiki_map.keys())
 
@@ -471,6 +500,28 @@ def check_plot_links(workspace: Path) -> list[dict]:
         rel = fp.relative_to(workspace).as_posix()
         text = fp.read_text(encoding="utf-8")
         links = extract_wikilinks(text)
+
+        # 检查是否有黑名单目标需要自动取消链接
+        blacklist_targets = {link for link in links if link not in valid_targets
+                            and is_in_unlink_blacklist(workspace, link)}
+        if blacklist_targets:
+            meta, body = _parse_frontmatter(text)
+            for target in blacklist_targets:
+                old_lower = target.strip().lower()
+                def _make_unlinker(old_lower):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == old_lower:
+                            display = raw_alias.lstrip("|") if raw_alias else raw_target
+                            return display
+                        return match.group(0)
+                    return _replace
+                body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _make_unlinker(old_lower), body)
+            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
+            # 重新提取 links 用于债务检查
+            links = extract_wikilinks(body)
+
         for link in links:
             if link not in valid_targets:
                 debts.append({

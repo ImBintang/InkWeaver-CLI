@@ -59,12 +59,12 @@ def _build_review_tool_defs() -> list:
             "type": "function",
             "function": {
                 "name": "wiki_list",
-                "description": "查看类别下的 wiki 列表（分页，每页 20 个）。",
+                "description": "查看类别下的 wiki 列表（分页，每页 20 个）。注意：必须翻完所有页才能确认某个词条不存在！不要只看第一页就下结论！",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "category": {"type": "string", "description": "类别名"},
-                        "page": {"type": "integer", "description": "页码（默认 1）"},
+                        "page": {"type": "integer", "description": "页码，默认 1。如需查看更多请传入 page=2、page=3 等继续翻页"},
                     },
                     "required": ["category"],
                 },
@@ -275,6 +275,7 @@ class ReviewSubagent:
             f"3. **汇总分析** — 结合债务清单和语义发现，判断：\n"
             f"   - 断链是\"真缺失\"还是\"被规则覆盖\"\n"
             f"     * 被 rules/ 覆盖的概念（如境界名「肉仙」「地仙」、通用物品「储物戒」等）→ 用 edit_doc_wikilink(mode=\"unlink\") 取消链接，不要新建词条\n"
+            f"     * 高频误报的断链取消链接时加 remember=true（如 `edit_doc_wikilink(…, mode=\"unlink\", remember=true)`），记入 unlink 黑名单，后续 lint 自动跳过\n"
             f"   - state 缺失需要从原文补充\n"
             f"   - 篇幅/状态过长需要压缩\n"
             f"4. **委派修复** — 调用 knowledge_task / plot_task 执行修复\n"

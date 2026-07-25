@@ -154,11 +154,19 @@ def edit_plot_text(workspace: Path, name: str,
 
 
 def edit_plot_wikilink(workspace: Path, name: str,
-                       old_target: str, new_target: str) -> str:
-    """替换剧情卡片正文中所有指向 old_target 的 [[wikilink]]"""
+                       old_target: str, new_target: str = "",
+                       mode: str = "redirect",
+                       remember: bool = False) -> str:
+    """替换剧情卡片正文中所有指向 old_target 的 [[wikilink]]
+
+    mode="redirect"（默认）：重定向目标
+    mode="unlink"：取消链接，new_target 忽略
+    remember=True 时将目标记入 unlink 黑名单
+    """
     return _edit_doc_wikilink(
         workspace, doc_type="plot", name=name,
         old_target=old_target, new_target=new_target,
+        mode=mode, remember=remember,
     )
 
 

@@ -19,6 +19,8 @@ SUBAGENT_TOOLS = [
     "check_wiki",
     "read_index",
     "query_relations",
+    "rules_list",
+    "read_rule",
     "agent_output",
 ]
 
@@ -109,13 +111,15 @@ class KnowledgeSubagent:
             f"   - **改正文中一句话/一个词** → 用 `edit_doc_text`，只需说「把 A 改成 B」，不用传整个正文\n"
             f"   - **改 [[wikilink]] 指向** → 用 `edit_doc_wikilink`，只需说「把指向 X 的链接改成 Y」\n"
             f"   - **取消 [[wikilink]]**（不需要建词条的概念，如境界名、通用物品）→ 用 `edit_doc_wikilink(mode=\"unlink\")`，只需说「取消 [[X]] 的链接」，[[X]]→X / [[X|别名]]→别名\n"
+            f"   - **记入黑名单**：取消链接时加 `remember=true`（如 `edit_doc_wikilink(mode=\"unlink\", remember=true)`），将该目标记入 unlink 黑名单。后续 lint 自动跳过该断链，不再报债务。适用于被 rules/ 覆盖的高频误报概念。\n"
             f"   - **大幅重写/新建** → 用 `new_wiki` 或 `edit_wiki(content=新全文)`\n"
             f"5. 词条正文使用 [[wikilink]] 格式建立交叉引用\n"
             f"\n"
             f"# 规则\n"
             f"- **禁止跳过 wiki 直接全文阅读章节**，优先用 wiki_list + read_wiki 获取已有信息\n"
             f"- new_wiki 的 content 参数为必填！必须提供正文内容，不能为空\n"
-            f"- 本 subagent 只负责 wiki 词条创建，不处理规则文档（rules/ 由主 agent 管理）\n"
+            f"- **禁止在 wiki 中创建「规则」类别的词条！** 规则文档（如境界体系、等级体系等世界观设定）存储在 rules/ 目录，用 rules_list / read_rule 查看。\n"
+            f"- **创建/更新词条前，先调 rules_list 确认该概念不是已有规则文档**。如果是世界观规则（境界、等级、体系等），直接跳过，不要创建 wiki 词条。\n"
             f"- description 字段放客观介绍（静态信息）\n"
             f"- state 字段放近期事件带来的变化（动态信息）\n"
             f"- **人物/势力类词条必须包含 state 字段**（见类别 index.md 定义）\n"
@@ -133,6 +137,7 @@ class KnowledgeSubagent:
             f"- **正文局部修改优先用 `edit_doc_text`**：只需改一句话时，不要传整个正文\n"
             f"- **断链修复优先用 `edit_doc_wikilink`**：只需改 wikilink 目标时，不要翻整篇正文\n"
             f"- **不需要建词条的断链（如境界名、通用物品等被 rules/ 覆盖的概念）**：用 `edit_doc_wikilink(mode=\"unlink\")` 取消链接，不要新建词条\n"
+            f"- **高频误报的断链**（同一目标反复在各词条出现，如 [[地仙]]、[[肉仙]]）：取消链接时加 `remember=true`，该目标会被记入 unlink 黑名单，后续 lint 自动跳过、不再报债务\n"
             f"- 只有**大幅重写正文**时才用 `edit_wiki(content=新全文)`\n"
             f"- 正文中已被新信息覆盖的旧内容可以删除或精简（例如「淬体境一重」→「淬体境六重」）"
         )
@@ -145,6 +150,7 @@ class KnowledgeSubagent:
         from tools.memory import read_memory
         from tools.category import read_index
         from tools.relation import query_relations
+        from tools.rules import rules_list, read_rule
 
         # agent_output 特殊处理：透传输出内容并记录日志
         if name == "agent_output":
@@ -171,6 +177,8 @@ class KnowledgeSubagent:
             "check_wiki": lambda **kw: check_wiki(self.workspace, **kw),
             "read_index": lambda **kw: read_index(self.workspace, **kw),
             "query_relations": lambda **kw: query_relations(self.workspace, **kw),
+            "rules_list": lambda **kw: rules_list(self.workspace),
+            "read_rule": lambda **kw: read_rule(self.workspace, **kw),
         }
 
         handler = dispatch.get(name)

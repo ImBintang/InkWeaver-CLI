@@ -41,10 +41,28 @@ def _ensure_category_dir(workspace: Path, category: str) -> Path:
     return cat_dir
 
 
+def _category_exists(workspace: Path, category: str) -> bool:
+    """检查 wiki 类别目录是否存在"""
+    cat_dir = _wiki_root(workspace) / category
+    return cat_dir.is_dir()
+
+
 def new_wiki(workspace: Path, category: str, name: str, content: str = "",
              description: str = "", state: str = "", tags: list = None,
              updated: int | None = None) -> str:
     """新建 wiki 文档（薄代理层 → tools.editor.create_doc）"""
+    # 防御：禁止在规则类别下创建 wiki 词条
+    if category in ("规则", "rules", "rule"):
+        return (
+            f"错误：类别「{category}」是规则类别，请使用 new_rule / edit_rule 管理规则文档，"
+            f"不要用 new_wiki 操作。规则文档存储在 rules/ 目录，不参与关系系统。"
+        )
+    # 防御：禁止在未创建的类别下创建词条
+    if not _category_exists(workspace, category):
+        return (
+            f"错误：类别「{category}」不存在，无法创建词条。"
+            f"请先用 new_category 创建类别，或用 category_list 查看已有类别。"
+        )
     return _create_doc(
         workspace, doc_type="wiki", name=name, content=content,
         category=category, description=description, state=state,
@@ -77,15 +95,19 @@ def edit_wiki_text(workspace: Path, category: str, name: str,
 
 
 def edit_wiki_wikilink(workspace: Path, category: str, name: str,
-                       old_target: str, new_target: str) -> str:
-    """替换 wiki 正文中所有指向 old_target 的 [[wikilink]] 为 new_target
+                       old_target: str, new_target: str = "",
+                       mode: str = "redirect",
+                       remember: bool = False) -> str:
+    """替换 wiki 正文中所有指向 old_target 的 [[wikilink]]
 
-    参考 llm-wiki lint-fixes.ts 的 rewriteWikilinkTarget。
-    支持带别名的 wikilink，大小写不敏感匹配。
+    mode="redirect"（默认）：重定向目标
+    mode="unlink"：取消链接，new_target 忽略
+    remember=True 时将目标记入 unlink 黑名单
     """
     return _edit_doc_wikilink(
         workspace, doc_type="wiki", name=name,
         old_target=old_target, new_target=new_target, category=category,
+        mode=mode, remember=remember,
     )
 
 
@@ -157,6 +179,16 @@ def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20
         if desc:
             line += f"：{desc}"
         lines.append(line)
+
+    # 翻页提示
+    if total_pages > 1:
+        if page < total_pages:
+            lines.append(f"")
+            lines.append(f"⚠️ 当前只显示第 {page} 页（共 {total_pages} 页），如需查找某个词条请继续翻页查看（传入 page={page + 1}）。")
+            lines.append(f"   不要因为本页没看到就下结论说词条不存在，先翻完所有页再判断！")
+        else:
+            lines.append(f"")
+            lines.append(f"✅ 已是最后一页。")
 
     return "\n".join(lines)
 
