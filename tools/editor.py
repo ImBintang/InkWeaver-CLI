@@ -276,21 +276,26 @@ def edit_doc_text(workspace: Path, doc_type: str, name: str,
 
 
 def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
-                      old_target: str, new_target: str,
-                      category: str | None = None) -> str:
-    """替换正文中所有指向 old_target 的 [[wikilink]] 为 new_target
+                      old_target: str, new_target: str = "",
+                      category: str | None = None,
+                      mode: str = "redirect") -> str:
+    """替换正文中所有指向 old_target 的 [[wikilink]]
+
+    mode="redirect"（默认）：[[旧目标]] → [[新目标]]，new_target 必填
+    mode="unlink"：取消链接，[[目标]] → 目标 / [[目标|别名]] → 别名，new_target 忽略
 
     参考 llm-wiki lint-fixes.ts 的 rewriteWikilinkTarget：
-    - 支持带别名的 wikilink（[[旧目标|别名]] → [[新目标|别名]]）
+    - 支持带别名的 wikilink
     - 大小写不敏感匹配目标名
     - 只替换 body，不碰 frontmatter
 
     Args:
         doc_type: "wiki" | "plot" | "rule"
         name: 文档名
-        old_target: 旧 wikilink 目标
-        new_target: 新 wikilink 目标
+        old_target: 要匹配的 wikilink 目标
+        new_target: 新目标（mode="redirect" 时必填）
         category: wiki 类别（仅 wiki 需要）
+        mode: "redirect" 重定向 | "unlink" 取消链接
 
     Returns:
         操作结果消息
@@ -301,16 +306,34 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
         return str(e)
 
     old_lower = old_target.strip().lower()
-    new_clean = new_target.strip()
 
-    def _replace_wikilink(match):
-        raw_target = match.group(1)
-        raw_alias = match.group(2) or ""
-        if raw_target.strip().lower() == old_lower:
-            return f"[[{new_clean}{raw_alias}]]"
-        return match.group(0)
+    if mode == "unlink":
+        def _replace_unlink(match):
+            raw_target = match.group(1)
+            raw_alias = match.group(2) or ""
+            if raw_target.strip().lower() == old_lower:
+                # 有别名时保留别名文本，否则保留原目标文本
+                display = raw_alias.lstrip("|") if raw_alias else raw_target
+                return display
+            return match.group(0)
 
-    new_body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _replace_wikilink, body)
+        new_body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _replace_unlink, body)
+        action_label = "取消链接"
+    else:
+        # mode == "redirect"（默认）
+        if not new_target:
+            return "错误：mode='redirect' 时 new_target 不能为空"
+        new_clean = new_target.strip()
+
+        def _replace_redirect(match):
+            raw_target = match.group(1)
+            raw_alias = match.group(2) or ""
+            if raw_target.strip().lower() == old_lower:
+                return f"[[{new_clean}{raw_alias}]]"
+            return match.group(0)
+
+        new_body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _replace_redirect, body)
+        action_label = f"{old_target} → {new_target}"
 
     if new_body == body:
         type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
@@ -320,7 +343,7 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
     _record_extraction_log(workspace, doc_type, name, operation="edit")
 
     type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    return f"已更新{type_label}「{name}」中的 wikilink：{old_target} → {new_target}"
+    return f"已更新{type_label}「{name}」中的 wikilink：{action_label}"
 
 
 # ── 统一删除 ──────────────────────────────────────────────────────────────────

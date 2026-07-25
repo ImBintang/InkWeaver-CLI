@@ -114,17 +114,18 @@ def build_shared_subagent_tools() -> list:
             "type": "function",
             "function": {
                 "name": "edit_doc_wikilink",
-                "description": "【统一】替换正文中所有指向 old_target 的 [[wikilink]] 为 new_target。支持别名。",
+                "description": "【统一】替换正文中所有指向 old_target 的 [[wikilink]]。mode=redirect（默认）重定向目标，mode=unlink 取消链接（[[目标]]→目标/[[目标|别名]]→别名）。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "doc_type": {"type": "string", "enum": ["wiki", "plot"], "description": "文档类型"},
                         "name": {"type": "string", "description": "文档名"},
-                        "old_target": {"type": "string", "description": "旧 wikilink 目标"},
-                        "new_target": {"type": "string", "description": "新 wikilink 目标"},
+                        "old_target": {"type": "string", "description": "要匹配的 wikilink 目标"},
+                        "new_target": {"type": "string", "description": "新目标（mode=redirect 时用，unlink 时忽略）"},
                         "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                        "mode": {"type": "string", "enum": ["redirect", "unlink"], "description": "操作模式：redirect（重定向）| unlink（取消链接）"},
                     },
-                    "required": ["doc_type", "name", "old_target", "new_target"],
+                    "required": ["doc_type", "name", "old_target"],
                 },
             },
         },

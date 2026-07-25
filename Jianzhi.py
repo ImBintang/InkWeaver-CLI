@@ -454,17 +454,18 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "edit_doc_wikilink",
-                    "description": "【统一·wikilink 定向替换】替换正文中所有指向 old_target 的 [[wikilink]] 为 new_target。支持带别名的 wikilink（[[旧名|别名]] → [[新名|别名]]）。比手动 edit_doc 省大量 token。",
+                    "description": "【统一·wikilink 定向替换】替换正文中所有指向 old_target 的 [[wikilink]]。支持两种模式：redirect（重定向，默认）和 unlink（取消链接）。mode=unlink 时 [[目标]] → 目标 / [[目标|别名]] → 别名（new_target 忽略）。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "doc_type": {"type": "string", "enum": ["wiki", "plot", "rule"], "description": "文档类型"},
                             "name": {"type": "string", "description": "文档名"},
-                            "old_target": {"type": "string", "description": "旧 wikilink 目标名"},
-                            "new_target": {"type": "string", "description": "新 wikilink 目标名"},
+                            "old_target": {"type": "string", "description": "要匹配的 wikilink 目标名"},
+                            "new_target": {"type": "string", "description": "新目标（mode=redirect 时必填，mode=unlink 时忽略）"},
                             "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
+                            "mode": {"type": "string", "enum": ["redirect", "unlink"], "description": "操作模式：redirect（重定向，默认）| unlink（取消链接）"},
                         },
-                        "required": ["doc_type", "name", "old_target", "new_target"],
+                        "required": ["doc_type", "name", "old_target"],
                     },
                 },
             },

@@ -241,7 +241,28 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
 
     _save_log(workspace, log)
 
+    # 6. 债务治理后重跑 lint，刷新债务数据
+    try:
+        from tools.lint import run_lint
+        lint_result = run_lint(workspace)
+        # 从 lint 结果中提取自动修复和债务摘要
+        fix_count = 0
+        debt_count = 0
+        for line in lint_result.splitlines():
+            if "自动修复" in line:
+                m = re.search(r"（(\d+) 项）", line)
+                if m:
+                    fix_count = int(m.group(1))
+            if "待处理债务" in line:
+                m = re.search(r"（(\d+) 项）", line)
+                if m:
+                    debt_count = int(m.group(1))
+        lint_note = f" | lint: 自动修复 {fix_count} 处，剩余债务 {debt_count} 项"
+    except Exception:
+        lint_note = " | lint 刷新失败（跳过）"
+
     return (f"✅ 任务已完成。已记录：{len(chapter_nums)} 章、"
             f"{len(new_wiki + updated_wiki)} 个 wiki 词条、"
             f"{len(new_rules + updated_rules)} 个规则、"
-            f"{len(new_plots + updated_plots)} 个剧情卡片")
+            f"{len(new_plots + updated_plots)} 个剧情卡片"
+            f"{lint_note}")

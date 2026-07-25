@@ -108,6 +108,7 @@ class KnowledgeSubagent:
             f"4. 写入/更新词条（根据改动范围选择最省 token 的方式）：\n"
             f"   - **改正文中一句话/一个词** → 用 `edit_doc_text`，只需说「把 A 改成 B」，不用传整个正文\n"
             f"   - **改 [[wikilink]] 指向** → 用 `edit_doc_wikilink`，只需说「把指向 X 的链接改成 Y」\n"
+            f"   - **取消 [[wikilink]]**（不需要建词条的概念，如境界名、通用物品）→ 用 `edit_doc_wikilink(mode=\"unlink\")`，只需说「取消 [[X]] 的链接」，[[X]]→X / [[X|别名]]→别名\n"
             f"   - **大幅重写/新建** → 用 `new_wiki` 或 `edit_wiki(content=新全文)`\n"
             f"5. 词条正文使用 [[wikilink]] 格式建立交叉引用\n"
             f"\n"
@@ -131,6 +132,7 @@ class KnowledgeSubagent:
             f"  - 新增重要事件 → 更新相关章节\n"
             f"- **正文局部修改优先用 `edit_doc_text`**：只需改一句话时，不要传整个正文\n"
             f"- **断链修复优先用 `edit_doc_wikilink`**：只需改 wikilink 目标时，不要翻整篇正文\n"
+            f"- **不需要建词条的断链（如境界名、通用物品等被 rules/ 覆盖的概念）**：用 `edit_doc_wikilink(mode=\"unlink\")` 取消链接，不要新建词条\n"
             f"- 只有**大幅重写正文**时才用 `edit_wiki(content=新全文)`\n"
             f"- 正文中已被新信息覆盖的旧内容可以删除或精简（例如「淬体境一重」→「淬体境六重」）"
         )

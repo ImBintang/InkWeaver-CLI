@@ -170,7 +170,7 @@ class PlotTaskSubagent:
             f"3. 分析并拟定操作\n"
             f"4. 逐个执行操作。**优先使用手术刀式工具**：\n"
             f"   - 改正文中一句话 → `edit_doc_text`\n"
-            f"   - 改 [[wikilink]] 指向 → `edit_doc_wikilink`\n"
+            f"   - 改 [[wikilink]] 指向 → `edit_doc_wikilink`（mode=\"unlink\" 可取消链接，不需要的链接去掉即可）\n"
             f"   - 大幅重写或新建 → `new_plot` / `edit_plot`\n"
             f"5. 所有操作完成后，调用 agent_output 输出操作摘要\n"
             f"{review_section}"

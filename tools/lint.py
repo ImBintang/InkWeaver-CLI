@@ -15,6 +15,7 @@ from tools.wiki import _parse_frontmatter, _build_frontmatter
 DEBT_FILE = "lint-debt.json"
 STATE_MAX_CHARS = 100
 DOC_MAX_CHARS = 1500
+DESC_MAX_CHARS = 100  # description 字段字数上限
 APPEARANCE_SCAN_CHAPTERS = 50
 
 # 匹配 [[target]] 或 [[target|display]] 格式
@@ -57,7 +58,7 @@ def get_aliases(title: str) -> list[str]:
 def _get_changed_files(workspace: Path) -> list[Path]:
     """获取待检查的文件列表
 
-    简单实现：返回 wiki/ + plot/ 下所有 .md 文件（排除 index.md 和 relations.yaml）
+    返回 wiki/ + plot/ + rules/ 下所有 .md 文件（排除 index.md 和 relations.yaml）
     """
     changed: list[Path] = []
 
@@ -75,6 +76,12 @@ def _get_changed_files(workspace: Path) -> list[Path]:
         for fp in sorted(plot_root.rglob("*.md")):
             if fp.name == "index.md":
                 continue
+            changed.append(fp)
+
+    # 扫描 rules/（规则文件也需要 YAML 结构等检查）
+    rules_root = workspace / "rules"
+    if rules_root.exists():
+        for fp in sorted(rules_root.glob("*.md")):
             changed.append(fp)
 
     return changed
@@ -422,6 +429,29 @@ def check_doc_length(workspace: Path, changed_files: list[Path]) -> list[dict]:
     return debts
 
 
+def check_description_length(workspace: Path, changed_files: list[Path]) -> list[dict]:
+    """检查 wiki/plot/rules 文档 frontmatter 中 description 字段长度
+
+    超过 DESC_MAX_CHARS (100) → debt: desc_verbose
+    """
+    debts: list[dict] = []
+
+    for fp in changed_files:
+        rel = fp.relative_to(workspace).as_posix()
+        text = fp.read_text(encoding="utf-8")
+        meta, _ = _parse_frontmatter(text)
+        desc = meta.get("description", "")
+        if len(desc) > DESC_MAX_CHARS:
+            debts.append({
+                "type": "desc_verbose",
+                "file": rel,
+                "detail": f"description 过长（{len(desc)} 字，建议上限 {DESC_MAX_CHARS}）",
+                "auto_fixed": False,
+            })
+
+    return debts
+
+
 def check_plot_links(workspace: Path) -> list[dict]:
     """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标
 
@@ -581,6 +611,125 @@ def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
     return results
 
 
+# ── 短名→全名自动修复 ──────────────────────────────────────────────
+
+
+def _build_short_name_map(workspace: Path) -> dict[str, str]:
+    """构建短名→全名的映射，用于自动修复 wikilink 断链
+
+    规则：
+    - "叶蛮（阿蛮）" → 短名 "叶蛮"（括号前缀）+ 别名 "阿蛮"（来自 get_aliases）
+    - "叶家【紫玉大陆】" → 短名 "叶家"（【】前缀）
+    - 冲突时（同一短名指向多个全名）→ 跳过，不加入映射
+
+    Returns:
+        {short_name: full_stem_name}
+    """
+    short_map: dict[str, str] = {}
+    wiki_root = workspace / "wiki"
+    if not wiki_root.exists():
+        return short_map
+
+    for fp in sorted(wiki_root.rglob("*.md")):
+        if fp.name in ("index.md", "relations.yaml"):
+            continue
+        stem = fp.stem
+
+        # 候选短名列表
+        candidates = []
+
+        # 1. 来自 get_aliases 的别名（如 "阿蛮" ← "叶蛮（阿蛮）"）
+        for alias in get_aliases(stem):
+            if alias != stem:
+                candidates.append(alias)
+
+        # 2. 括号前缀：如 "叶蛮" ← "叶蛮（阿蛮）"
+        paren_match = re.match(r"^(.+?)（[^）]+）$", stem)
+        if paren_match:
+            prefix = paren_match.group(1)
+            if prefix != stem:
+                candidates.append(prefix)
+
+        # 3. 消歧义前缀：如 "叶家" ← "叶家【紫玉大陆】"
+        bracket_match = re.match(r"^(.+?)【[^】]+】$", stem)
+        if bracket_match:
+            prefix = bracket_match.group(1)
+            if prefix != stem:
+                candidates.append(prefix)
+
+        # 加入映射，冲突则跳过
+        for c in candidates:
+            if c in short_map and short_map[c] != stem:
+                # 冲突：同一短名指向不同全名 → 删除（不自动修复）
+                del short_map[c]
+            elif c not in short_map:
+                short_map[c] = stem
+
+    return short_map
+
+
+def auto_fix_short_name_wikilinks(workspace: Path) -> list[dict]:
+    """自动修复短名 wikilink 为全名
+
+    遍历所有 wiki/ 和 plot/ 下的 .md 文件，将 [[短名]] 自动替换为 [[全名]]。
+    处理整个文件（含 frontmatter），因为 description/state 字段也可能包含 wikilink。
+    在断链检查之前执行，修掉后不再报债务。
+
+    Returns:
+        修复记录列表
+    """
+    short_map = _build_short_name_map(workspace)
+    if not short_map:
+        return []
+
+    # 按名称长度降序排列，避免短名是长名子串时误匹配
+    short_names = sorted(short_map.keys(), key=len, reverse=True)
+
+    fixes: list[dict] = []
+    wikilink_re = re.compile(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]")
+
+    for root_dir in ["wiki", "plot"]:
+        root = workspace / root_dir
+        if not root.exists():
+            continue
+        for fp in sorted(root.rglob("*.md")):
+            if fp.name in ("index.md", "relations.yaml"):
+                continue
+            rel = fp.relative_to(workspace).as_posix()
+            text = fp.read_text(encoding="utf-8")
+
+            new_text = text
+            for short_name in short_names:
+                full_name = short_map[short_name]
+                old_lower = short_name.strip().lower()
+                new_clean = full_name.strip()
+
+                def _make_replacer(old_lower, new_clean):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == old_lower:
+                            return f"[[{new_clean}{raw_alias}]]"
+                        return match.group(0)
+                    return _replace
+
+                new_text = wikilink_re.sub(
+                    _make_replacer(old_lower, new_clean),
+                    new_text,
+                )
+
+            if new_text != text:
+                fp.write_text(new_text, encoding="utf-8")
+                fixes.append({
+                    "type": "short_name_fixed",
+                    "file": rel,
+                    "detail": "短名 wikilink 已自动修复为全名",
+                    "auto_fixed": True,
+                })
+
+    return fixes
+
+
 # ── 入口函数 ─────────────────────────────────────────────────────────
 
 def run_lint(workspace: Path, chapters: str | None = None) -> str:
@@ -592,6 +741,9 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
 
     # 1. YAML 结构
     yaml_debts = check_yaml_structure(workspace, changed_files)
+
+    # 1.5 短名→全名 wikilink 自动修复（在断链检查之前执行，修掉后不再报债务）
+    short_name_fixes = auto_fix_short_name_wikilinks(workspace)
 
     # 2. Wikilink 断链
     link_debts = check_wikilinks(workspace, changed_files)
@@ -608,6 +760,9 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
     # 6. 正文长度
     length_debts = check_doc_length(workspace, changed_files)
 
+    # 6.5 description 长度
+    desc_debts = check_description_length(workspace, changed_files)
+
     # 7. 剧情链接
     plot_link_debts = check_plot_links(workspace)
 
@@ -623,6 +778,7 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         "state_missing": [d for d in state_debts if d["type"] == "state_missing"],
         "state_verbose": [d for d in state_debts if d["type"] == "state_verbose"],
         "length_overage": [d for d in length_debts if d["type"] == "length_overage"],
+        "desc_verbose": [d for d in desc_debts if d["type"] == "desc_verbose"],
         "plot_broken_links": [d for d in plot_link_debts if d["type"] == "plot_broken_link"],
         "appearance": appearance_results,
         "file_errors": [d for d in yaml_debts if not d.get("auto_fixed")],
@@ -650,9 +806,10 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         "",
     ]
 
-    # 自动修复汇总
+    # 自动修复汇总（含 yaml 自动修复）
+    yaml_auto_fixes = [d for d in yaml_debts if d.get("auto_fixed")]
     all_fixes = (
-        rules_fixes + state_fixes + category_fixes + plot_range_fixes
+        short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes + yaml_auto_fixes
     )
     total_fixed = len(all_fixes)
     if all_fixes:
@@ -668,6 +825,7 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         ("state_missing", [d for d in state_debts if d["type"] == "state_missing"]),
         ("state_verbose", [d for d in state_debts if d["type"] == "state_verbose"]),
         ("length_overage", length_debts),
+        ("desc_verbose", desc_debts),
         ("plot_broken_links", plot_link_debts),
     ]
     all_debt_items = []
@@ -721,6 +879,7 @@ def read_debt(workspace: Path) -> str:
         ("state_missing", "State 缺失", "📌"),
         ("state_verbose", "State 过长", "📌"),
         ("length_overage", "正文过长", "📏"),
+        ("desc_verbose", "description 过长", "📝"),
         ("plot_broken_links", "剧情断链", "🎬"),
         ("file_errors", "文件错误", "❌"),
     ]
