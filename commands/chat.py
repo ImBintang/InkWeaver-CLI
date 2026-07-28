@@ -26,7 +26,11 @@ _HELP_TEXT = """可用指令：
     /wiki <name>       查看指定词条
     /rule [name]       查看规则（无参数=列表）
     /relation <name>   查询词条关联
-    /memory            查看记忆索引
+    /memory            查看记忆列表
+
+  记忆：
+    /remember <text>   写入一条记忆（默认 preference 类）
+    /forget <id>       删除指定记忆
 
   操作：
     /extract           触发知识提取
@@ -177,6 +181,28 @@ def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
     elif command == "memory":
         from tools.memory import read_memory
         io.print_info(read_memory(ws, None))
+
+    elif command == "remember":
+        if len(parts) < 2:
+            io.print_info("用法：/remember <记忆内容>")
+            return True
+        text = " ".join(parts[1:])
+        from tools.memory import memory_write
+        result = memory_write(ws, category="preference", content=text, source="user")
+        io.print_info(result)
+
+    elif command == "forget":
+        if len(parts) < 2:
+            io.print_info("用法：/forget <记忆ID>")
+            return True
+        try:
+            memory_id = int(parts[1].lstrip("#"))
+        except ValueError:
+            io.print_info("错误：记忆 ID 必须为整数")
+            return True
+        from tools.memory import memory_forget
+        result = memory_forget(ws, id=memory_id)
+        io.print_info(result)
 
     elif command == "extract":
         io.print_info("触发知识提取...")

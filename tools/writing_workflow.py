@@ -25,7 +25,7 @@ class WritingWorkflow:
 
     def run(self, outline: str, prior_knowledge: str = "", plot_summary: str = "",
             last_chapter: str = "", review_issues: list = None,
-            previous_draft: str = "") -> str:
+            previous_draft: str = "", memory_block: str = "") -> str:
         """执行写作
 
         Args:
@@ -35,6 +35,7 @@ class WritingWorkflow:
             last_chapter: 上一章全文
             review_issues: 上一轮审阅意见列表
             previous_draft: 上一轮被驳回的草稿（重写时传入）
+            memory_block: v5.3 记忆注入（style 类）
 
         Returns:
             生成的正文文本
@@ -65,6 +66,11 @@ class WritingWorkflow:
                 else:
                     issues_lines.append(f"- [{level}] {desc}")
             sections.append(f"## 上一轮审阅意见\n" + "\n".join(issues_lines))
+
+        # v5.3: 记忆注入（style 类）
+        if memory_block:
+            sections.append(memory_block)
+
         context = "\n\n".join(sections)
 
         # 优先使用外部传入的 skill 文本，否则用内置兜底

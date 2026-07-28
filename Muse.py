@@ -74,15 +74,18 @@ class MuseAgent(BaseAgent):
     """妙笔 Agent — 与鉴知同级且独立，拥有完全独立的 system prompt。
 
     工具函数复用自 tools/ 各模块，但 prompt 不与鉴知共享。
+    v5.3: 支持 chapter_ceiling 版本硬切。
     """
 
-    def __init__(self, config: dict, workspace: Path, skills_dir: Path, cli):
+    def __init__(self, config: dict, workspace: Path, skills_dir: Path, cli,
+                 chapter_ceiling: int | None = None):
         super().__init__(config, workspace, cli)
         self.skills = SkillRegistry(skills_dir)
         self.todo = TodoManager()
         self.review_session = None
         self._last_subagent_output = ""
         self._stop_agent_loop = False
+        self.chapter_ceiling = chapter_ceiling  # v5.3: 知识版本卡控上限
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
         self.system_prompt += "\n\n" + self._build_tool_guide()
@@ -465,6 +468,25 @@ class MuseAgent(BaseAgent):
         from tools import diff as diff_tools
         from tools import plot as plot_tools
 
+        # v5.3: 版本硬切拦截
+        if self.chapter_ceiling is not None:
+            ceiling = self.chapter_ceiling
+
+            if name == "wiki_list":
+                return self._wiki_list_at_ceiling(args, ceiling)
+            if name == "read_wiki":
+                return self._read_wiki_at_ceiling(args, ceiling)
+            if name == "plot_list":
+                return self._plot_list_at_ceiling(args, ceiling)
+            if name == "read_plot":
+                return self._read_plot_at_ceiling(args, ceiling)
+            if name == "rules_list":
+                return self._rules_list_at_ceiling(ceiling)
+            if name == "read_rule":
+                return self._read_rule_at_ceiling(args, ceiling)
+            if name == "check_wiki":
+                return self._check_wiki_at_ceiling(args, ceiling)
+
         dispatch = {
             "agent_output": lambda **kw: "(已输出)",
 
@@ -494,6 +516,186 @@ class MuseAgent(BaseAgent):
         except Exception as e:
             return f"错误：{e}"
 
+    # ---- v5.3 版本硬切辅助方法 ----
+
+    def _get_db(self):
+        """获取 DB 服务实例"""
+        from tools.db.service import SQLiteService
+        return SQLiteService(self.workspace / "wiki.db")
+
+    def _wiki_list_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """wiki_list 硬切：仅列 created_chapter ≤ ceiling 的词条"""
+        db = self._get_db()
+        category = args.get("category", "")
+        page = args.get("page", 1)
+        page_size = args.get("page_size", 20)
+
+        cat = db.get_category_by_name(category)
+        if cat is None:
+            db.close()
+            return f"错误：类别「{category}」不存在"
+
+        mains = db.wiki_list_main_at(cat["id"], ceiling)
+        db.close()
+
+        if not mains:
+            return f"类别「{category}」在第 {ceiling} 章之前无词条。"
+
+        # 分页
+        total = len(mains)
+        total_pages = (total + page_size - 1) // page_size
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = mains[start:end]
+
+        lines = [f"类别「{category}」词条（≤ 第{ceiling}章，第 {page}/{total_pages} 页，共 {total} 个）："]
+        for m in page_items:
+            lines.append(f"  - {m['name']}")
+        return "\n".join(lines)
+
+    def _read_wiki_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """read_wiki 硬切：读取 ≤ ceiling 的最新版本"""
+        from tools.editor import _get_proxy, build_frontmatter
+        db = self._get_db()
+        name = args.get("name", "")
+        yaml_only = args.get("yaml_only", True)
+
+        main = db.wiki_find_main(name)
+        if main is None:
+            db.close()
+            return f"错误：wiki「{name}」不存在"
+
+        # 检查 created_chapter 是否超出 ceiling
+        if main["created_chapter"] > ceiling:
+            db.close()
+            return f"错误：wiki「{name}」不存在（在第 {ceiling} 章时尚未创建）"
+
+        version = db.latest_version_at("wiki", main["id"], ceiling)
+        db.close()
+        if version is None:
+            return f"错误：wiki「{name}」在第 {ceiling} 章之前无版本记录"
+
+        # 构建 frontmatter 输出
+        cat = _get_proxy(self.workspace)._db.get_category(main["category_id"])
+        cat_name = cat["name"] if cat else ""
+        meta = {
+            "title": name,
+            "type": cat_name,
+            "keywords": version.get("keywords", ""),
+            "description": version.get("description", ""),
+            "state": version.get("state", ""),
+            "tags": version.get("tags", []),
+        }
+        fm = build_frontmatter(meta)
+        if yaml_only:
+            return fm
+        content = version.get("content", "")
+        return f"{fm}\n{content}"
+
+    def _plot_list_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """plot_list 硬切：仅列 created_chapter ≤ ceiling 的剧情卡片"""
+        db = self._get_db()
+        mains = db.plot_list_main_at(ceiling)
+        db.close()
+
+        if not mains:
+            return f"在第 {ceiling} 章之前无剧情卡片。"
+
+        lines = [f"剧情卡片（≤ 第{ceiling}章，共 {len(mains)} 个）："]
+        for m in mains:
+            ended_mark = "已结束" if m.get("ended") else "未结束"
+            lines.append(f"  - {m['name']}（{m.get('chapters', '')}，{ended_mark}）")
+        return "\n".join(lines)
+
+    def _read_plot_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """read_plot 硬切：读取 ≤ ceiling 的最新版本"""
+        from tools.editor import build_frontmatter
+        db = self._get_db()
+        name = args.get("name", "")
+        yaml_only = args.get("yaml_only", True)
+
+        main = db.plot_find_main(name)
+        if main is None:
+            db.close()
+            return f"错误：剧情卡片「{name}」不存在"
+
+        if main["created_chapter"] > ceiling:
+            db.close()
+            return f"错误：剧情卡片「{name}」不存在（在第 {ceiling} 章时尚未创建）"
+
+        version = db.latest_version_at("plot", main["id"], ceiling)
+        db.close()
+        if version is None:
+            return f"错误：剧情卡片「{name}」在第 {ceiling} 章之前无版本记录"
+
+        meta = {
+            "title": name,
+            "type": "plot",
+            "keywords": version.get("keywords", ""),
+            "description": version.get("description", ""),
+            "state": version.get("state", ""),
+            "tags": version.get("tags", []),
+            "chapters": main.get("chapters", ""),
+        }
+        fm = build_frontmatter(meta)
+        if yaml_only:
+            return fm
+        content = version.get("content", "")
+        return f"{fm}\n{content}"
+
+    def _rules_list_at_ceiling(self, ceiling: int) -> str:
+        """rules_list 硬切：仅列 created_chapter ≤ ceiling 的规则"""
+        db = self._get_db()
+        mains = db.rule_list_main_at(ceiling)
+        db.close()
+
+        if not mains:
+            return f"在第 {ceiling} 章之前无规则文档。"
+
+        lines = [f"规则文档（≤ 第{ceiling}章，共 {len(mains)} 个）："]
+        for m in mains:
+            lines.append(f"  - {m['name']}")
+        return "\n".join(lines)
+
+    def _read_rule_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """read_rule 硬切：读取 ≤ ceiling 的最新版本"""
+        from tools.editor import build_frontmatter
+        db = self._get_db()
+        name = args.get("name", "")
+        yaml_only = args.get("yaml_only", True)
+
+        main = db.rule_find_main(name)
+        if main is None:
+            db.close()
+            return f"错误：规则「{name}」不存在"
+
+        if main["created_chapter"] > ceiling:
+            db.close()
+            return f"错误：规则「{name}」不存在（在第 {ceiling} 章时尚未创建）"
+
+        version = db.latest_version_at("rule", main["id"], ceiling)
+        db.close()
+        if version is None:
+            return f"错误：规则「{name}」在第 {ceiling} 章之前无版本记录"
+
+        meta = {
+            "title": name,
+            "type": "rule",
+            "keywords": version.get("keywords", ""),
+            "description": version.get("description", ""),
+        }
+        fm = build_frontmatter(meta)
+        if yaml_only:
+            return fm
+        content = version.get("content", "")
+        return f"{fm}\n{content}"
+
+    def _check_wiki_at_ceiling(self, args: dict, ceiling: int) -> str:
+        """check_wiki 硬切：仅检查 created_chapter ≤ ceiling 的词条"""
+        from tools import wiki as wiki_tools
+        # check_wiki 本身不涉及版本读取，直接透传
+        return wiki_tools.check_wiki(self.workspace, **args)
+
 
 # ============================================================
 # MuseWorkflow — 妙笔主流程编排
@@ -510,7 +712,8 @@ class MuseWorkflow:
     """
 
     def __init__(self, config: dict, workspace: Path, skills_dir: Path, workspaces_dir: Optional[Path] = None,
-                 io=None, outline_text: str = "", auto_approve: bool = False):
+                 io=None, outline_text: str = "", auto_approve: bool = False,
+                 chapter: int | None = None):
         self.workspace = workspace
         self.skills_dir = skills_dir
         self.workspaces_dir = workspaces_dir
@@ -525,9 +728,14 @@ class MuseWorkflow:
         self._token_total = {"input": 0, "output": 0, "total": 0}
         self._io_channel = io  # v5.2: IOChannel 实例
         self._auto_approve = auto_approve  # v5.2: 自动确认模式
+        # v5.3: 章节锚定
+        self._chapter_arg = chapter  # 用户传入的目标章节号（None 表示自动）
+        self.target_chapter: int | None = None  # run() 时解析
+        self.chapter_ceiling: int | None = None  # target_chapter - 1，知识版本卡控上限
 
     def run(self):
         """运行妙笔工作流"""
+        self._resolve_chapter_anchor()
         if not self.outline:
             self._step_input_outline()
         else:
@@ -535,6 +743,35 @@ class MuseWorkflow:
         self._step_knowledge_prep()
         self._step_writing_loop()
         self._finish()
+
+    def _resolve_chapter_anchor(self):
+        """解析目标章节号和版本卡控上限"""
+        from tools.db.service import SQLiteService
+        db = SQLiteService(self.workspace / "wiki.db")
+        max_ch = db.chapter_max_num()
+        db.close()
+
+        if self._chapter_arg:
+            self.target_chapter = self._chapter_arg
+        else:
+            self.target_chapter = max_ch + 1 if max_ch > 0 else 1
+
+        # ceiling = N-1，用于知识版本卡控
+        self.chapter_ceiling = self.target_chapter - 1 if self.target_chapter > 1 else None
+
+        # 校验上一章是否存在（target=1 时无需上一章）
+        if self.target_chapter > 1:
+            prev_num = self.target_chapter - 1
+            from tools.chapter import read_chapters
+            prev_text = read_chapters(self.workspace, str(prev_num))
+            if prev_text.startswith("错误"):
+                print(f"错误：第 {prev_num} 章不存在，请先导入后再写第 {self.target_chapter} 章。")
+                import sys
+                sys.exit(1)
+
+        print(f"目标章节：第 {self.target_chapter} 章")
+        if self.chapter_ceiling:
+            print(f"知识版本卡控：≤ 第 {self.chapter_ceiling} 章")
 
     # ---- v5.2 I/O 辅助 ----
 
@@ -940,6 +1177,10 @@ class MuseWorkflow:
         # 如果是重写轮次（round > 1），传入上一轮草稿
         previous_draft = self.current_draft if self.io.round > 1 else ""
 
+        # v5.3: 注入 style 记忆
+        from tools.memory import get_memories_for_prompt
+        memory_block = get_memories_for_prompt(self.workspace, ["style"], limit=5)
+
         result = wf.run(
             outline=self.outline,
             prior_knowledge=self.prior_knowledge,
@@ -947,6 +1188,7 @@ class MuseWorkflow:
             last_chapter=last_chapter,
             review_issues=self.issues if self.issues else None,
             previous_draft=previous_draft,
+            memory_block=memory_block,
         )
         self.io.save_session_log([{"role": "assistant", "content": result}])
         step_name = f"writing_round_{self.io.round}"
@@ -976,6 +1218,14 @@ class MuseWorkflow:
             context_parts.append(f"## 上一章全文\n{last_chapter}")
         context_parts.append(f"## 大纲/草稿\n{self.outline}")
         context_parts.append(f"## 正文\n{draft}")
+
+        # v5.3: 审阅注入 style + correction 记忆
+        from tools.memory import get_memories_for_prompt
+        review_memory = get_memories_for_prompt(
+            self.workspace, ["style", "correction"], limit=5)
+        if review_memory:
+            context_parts.append(review_memory)
+
         context = "\n\n".join(context_parts)
         messages = [{"role": "user", "content": context}]
         messages = agent_loop(agent, messages)
@@ -988,14 +1238,24 @@ class MuseWorkflow:
     # ---- 辅助方法 ----
 
     def _get_last_chapter_full(self) -> str:
-        """读取最新章节全文，供 Writer/Reviewer 衔接参考"""
-        from tools.chapter import chapter_list, read_chapters
+        """读取上一章全文（v5.3：使用锚定的 target_chapter - 1）"""
+        from tools.chapter import read_chapters
+    
+        if self.target_chapter and self.target_chapter > 1:
+            prev_num = self.target_chapter - 1
+            text = read_chapters(self.workspace, str(prev_num))
+            if text.startswith("错误"):
+                return ""
+            return text
+    
+        # 兼容旧行为：无锚定时取 DB 最后一章
+        from tools.chapter import chapter_list
+        import re
         raw = chapter_list(self.workspace)
         if raw in ("（尚无章节）", ""):
             return ""
         lines = raw.strip().splitlines()
         last_line = lines[-1]
-        import re
         m = re.match(r"第(\d+)章", last_line)
         if not m:
             return ""
@@ -1015,6 +1275,7 @@ class MuseWorkflow:
             workspace=self.workspace,
             skills_dir=self.skills_dir,
             cli=cli,
+            chapter_ceiling=self.chapter_ceiling,
         )
         # 将 skill 全文注入 system prompt（LLM 才能看到工作流指引）
         # SkillRegistry 使用 frontmatter 中的 name 字段做 key，不是文件名

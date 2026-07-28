@@ -117,10 +117,27 @@ CREATE TABLE IF NOT EXISTS chapters (
 );
 """
 
+# ── Memories 表（v5.3 记忆系统）──
+MEMORIES_TABLE = """
+CREATE TABLE IF NOT EXISTS memories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    source      TEXT,
+    chapter     INTEGER,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    is_active   INTEGER DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active);
+"""
+
 ALL_TABLES = [
     CATEGORIES_TABLE,
     WIKI_MAIN_TABLE, WIKI_INDEX_TABLE,
     PLOT_MAIN_TABLE, PLOT_INDEX_TABLE,
     RULES_MAIN_TABLE, RULES_INDEX_TABLE,
     CHAPTERS_TABLE,
+    MEMORIES_TABLE,
 ]

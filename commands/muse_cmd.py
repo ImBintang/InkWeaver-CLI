@@ -10,6 +10,7 @@ from core.output import OutputFormatter
 
 def muse(
     outline_file: str = typer.Option(..., "--outline-file", help="大纲文件路径"),
+    chapter: int = typer.Option(0, "--chapter", "-c", help="目标章节号（不传则默认最新章节+1）"),
     workspace: str = typer.Option("", "--workspace", "-w", help="工作区名"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过所有确认（全自动）"),
     json_mode: bool = typer.Option(False, "--json", help="JSON 输出"),
@@ -50,6 +51,7 @@ def muse(
         io=io,
         outline_text=outline_text,
         auto_approve=yes,
+        chapter=chapter if chapter > 0 else None,
     )
     workflow.run()
     elapsed = time.time() - start

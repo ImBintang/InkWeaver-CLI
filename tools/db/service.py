@@ -540,3 +540,118 @@ class SQLiteService:
         """清空所有章节（重新导入前使用）"""
         self.conn.execute("DELETE FROM chapters")
         self._commit()
+
+    # ── 版本卡控查询（v5.3 妙笔章节锚定）──
+
+    def latest_version_at(self, doc_type: str, main_id: int,
+                          ceiling: int) -> dict | None:
+        """获取 chapter ≤ ceiling 的最新版本
+
+        Args:
+            doc_type: "wiki" | "plot" | "rule"
+            main_id: 主表 ID
+            ceiling: 章节上限（含）
+
+        Returns:
+            版本行 dict，或 None（无符合版本）
+        """
+        table = self._INDEX_TABLES[doc_type]
+        cur = self.conn.execute(
+            f"SELECT * FROM {table} WHERE main_id = ? AND chapter <= ? "
+            f"ORDER BY chapter DESC LIMIT 1",
+            (main_id, ceiling),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["tags"] = _parse_json(result.get("tags", "[]"))
+        result["relations"] = _parse_json(result.get("relations", "[]"))
+        return result
+
+    def wiki_list_main_at(self, category_id: int, ceiling: int) -> list[dict]:
+        """列出 created_chapter ≤ ceiling 的 wiki 词条"""
+        cur = self.conn.execute(
+            "SELECT * FROM wiki_main WHERE category_id = ? AND created_chapter <= ? "
+            "ORDER BY name",
+            (category_id, ceiling),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def plot_list_main_at(self, ceiling: int) -> list[dict]:
+        """列出 created_chapter ≤ ceiling 的剧情卡片"""
+        cur = self.conn.execute(
+            "SELECT * FROM plot_main WHERE created_chapter <= ? ORDER BY name",
+            (ceiling,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def rule_list_main_at(self, ceiling: int) -> list[dict]:
+        """列出 created_chapter ≤ ceiling 的规则"""
+        cur = self.conn.execute(
+            "SELECT * FROM rules_main WHERE created_chapter <= ? ORDER BY name",
+            (ceiling,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    # ── Memories CRUD（v5.3 记忆系统）──
+
+    def memory_create(self, category: str, content: str,
+                      source: str = None, chapter: int = None) -> int:
+        now = _now()
+        cur = self.conn.execute(
+            "INSERT INTO memories (category, content, source, chapter, "
+            "created_at, updated_at, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)",
+            (category, content, source, chapter, now, now),
+        )
+        self._commit()
+        return cur.lastrowid
+
+    def memory_get(self, memory_id: int) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT * FROM memories WHERE id = ?", (memory_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def memory_update(self, memory_id: int, content: str = None) -> bool:
+        updates = {}
+        if content is not None:
+            updates["content"] = content
+        if not updates:
+            return False
+        updates["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [memory_id]
+        self.conn.execute(
+            f"UPDATE memories SET {set_clause} WHERE id = ?", vals)
+        self._commit()
+        return True
+
+    def memory_forget(self, memory_id: int) -> bool:
+        """软删除（is_active=0）"""
+        self.conn.execute(
+            "UPDATE memories SET is_active = 0, updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
+        )
+        self._commit()
+        return True
+
+    def memory_query(self, category: str = None, keyword: str = None,
+                     limit: int = 20) -> list[dict]:
+        """检索活跃记忆（支持类别过滤 + 关键词模糊匹配）"""
+        sql = "SELECT * FROM memories WHERE is_active = 1"
+        params: list = []
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        if keyword:
+            sql += " AND content LIKE ?"
+            params.append(f"%{keyword}%")
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        cur = self.conn.execute(sql, params)
+        return [dict(row) for row in cur.fetchall()]
+
+    def memory_list_active(self, category: str = None) -> list[dict]:
+        """列出所有活跃记忆"""
+        return self.memory_query(category=category, limit=999)

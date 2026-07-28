@@ -161,3 +161,35 @@ def kb_relation(
                          ensure_ascii=False, indent=2))
     else:
         fmt.result(result)
+
+
+@app.command("memory")
+def kb_memory(
+    category: str = typer.Option("", "--category", help="按类别过滤：preference/observation/correction/style"),
+    workspace: str = typer.Option("", "--workspace", "-w", help="工作区名"),
+    json_mode: bool = typer.Option(False, "--json", help="JSON 输出"),
+):
+    """列出活跃记忆"""
+    config = load_config()
+    fmt = OutputFormatter(json_mode=json_mode)
+    ws = require_workspace(config, workspace, json_mode)
+
+    from tools.memory import list_memories
+    memories = list_memories(ws)
+
+    # 类别过滤
+    if category:
+        memories = [m for m in memories if m["category"] == category]
+
+    if json_mode:
+        print(json.dumps({"status": "success", "memories": memories, "count": len(memories)},
+                         ensure_ascii=False, indent=2))
+    else:
+        if not memories:
+            fmt.result("（无活跃记忆）")
+        else:
+            lines = []
+            for m in memories:
+                src = f" [{m['source']}]" if m.get("source") else ""
+                lines.append(f"  #{m['id']} [{m['category']}]{src} {m['content']}")
+            fmt.result(f"活跃记忆（{len(memories)} 条）：\n" + "\n".join(lines))

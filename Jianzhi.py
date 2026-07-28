@@ -136,7 +136,9 @@ class JianzhiAgent(BaseAgent):
             "- 使用 query_relations <词条名> 查看词条关联关系",
             "- 使用 rules_list 查看规则文档列表",
             "- 使用 read_rule <规则名> 读取规则文档",
-            "- 使用 read_memory 读取记忆索引/<name> 读取指定记忆",
+            "- 使用 memory_query 检索记忆（支持类别/关键词过滤）",
+            "- 使用 memory_write 写入新记忆（用户表达偏好/纠正错误/观察到模式时静默写入）",
+            "- 使用 memory_forget 删除记忆",
             "- 使用 chapter_list 查看章节列表（含 [已处理]/[未处理] 标记）",
             "- 使用 context_query 查询当前上下文中已引用的 wiki/规则/剧情卡片列表",
             "",
@@ -208,6 +210,17 @@ class JianzhiAgent(BaseAgent):
             "- 每次只处理一个 in_progress 步骤",
             "- 完成后标记为 completed 并推进下一步",
         ]
+
+        # v5.3: 注入记忆上下文（preference + correction，限 10 条）
+        try:
+            memory_block = memory_tools.get_memories_for_prompt(
+                self.workspace, ["preference", "correction"], limit=10)
+            if memory_block:
+                parts.append("")
+                parts.append(memory_block)
+        except Exception:
+            pass  # DB 未就绪时静默跳过
+
         return "\n".join(parts)
 
     def build_tool_defs(self) -> list:
@@ -447,13 +460,62 @@ class JianzhiAgent(BaseAgent):
             {
                 "type": "function",
                 "function": {
-                    "name": "read_memory",
-                    "description": "读取记忆文档（name=None 时读取索引 MEMORY.md）",
+                    "name": "memory_query",
+                    "description": "检索记忆（支持类别过滤 + 关键词模糊匹配）。类别：preference/observation/correction/style",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "记忆名（None 表示索引）"},
+                            "category": {"type": "string", "description": "按类别过滤（可选）"},
+                            "keyword": {"type": "string", "description": "关键词模糊匹配（可选）"},
                         },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_write",
+                    "description": "写入新记忆（静默，无需用户确认）。当用户表达偏好、纠正错误、或你观察到跨会话有价值的模式时调用。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {
+                                "type": "string",
+                                "enum": ["preference", "observation", "correction", "style"],
+                                "description": "记忆类别",
+                            },
+                            "content": {"type": "string", "description": "记忆正文（自然语言）"},
+                        },
+                        "required": ["category", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_update",
+                    "description": "更新已有记忆的内容",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "description": "记忆 ID"},
+                            "content": {"type": "string", "description": "新内容"},
+                        },
+                        "required": ["id", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "memory_forget",
+                    "description": "删除记忆（软删除）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "integer", "description": "记忆 ID"},
+                        },
+                        "required": ["id"],
                     },
                 },
             },
@@ -1134,6 +1196,11 @@ class JianzhiAgent(BaseAgent):
             "rules_list": lambda **kw: rules_tools.rules_list(self.workspace),
             "read_rule": lambda **kw: rules_tools.read_rule(self.workspace, **kw),
             "read_memory": lambda **kw: memory_tools.read_memory(self.workspace, **kw),
+            "memory_query": lambda **kw: memory_tools.memory_query(self.workspace, **kw),
+            "memory_write": lambda **kw: memory_tools.memory_write(
+                self.workspace, source="chat", **kw),
+            "memory_update": lambda **kw: memory_tools.memory_update(self.workspace, **kw),
+            "memory_forget": lambda **kw: memory_tools.memory_forget(self.workspace, **kw),
             "doc_diff": lambda **kw: diff_tools.doc_diff(self.workspace),
             "context_query": lambda **kw: self.context.query_context(**kw),
             "lint_report": lambda **kw: _read_lint_report(self.workspace),
