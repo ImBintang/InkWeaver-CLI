@@ -157,7 +157,7 @@ class SQLiteService:
 
     def wiki_update_main(self, main_id: int, **fields) -> bool:
         allowed = {"name", "category_id", "current_version",
-                    "updated_chapter", "updated_at"}
+                    "created_chapter", "updated_chapter", "updated_at"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
@@ -257,7 +257,7 @@ class SQLiteService:
 
     def plot_update_main(self, main_id: int, **fields) -> bool:
         allowed = {"name", "current_version", "chapters", "ended",
-                    "end_notes", "updated_chapter", "updated_at"}
+                    "end_notes", "created_chapter", "updated_chapter", "updated_at"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
@@ -358,7 +358,8 @@ class SQLiteService:
         return [dict(row) for row in cur.fetchall()]
 
     def rule_update_main(self, main_id: int, **fields) -> bool:
-        allowed = {"name", "current_version", "updated_chapter", "updated_at"}
+        allowed = {"name", "current_version", "created_chapter",
+                    "updated_chapter", "updated_at"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False

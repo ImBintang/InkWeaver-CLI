@@ -96,11 +96,19 @@ class VersionManager:
         return version_id
 
     def _update_pointer(self, doc_type: str, main_id: int):
-        """更新 current_version → MAX(updated_chapter) 对应的 version_id"""
+        """更新 current_version → MAX(chapter)，created_chapter → MIN(chapter)"""
         versions = self._db.list_versions(doc_type, main_id)
         if not versions:
             return
-        # versions 按 chapter 升序，最后一个即 MAX
+        # versions 按 chapter 升序
         latest = versions[-1]
+        earliest = versions[0]
         self._db.set_current_version(
             doc_type, main_id, latest["id"], latest["chapter"])
+        # created_chapter 始终指向时间线最小章节（版本区间语义）
+        updater = {
+            "wiki": self._db.wiki_update_main,
+            "plot": self._db.plot_update_main,
+            "rule": self._db.rule_update_main,
+        }[doc_type]
+        updater(main_id, created_chapter=earliest["chapter"])

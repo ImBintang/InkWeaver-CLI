@@ -864,28 +864,44 @@ class ProxyService:
                                 end_notes=doc.end_notes,
                             )
                     else:
-                        # 正常提取（原有逻辑）
-                        creator = {
-                            "wiki": self._db.wiki_create_version,
-                            "plot": self._db.plot_create_version,
-                            "rule": self._db.rule_create_version,
-                        }[doc_type]
-                        ver_id = creator(actual_id, actual_ch, doc.to_dict())
-
-                        # set_current
-                        if doc_type == "plot":
-                            self._db.plot_set_current(
-                                actual_id, ver_id, actual_ch,
-                                chapters=doc.chapters,
-                                ended=int(doc.ended),
-                                end_notes=doc.end_notes,
-                            )
-                        else:
-                            setter = {
-                                "wiki": self._db.wiki_set_current,
-                                "rule": self._db.rule_set_current,
+                        # 正常提取 / 非白名单编辑
+                        if doc.is_new:
+                            # 新建条目：直接插入
+                            creator = {
+                                "wiki": self._db.wiki_create_version,
+                                "plot": self._db.plot_create_version,
+                                "rule": self._db.rule_create_version,
                             }[doc_type]
-                            setter(actual_id, ver_id, actual_ch)
+                            ver_id = creator(actual_id, actual_ch, doc.to_dict())
+                            # set_current
+                            if doc_type == "plot":
+                                self._db.plot_set_current(
+                                    actual_id, ver_id, actual_ch,
+                                    chapters=doc.chapters,
+                                    ended=int(doc.ended),
+                                    end_notes=doc.end_notes,
+                                )
+                            else:
+                                setter = {
+                                    "wiki": self._db.wiki_set_current,
+                                    "rule": self._db.rule_set_current,
+                                }[doc_type]
+                                setter(actual_id, ver_id, actual_ch)
+                        else:
+                            # 已存在条目：由 vm 自动判定 overwrite/insert
+                            # 防止同 chapter 重复插入（设计决策 #6）
+                            ver_id = vm.commit(doc_type, actual_id,
+                                               actual_ch, doc.to_dict())
+                            # plot 额外字段
+                            if doc_type == "plot":
+                                self._db.plot_set_current(
+                                    actual_id,
+                                    self._db.list_versions("plot", actual_id)[-1]["id"],
+                                    actual_ch,
+                                    chapters=doc.chapters,
+                                    ended=int(doc.ended),
+                                    end_notes=doc.end_notes,
+                                )
 
             # ── 指针一致性修复：确保所有受影响 main 的 current_version 指向 MAX(chapter) ──
                 affected_mains = set()
