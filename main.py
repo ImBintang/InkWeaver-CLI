@@ -171,6 +171,7 @@ _HELP_TEXT = """可用指令：
     /rule -n <name>       查看指定规则文档
     /relation -n <name>   查询词条关联
     /link                 从 wiki 文档提取 wikilink，构建关系图（relations.yaml）
+    /db_migrate           将文件系统知识库迁移到 SQLite（v5.0）
 
   系统：
     /help                 显示本帮助
@@ -254,12 +255,24 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
             cli.print_info("已取消。")
             return True, jianzhi
         if confirm == "y":
+            # 关闭 SQLite 连接释放 wiki.db 文件锁
+            if hasattr(jianzhi, '_db_service') and jianzhi._db_service:
+                try:
+                    jianzhi._db_service.close()
+                except Exception:
+                    pass
+            from tools.editor import unregister_proxy
+            unregister_proxy(jianzhi.workspace)
             ok = workspace_tools.delete_workspace(jianzhi.workspace)
             if ok:
                 cli.print_info("已删除。")
             else:
-                cli.print_info("删除失败。")
-            # 回退到第一个工作区
+                cli.print_info("删除失败（文件可能被占用）。")
+                # 删除失败时重新打开日志，保持当前工作区
+                cli.init_logger(jianzhi.workspace / "session")
+                return True, jianzhi
+            # 删除成功后回退到第一个工作区
+            jianzhi = None
             workspaces = sorted([d for d in WORKSPACES_DIR.iterdir() if d.is_dir()])
             if workspaces:
                 _switch_to_workspace(workspaces[0], cli, config)
@@ -478,18 +491,16 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if not name:
             cli.print_info("用法：/wiki -n <词条名>")
             return True, jianzhi
-        from tools.wiki import _wiki_root, _parse_frontmatter
-        wiki_root = _wiki_root(jianzhi.workspace)
-        if not wiki_root.exists():
-            cli.print_info("wiki 目录不存在")
-            return True, jianzhi
+        # v5：调 proxy 读取
+        from tools.editor import _get_proxy
+        proxy = _get_proxy(jianzhi.workspace)
+        # 遍历所有类别查找
+        cats = proxy.list_categories()
         found = False
-        for cat_dir in sorted(wiki_root.iterdir()):
-            if not cat_dir.is_dir():
-                continue
-            fp = cat_dir / f"{name}.md"
-            if fp.exists():
-                cli.print_info(fp.read_text(encoding="utf-8"))
+        for cat in cats:
+            result = proxy.read_doc("wiki", name, category=cat["name"], yaml_only=False)
+            if not result.startswith("错误"):
+                cli.print_info(result)
                 found = True
                 break
         if not found:
@@ -529,6 +540,27 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         save_relations(jianzhi.workspace, relations)
         total_links = sum(len(targets) for targets in relations.values())
         cli.print_info(f"关系图已构建：共 {len(relations)} 个词条，{total_links} 条关系")
+
+    elif command == "db_migrate":
+        """将当前工作区的文件数据迁移到 SQLite"""
+        if jianzhi is None:
+            cli.print_info("请先进入一个工作区")
+            return True, jianzhi
+        cli.print_info("\n开始迁移文件系统 → SQLite...")
+        from tools.db.migration import migrate_workspace
+        stats = migrate_workspace(jianzhi.workspace)
+        if stats.get("skipped"):
+            cli.print_info(f"跳过迁移：{stats['reason']}")
+        else:
+            cli.print_info(f"迁移完成：")
+            cli.print_info(f"  类别：{stats['categories']} 个")
+            cli.print_info(f"  Wiki 词条：{stats['wiki']} 条")
+            cli.print_info(f"  剧情卡片：{stats['plot']} 张")
+            cli.print_info(f"  规则文档：{stats['rules']} 条")
+            if stats["errors"]:
+                cli.print_info(f"  错误：{len(stats['errors'])} 个")
+                for err in stats["errors"][:5]:
+                    cli.print_info(f"    ⚠️ {err}")
 
     else:
         cli.print_info(f"未知指令：/{command}，输入 /help 查看可用指令")

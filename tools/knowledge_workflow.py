@@ -49,23 +49,23 @@ class KnowledgeWorkflow:
     def _resolve_wiki_names(self, names: list[str], full: bool = False) -> tuple[list[str], list[str]]:
         """解析 wiki 名称列表，返回 (成功内容列表, 失败名称列表)
 
-        直接扫描文件系统避免 wiki_list 分页导致的漏查问题。
+        v5：通过 proxy 从 DB 构建名称→类别映射。
         """
-        from tools.wiki import _wiki_root
-        root = _wiki_root(self.workspace)
-        if not root.exists():
-            return [], names
+        from tools.editor import _get_proxy
+        proxy = _get_proxy(self.workspace)
 
-        # 直接扫描文件系统，构建 词条名 → 类别 的映射
+        # 从 DB 构建 词条名 → 类别 的映射
         name_to_category = {}
-        for cat_dir in sorted(root.iterdir()):
-            if not cat_dir.is_dir():
-                continue
-            category = cat_dir.name
-            for fp in cat_dir.glob("*.md"):
-                if fp.name == "index.md":
-                    continue
-                name_to_category[fp.stem] = category
+        cats = proxy.list_categories("wiki")
+        for cat in cats:
+            mains = proxy._db.wiki_list_main(cat["id"])
+            for m in mains:
+                name_to_category[m["name"]] = cat["name"]
+
+        # 合并缓存中新增的
+        for (dt, _), doc in proxy._cache.items():
+            if dt == "wiki" and not doc.is_deleted and doc.category:
+                name_to_category[doc.name] = doc.category
 
         successes = []
         failures = []

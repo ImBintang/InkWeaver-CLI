@@ -1,4 +1,8 @@
-"""从 wiki 文档中提取 wikilink，构建 relations.yaml 关系图"""
+"""关系图提取 — v5：从 DB/proxy 读取文档
+
+扫描所有 wiki 和剧情卡片文档中的 [[wikilink]]，构建关系图。
+v5 改造：底层数据源从文件系统切换为 ProxyService（缓存 + DB）。
+"""
 
 import re
 import sys
@@ -7,7 +11,6 @@ from pathlib import Path
 import yaml
 
 
-WIKI_DIR = "wiki"
 RELATIONS_FILE = "relations.yaml"
 
 # 匹配 [[target]] 或 [[target|display]] 格式
@@ -19,60 +22,65 @@ def extract_wikilinks(text: str) -> list:
     return [match.strip() for match in WIKILINK_PATTERN.findall(text)]
 
 
-def _extract_file_relations(md_file: Path, relations: dict):
-    """从单个文件中提取关系并更新到 relations dict"""
-    if md_file.name in ("index.md", RELATIONS_FILE):
-        return
-
-    content = md_file.read_text(encoding="utf-8")
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            content = parts[2]
-
-    from tools.wiki import _parse_frontmatter
-    meta, _ = _parse_frontmatter(md_file.read_text(encoding="utf-8"))
-    source_name = meta.get("title", md_file.stem)
-
-    targets = extract_wikilinks(content)
-    if targets:
-        if source_name not in relations:
-            relations[source_name] = set()
-        for target in targets:
-            relations[source_name].add(target)
-
-
 def build_relations(workspace: Path, extra_dirs: list[str] | None = None) -> dict:
     """扫描所有 wiki 和剧情卡片文档，构建关系图
 
+    v5：通过 ProxyService 从 DB 获取文档内容。
+
     Args:
         workspace: 工作区路径
-        extra_dirs: 额外扫描的目录（相对路径），如 ["plot"]
+        extra_dirs: 保留参数（v5 中不再使用，plot 已包含在 DB 中）
 
     Returns:
         {词条名: [关联词条名, ...]} 的 dict
     """
-    if extra_dirs is None:
-        extra_dirs = ["plot"]
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    relations: dict[str, set] = {}
 
-    wiki_root = workspace / WIKI_DIR
-    relations = {}
-
-    # 扫描 wiki/
-    if wiki_root.exists():
-        for md_file in sorted(wiki_root.rglob("*.md")):
-            if md_file.name in ("index.md", RELATIONS_FILE):
+    # 扫描 wiki（DB + 缓存）
+    cats = proxy.list_categories("wiki")
+    for cat in cats:
+        mains = proxy._db.wiki_list_main(cat["id"])
+        for m in mains:
+            current = proxy._db.wiki_get_current(m["id"])
+            if current is None:
                 continue
-            _extract_file_relations(md_file, relations)
+            content = current.get("content", "")
+            targets = extract_wikilinks(content)
+            if targets:
+                if m["name"] not in relations:
+                    relations[m["name"]] = set()
+                relations[m["name"]].update(targets)
 
-    # 扫描额外目录
-    for extra_dir in extra_dirs:
-        extra_path = workspace / extra_dir
-        if extra_path.exists():
-            for md_file in sorted(extra_path.rglob("*.md")):
-                if md_file.name == "index.md":
-                    continue
-                _extract_file_relations(md_file, relations)
+    # 缓存中新增的 wiki
+    for (dt, _), cached in proxy._cache.items():
+        if dt == "wiki" and cached.is_new and not cached.is_deleted:
+            targets = extract_wikilinks(cached.content)
+            if targets:
+                if cached.name not in relations:
+                    relations[cached.name] = set()
+                relations[cached.name].update(targets)
+
+    # 扫描 plot（DB + 缓存）
+    for m in proxy._db.plot_list_main():
+        current = proxy._db.plot_get_current(m["id"])
+        if current is None:
+            continue
+        content = current.get("content", "")
+        targets = extract_wikilinks(content)
+        if targets:
+            if m["name"] not in relations:
+                relations[m["name"]] = set()
+            relations[m["name"]].update(targets)
+
+    for (dt, _), cached in proxy._cache.items():
+        if dt == "plot" and cached.is_new and not cached.is_deleted:
+            targets = extract_wikilinks(cached.content)
+            if targets:
+                if cached.name not in relations:
+                    relations[cached.name] = set()
+                relations[cached.name].update(targets)
 
     # 转换为有序列表
     result = {}
@@ -84,7 +92,7 @@ def build_relations(workspace: Path, extra_dirs: list[str] | None = None) -> dic
 
 def save_relations(workspace: Path, relations: dict):
     """保存关系到 relations.yaml"""
-    rel_file = workspace / WIKI_DIR / RELATIONS_FILE
+    rel_file = workspace / RELATIONS_FILE
     rel_file.parent.mkdir(parents=True, exist_ok=True)
     with open(rel_file, "w", encoding="utf-8") as f:
         yaml.dump(relations, f, allow_unicode=True, default_flow_style=False, sort_keys=True)

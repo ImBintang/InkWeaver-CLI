@@ -1,14 +1,15 @@
-"""代码 lint 检查 — 知识库质量检测
+"""知识库 lint 检查 — v5：从 DB/proxy 读取文档
 
 纯 Python 模块，无 LLM 调用。
 提供全套 lint 检查函数，用于检测 wiki/plot 知识库的结构、链接、内容质量等问题。
+v5 改造：底层数据源从文件系统切换为 ProxyService（缓存 + DB）。
 """
 
 import re
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
-from tools.wiki import _parse_frontmatter, _build_frontmatter
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 
@@ -53,115 +54,129 @@ def get_aliases(title: str) -> list[str]:
     return aliases
 
 
-# ── 文件扫描辅助 ─────────────────────────────────────────────────────
+# ── v5 文档收集（从 DB/proxy 获取） ──────────────────────────────────
 
-def _get_changed_files(workspace: Path) -> list[Path]:
-    """获取待检查的文件列表
 
-    返回 wiki/ + plot/ + rules/ 下所有 .md 文件（排除 index.md 和 relations.yaml）
-    """
-    changed: list[Path] = []
+@dataclass
+class LintDoc:
+    """文档快照（用于 lint 检查）"""
+    doc_type: str       # "wiki" | "plot" | "rule"
+    name: str
+    category: str       # wiki 类别名（plot/rule 为空）
+    content: str        # 正文
+    description: str
+    state: str
+    chapters: str       # 仅 plot
+    ended: bool         # 仅 plot
 
-    # 扫描 wiki/
-    wiki_root = workspace / "wiki"
-    if wiki_root.exists():
-        for fp in sorted(wiki_root.rglob("*.md")):
-            if fp.name in ("index.md", "relations.yaml"):
+
+def _gather_all_docs(workspace: Path) -> list[LintDoc]:
+    """从 DB 通过 proxy 获取所有文档（合并缓存中的新条目）"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    docs: list[LintDoc] = []
+
+    # wiki
+    cats = proxy.list_categories("wiki")
+    for cat in cats:
+        cat_name = cat["name"]
+        mains = proxy._db.wiki_list_main(cat["id"])
+        for m in mains:
+            current = proxy._db.wiki_get_current(m["id"])
+            if current is None:
                 continue
-            changed.append(fp)
+            docs.append(LintDoc(
+                doc_type="wiki", name=m["name"], category=cat_name,
+                content=current.get("content", ""),
+                description=current.get("description", ""),
+                state=current.get("state", ""),
+                chapters="", ended=False,
+            ))
+    # 缓存中新增的 wiki
+    for (dt, _), cached in proxy._cache.items():
+        if dt == "wiki" and cached.is_new and not cached.is_deleted:
+            docs.append(LintDoc(
+                doc_type="wiki", name=cached.name,
+                category=cached.category or "",
+                content=cached.content, description=cached.description,
+                state=cached.state, chapters="", ended=False,
+            ))
 
-    # 扫描 plot/
-    plot_root = workspace / "plot"
-    if plot_root.exists():
-        for fp in sorted(plot_root.rglob("*.md")):
-            if fp.name == "index.md":
-                continue
-            changed.append(fp)
-
-    # 扫描 rules/（规则文件也需要 YAML 结构等检查）
-    rules_root = workspace / "rules"
-    if rules_root.exists():
-        for fp in sorted(rules_root.glob("*.md")):
-            changed.append(fp)
-
-    return changed
-
-
-def _build_wiki_map(workspace: Path) -> dict[str, Path]:
-    """扫描 wiki/ 下所有 .md 文件，构建 {stem: Path} 映射（含别名索引）"""
-    wiki_map: dict[str, Path] = {}
-    wiki_root = workspace / "wiki"
-    if not wiki_root.exists():
-        return wiki_map
-
-    for fp in sorted(wiki_root.rglob("*.md")):
-        if fp.name in ("index.md", "relations.yaml"):
+    # plot
+    for m in proxy._db.plot_list_main():
+        current = proxy._db.plot_get_current(m["id"])
+        if current is None:
             continue
-        # 用文件名 stem 做索引
-        stem = fp.stem
-        wiki_map[stem] = fp
+        docs.append(LintDoc(
+            doc_type="plot", name=m["name"], category="",
+            content=current.get("content", ""),
+            description=current.get("description", ""),
+            state=current.get("state", ""),
+            chapters=m.get("chapters", ""),
+            ended=bool(m.get("ended", False)),
+        ))
+    for (dt, _), cached in proxy._cache.items():
+        if dt == "plot" and cached.is_new and not cached.is_deleted:
+            docs.append(LintDoc(
+                doc_type="plot", name=cached.name, category="",
+                content=cached.content, description=cached.description,
+                state=cached.state, chapters=cached.chapters,
+                ended=cached.ended,
+            ))
 
-        # 读取 title 字段，如果 title != stem，也用 title 索引
-        try:
-            meta, _ = _parse_frontmatter(fp.read_text(encoding="utf-8"))
-            title = meta.get("title", "")
-            if title and title != stem and title not in wiki_map:
-                wiki_map[title] = fp
-            # 用别名索引
-            source_name = title or stem
-            for alias in get_aliases(source_name):
-                if alias not in wiki_map:
-                    wiki_map[alias] = fp
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Failed to read %s for wiki map: %s", fp, e
-            )
+    # rule
+    for m in proxy._db.rule_list_main():
+        current = proxy._db.rule_get_current(m["id"])
+        if current is None:
+            continue
+        docs.append(LintDoc(
+            doc_type="rule", name=m["name"], category="",
+            content=current.get("content", ""),
+            description=current.get("description", ""),
+            state=current.get("state", ""),
+            chapters="", ended=False,
+        ))
+    for (dt, _), cached in proxy._cache.items():
+        if dt == "rule" and cached.is_new and not cached.is_deleted:
+            docs.append(LintDoc(
+                doc_type="rule", name=cached.name, category="",
+                content=cached.content, description=cached.description,
+                state=cached.state, chapters="", ended=False,
+            ))
 
-    return wiki_map
+    return docs
 
 
-def _build_rules_map(workspace: Path) -> dict[str, Path]:
-    """扫描 rules/ 下所有 .md 文件，构建 {stem: Path} 映射"""
-    rules_map: dict[str, Path] = {}
-    rules_root = workspace / "rules"
-    if not rules_root.exists():
-        return rules_map
+def _build_wiki_name_set(docs: list[LintDoc]) -> set[str]:
+    """构建 wiki 名称集合（含别名索引）"""
+    names: set[str] = set()
+    for d in docs:
+        if d.doc_type != "wiki":
+            continue
+        names.add(d.name)
+        for alias in get_aliases(d.name):
+            names.add(alias)
+    return names
 
-    for fp in sorted(rules_root.glob("*.md")):
-        rules_map[fp.stem] = fp
 
-    return rules_map
+def _build_rules_name_set(docs: list[LintDoc]) -> set[str]:
+    """构建规则名称集合"""
+    return {d.name for d in docs if d.doc_type == "rule"}
 
 
 def _get_category_state_info(workspace: Path) -> dict[str, bool]:
-    """读取每个类别 index.md，确定该类别是否需要 state 字段
-
-    Returns:
-        {category_name: needs_state}
-    """
+    """从 DB 读取每个类别是否需要 state 字段"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
     result: dict[str, bool] = {}
-    wiki_root = workspace / "wiki"
-    if not wiki_root.exists():
-        return result
-
-    for cat_dir in sorted(wiki_root.iterdir()):
-        if not cat_dir.is_dir():
-            continue
-        index_fp = cat_dir / "index.md"
-        needs_state = False
-        if index_fp.exists():
-            content = index_fp.read_text(encoding="utf-8")
-            # 检查正文中"是否需要 state 字段"段落
-            state_match = re.search(
-                r"## 是否需要 state 字段\s*\n(.+)",
-                content,
-            )
-            if state_match:
-                value = state_match.group(1).strip()
-                needs_state = value == "是"
-        result[cat_dir.name] = needs_state
-
+    for cat in proxy.list_categories("wiki"):
+        spec = cat.get("spec", {})
+        if isinstance(spec, str):
+            try:
+                spec = json.loads(spec)
+            except (json.JSONDecodeError, TypeError):
+                spec = {}
+        result[cat["name"]] = bool(spec.get("state_required", False))
     return result
 
 
@@ -189,406 +204,6 @@ def _read_chapter_text(workspace: Path, num: int) -> str:
     return fp.read_text(encoding="utf-8")
 
 
-# ── 检查函数 ─────────────────────────────────────────────────────────
-
-def check_yaml_structure(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 YAML frontmatter 结构问题
-
-    - frontmatter 缺失（不以 --- 开头）→ debt, auto_fixed=False
-    - frontmatter 重复（超过 2 组 ---）→ auto_fix=True，合并
-    - body 为空 → debt, auto_fixed=False
-    """
-    debts: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        text_stripped = text.strip()
-
-        if not text_stripped.startswith("---"):
-            debts.append({
-                "type": "yaml_missing",
-                "file": rel,
-                "detail": "frontmatter 缺失：文件不以 --- 开头",
-                "auto_fixed": False,
-            })
-            continue
-
-        # 统计 --- 出现次数
-        parts = text_stripped.split("---")
-        fm_sections = [p for p in parts if p.strip() and ":" in p]
-
-        # 如果 body 部分又包含 ---，说明可能有重复 frontmatter
-        # 标准结构：---\n...\n---\nbody → 3 个部分，第 2 个是 frontmatter
-        if len(parts) >= 4:
-            # 有重复 frontmatter
-            meta, body = _parse_frontmatter(text)
-            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-            debts.append({
-                "type": "yaml_duplicate",
-                "file": rel,
-                "detail": "重复 frontmatter：已自动合并",
-                "auto_fixed": True,
-            })
-
-        # 检查 body 是否为空
-        meta, body = _parse_frontmatter(text)
-        if not body or not body.strip():
-            debts.append({
-                "type": "body_empty",
-                "file": rel,
-                "detail": "正文为空",
-                "auto_fixed": False,
-            })
-
-    return debts
-
-
-def check_wikilinks(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 wiki 文档中的 wikilink 是否指向已存在的目标
-
-    构建 wiki_map + rules_map，遍历 changed_files 中的 [[wikilink]]，
-    检查目标是否存在于任一映射中。
-
-    额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
-    """
-    from tools.editor import is_in_unlink_blacklist
-
-    wiki_map = _build_wiki_map(workspace)
-    rules_map = _build_rules_map(workspace)
-
-    # 合并有效目标集合
-    valid_targets = set(wiki_map.keys()) | set(rules_map.keys())
-
-    debts: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        # 跳过 wiki map 的索引项（已通过文件名 stem 索引），直接扫描内容
-        text = fp.read_text(encoding="utf-8")
-        links = extract_wikilinks(text)
-
-        # 检查是否有黑名单目标需要自动取消链接
-        blacklist_targets = {link for link in links if link not in valid_targets
-                            and is_in_unlink_blacklist(workspace, link)}
-        if blacklist_targets:
-            meta, body = _parse_frontmatter(text)
-            for target in blacklist_targets:
-                old_lower = target.strip().lower()
-                def _make_unlinker(old_lower):
-                    def _replace(match):
-                        raw_target = match.group(1)
-                        raw_alias = match.group(2) or ""
-                        if raw_target.strip().lower() == old_lower:
-                            display = raw_alias.lstrip("|") if raw_alias else raw_target
-                            return display
-                        return match.group(0)
-                    return _replace
-                body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _make_unlinker(old_lower), body)
-            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-            # 重新提取 links 用于债务检查（已取消链接的已不在）
-            links = extract_wikilinks(body)
-
-        for link in links:
-            if link not in valid_targets:
-                debts.append({
-                    "type": "broken_link",
-                    "file": rel,
-                    "target": link,
-                    "context": f"[[{link}]]",
-                })
-
-    return debts
-
-
-def check_rules_wikilinks(workspace: Path) -> list[dict]:
-    """检查规则文档中的 wikilink，替换为纯文本
-
-    规则文档不应包含 [[wikilink]]，扫描 rules/*.md，
-    将 [[target|display]] 或 [[target]] 替换为纯文本。
-    """
-    fixes: list[dict] = []
-    rules_root = workspace / "rules"
-    if not rules_root.exists():
-        return fixes
-
-    for fp in sorted(rules_root.glob("*.md")):
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        links = extract_wikilinks(text)
-        if not links:
-            continue
-
-        # 替换所有 wikilink 为纯文本
-        new_text = WIKILINK_PATTERN.sub(r"\1", text)
-        fp.write_text(new_text, encoding="utf-8")
-
-        fixes.append({
-            "type": "rules_wikilink_removed",
-            "file": rel,
-            "detail": f"规则文档包含 [[wikilink]]（{len(links)} 处），已自动替换为纯文本",
-            "auto_fixed": True,
-        })
-
-    return fixes
-
-
-def check_state(workspace: Path, changed_files: list[Path]) -> tuple[list[dict], list[dict]]:
-    """检查 state 字段问题
-
-    根据类别 index.md 的配置判断：
-    - needs_state=True 但无 state → debt: state_missing
-    - needs_state=False 但有 state → auto_fix: 移除 state 行
-    - needs_state=True 且 state > 100 字 → debt: state_verbose
-
-    Returns:
-        (debts, auto_fixes)
-    """
-    category_state = _get_category_state_info(workspace)
-    debts: list[dict] = []
-    auto_fixes: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        # 只检查 wiki/ 下的文件
-        if not rel.startswith("wiki/"):
-            continue
-
-        # 提取类别（wiki/人物/张三.md → 人物）
-        parts = Path(rel).parts
-        if len(parts) < 2:
-            continue
-        category = parts[1] if parts[0] == "wiki" else parts[0]
-
-        needs_state = category_state.get(category, False)
-
-        text = fp.read_text(encoding="utf-8")
-        meta, _ = _parse_frontmatter(text)
-        has_state = "state" in meta
-        state_value = meta.get("state", "")
-
-        if needs_state and not has_state:
-            debts.append({
-                "type": "state_missing",
-                "file": rel,
-                "detail": f"类别「{category}」需要 state 字段，但词条中缺少",
-                "auto_fixed": False,
-            })
-        elif needs_state and has_state and len(state_value) > STATE_MAX_CHARS:
-            debts.append({
-                "type": "state_verbose",
-                "file": rel,
-                "detail": f"state 字段过长（{len(state_value)} 字，上限 {STATE_MAX_CHARS}）",
-                "auto_fixed": False,
-            })
-        elif not needs_state and has_state:
-            # 自动修复：移除 state 行
-            new_meta = {k: v for k, v in meta.items() if k != "state"}
-            new_body = _parse_frontmatter(text)[1]
-            fp.write_text(_build_frontmatter(new_meta) + new_body, encoding="utf-8")
-            auto_fixes.append({
-                "type": "state_removed",
-                "file": rel,
-                "detail": f"类别「{category}」不需要 state 字段，已自动移除",
-                "auto_fixed": True,
-            })
-
-    return debts, auto_fixes
-
-
-def check_category(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 wiki 文档 frontmatter 的 type 字段是否与所在文件夹名称一致
-
-    如果不一致，auto_fix: 重写 type 为文件夹名。
-    """
-    auto_fixes: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        if not rel.startswith("wiki/"):
-            continue
-
-        parts = Path(rel).parts
-        if len(parts) < 3:
-            continue
-        # wiki/人物/张三.md → parts = ["wiki", "人物", "张三.md"]
-        folder_name = parts[1]
-
-        text = fp.read_text(encoding="utf-8")
-        meta, body = _parse_frontmatter(text)
-        current_type = meta.get("type", "")
-
-        if current_type and current_type != folder_name:
-            meta["type"] = folder_name
-            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-            auto_fixes.append({
-                "type": "type_fixed",
-                "file": rel,
-                "detail": f"type 字段「{current_type}」与文件夹名「{folder_name}」不一致，已自动修正",
-                "auto_fixed": True,
-            })
-
-    return auto_fixes
-
-
-def check_doc_length(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 wiki 文档正文长度是否超过上限
-
-    超过 DOC_MAX_CHARS (1500) → debt: length_overage
-    """
-    debts: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        _, body = _parse_frontmatter(text)
-        body_len = len(body)
-
-        if body_len > DOC_MAX_CHARS:
-            debts.append({
-                "type": "length_overage",
-                "file": rel,
-                "detail": f"正文过长（{body_len} 字，建议上限 {DOC_MAX_CHARS}）",
-                "auto_fixed": False,
-            })
-
-    return debts
-
-
-def check_description_length(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 wiki/plot/rules 文档 frontmatter 中 description 字段长度
-
-    超过 DESC_MAX_CHARS (100) → debt: desc_verbose
-    """
-    debts: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        meta, _ = _parse_frontmatter(text)
-        desc = meta.get("description", "")
-        if len(desc) > DESC_MAX_CHARS:
-            debts.append({
-                "type": "desc_verbose",
-                "file": rel,
-                "detail": f"description 过长（{len(desc)} 字，建议上限 {DESC_MAX_CHARS}）",
-                "auto_fixed": False,
-            })
-
-    return debts
-
-
-def check_plot_links(workspace: Path) -> list[dict]:
-    """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标
-
-    扫描 plot/ 目录，提取 [[wikilink]]，检查 wiki_map。
-    额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
-    """
-    from tools.editor import is_in_unlink_blacklist
-
-    wiki_map = _build_wiki_map(workspace)
-    valid_targets = set(wiki_map.keys())
-
-    debts: list[dict] = []
-    plot_root = workspace / "plot"
-    if not plot_root.exists():
-        return debts
-
-    for fp in sorted(plot_root.rglob("*.md")):
-        if fp.name == "index.md":
-            continue
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        links = extract_wikilinks(text)
-
-        # 检查是否有黑名单目标需要自动取消链接
-        blacklist_targets = {link for link in links if link not in valid_targets
-                            and is_in_unlink_blacklist(workspace, link)}
-        if blacklist_targets:
-            meta, body = _parse_frontmatter(text)
-            for target in blacklist_targets:
-                old_lower = target.strip().lower()
-                def _make_unlinker(old_lower):
-                    def _replace(match):
-                        raw_target = match.group(1)
-                        raw_alias = match.group(2) or ""
-                        if raw_target.strip().lower() == old_lower:
-                            display = raw_alias.lstrip("|") if raw_alias else raw_target
-                            return display
-                        return match.group(0)
-                    return _replace
-                body = re.sub(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]", _make_unlinker(old_lower), body)
-            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-            # 重新提取 links 用于债务检查
-            links = extract_wikilinks(body)
-
-        for link in links:
-            if link not in valid_targets:
-                debts.append({
-                    "type": "plot_broken_link",
-                    "file": rel,
-                    "target": link,
-                    "context": f"[[{link}]]",
-                })
-
-    return debts
-
-
-def check_plot_range(workspace: Path) -> list[dict]:
-    """检查剧情卡片的 chapters 字段是否超出最大章节号
-
-    如果 chapters 超出 document/ 中最大章节号，自动修正。
-    """
-    max_chapter = _get_max_chapter(workspace)
-    if max_chapter == 0:
-        return []
-
-    auto_fixes: list[dict] = []
-    plot_root = workspace / "plot"
-    if not plot_root.exists():
-        return auto_fixes
-
-    for fp in sorted(plot_root.rglob("*.md")):
-        if fp.name == "index.md":
-            continue
-        rel = fp.relative_to(workspace).as_posix()
-        text = fp.read_text(encoding="utf-8")
-        meta, body = _parse_frontmatter(text)
-
-        chapters_raw = meta.get("chapters", meta.get("chapter", ""))
-        if not chapters_raw:
-            continue
-
-        # 解析 chapters 字段中的最大数值
-        numbers = re.findall(r"\d+", str(chapters_raw))
-        if not numbers:
-            continue
-
-        max_in_field = max(int(n) for n in numbers)
-        if max_in_field > max_chapter:
-            # 自动修正：将超出部分截断
-            # 简单方案：将 chapters 设为基础值
-            from tools.chapter import parse_chapter_spec
-            nums = parse_chapter_spec(str(chapters_raw))
-            valid_nums = [n for n in nums if n <= max_chapter]
-            if valid_nums:
-                # 构建新的范围表达式
-                new_chapters = _compact_chapter_list(valid_nums)
-            else:
-                new_chapters = str(max_chapter)
-
-            meta["chapters"] = new_chapters
-            fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-            auto_fixes.append({
-                "type": "plot_range_fixed",
-                "file": rel,
-                "detail": f"chapters 超出最大章节 {max_chapter}，已自动修正为 {new_chapters}",
-                "auto_fixed": True,
-            })
-
-    return auto_fixes
-
-
 def _compact_chapter_list(nums: list[int]) -> str:
     """将排序后的章节号列表压缩为范围表示法
 
@@ -612,45 +227,291 @@ def _compact_chapter_list(nums: list[int]) -> str:
     return ",".join(ranges)
 
 
+# ── 检查函数（v5：操作 LintDoc 列表） ────────────────────────────────
+
+
+def check_content(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查文档正文是否为空"""
+    debts: list[dict] = []
+    for d in docs:
+        label = f"{d.doc_type}/{d.name}"
+        if not d.content or not d.content.strip():
+            debts.append({
+                "type": "body_empty",
+                "file": label,
+                "detail": "正文为空",
+                "auto_fixed": False,
+            })
+    return debts
+
+
+def check_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查文档中的 wikilink 是否指向已存在的目标
+
+    额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
+    """
+    from tools.editor import is_in_unlink_blacklist, _get_proxy
+
+    wiki_names = _build_wiki_name_set(docs)
+    rules_names = _build_rules_name_set(docs)
+    valid_targets = wiki_names | rules_names
+
+    proxy = _get_proxy(workspace)
+    debts: list[dict] = []
+
+    for d in docs:
+        label = f"{d.doc_type}/{d.name}"
+        links = extract_wikilinks(d.content)
+
+        # 黑名单自动取消链接
+        blacklist_targets = {
+            link for link in links
+            if link not in valid_targets and is_in_unlink_blacklist(workspace, link)
+        }
+        if blacklist_targets:
+            new_content = d.content
+            for target in blacklist_targets:
+                old_lower = target.strip().lower()
+
+                def _make_unlinker(old_lower):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == old_lower:
+                            return raw_alias.lstrip("|") if raw_alias else raw_target
+                        return match.group(0)
+                    return _replace
+
+                new_content = re.sub(
+                    r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]",
+                    _make_unlinker(old_lower), new_content,
+                )
+            proxy.update_doc(doc_type=d.doc_type, name=d.name,
+                             category=d.category or None,
+                             content=new_content, chapter=0)
+            d.content = new_content
+            links = extract_wikilinks(new_content)
+
+        for link in links:
+            if link not in valid_targets:
+                debts.append({
+                    "type": "broken_link",
+                    "file": label,
+                    "target": link,
+                    "context": f"[[{link}]]",
+                })
+
+    return debts
+
+
+def check_rules_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查规则文档中的 wikilink，替换为纯文本"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    fixes: list[dict] = []
+
+    for d in docs:
+        if d.doc_type != "rule":
+            continue
+        links = extract_wikilinks(d.content)
+        if not links:
+            continue
+
+        new_content = WIKILINK_PATTERN.sub(r"\1", d.content)
+        proxy.update_doc(doc_type="rule", name=d.name,
+                         content=new_content, chapter=0)
+        d.content = new_content
+
+        fixes.append({
+            "type": "rules_wikilink_removed",
+            "file": f"rule/{d.name}",
+            "detail": f"规则文档包含 [[wikilink]]（{len(links)} 处），已自动替换为纯文本",
+            "auto_fixed": True,
+        })
+
+    return fixes
+
+
+def check_state(workspace: Path, docs: list[LintDoc]) -> tuple[list[dict], list[dict]]:
+    """检查 state 字段问题
+
+    - needs_state=True 但无 state → debt: state_missing
+    - needs_state=True 且 state > 100 字 → debt: state_verbose
+    """
+    from tools.editor import _get_proxy
+    category_state = _get_category_state_info(workspace)
+    proxy = _get_proxy(workspace)
+    debts: list[dict] = []
+    auto_fixes: list[dict] = []
+
+    for d in docs:
+        if d.doc_type != "wiki":
+            continue
+        needs_state = category_state.get(d.category, False)
+        label = f"wiki/{d.category}/{d.name}"
+
+        if needs_state and not d.state:
+            debts.append({
+                "type": "state_missing",
+                "file": label,
+                "detail": f"类别「{d.category}」需要 state 字段，但词条中缺少",
+                "auto_fixed": False,
+            })
+        elif needs_state and len(d.state) > STATE_MAX_CHARS:
+            debts.append({
+                "type": "state_verbose",
+                "file": label,
+                "detail": f"state 字段过长（{len(d.state)} 字，上限 {STATE_MAX_CHARS}）",
+                "auto_fixed": False,
+            })
+
+    return debts, auto_fixes
+
+
+def check_category(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """v5 中类别由 DB 维护，不再出现 type 与目录不一致的问题"""
+    return []
+
+
+def check_doc_length(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查文档正文长度是否超过上限"""
+    debts: list[dict] = []
+    for d in docs:
+        body_len = len(d.content)
+        if body_len > DOC_MAX_CHARS:
+            debts.append({
+                "type": "length_overage",
+                "file": f"{d.doc_type}/{d.name}",
+                "detail": f"正文过长（{body_len} 字，建议上限 {DOC_MAX_CHARS}）",
+                "auto_fixed": False,
+            })
+    return debts
+
+
+def check_description_length(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查 description 字段长度"""
+    debts: list[dict] = []
+    for d in docs:
+        if len(d.description) > DESC_MAX_CHARS:
+            debts.append({
+                "type": "desc_verbose",
+                "file": f"{d.doc_type}/{d.name}",
+                "detail": f"description 过长（{len(d.description)} 字，建议上限 {DESC_MAX_CHARS}）",
+                "auto_fixed": False,
+            })
+    return debts
+
+
+def check_plot_links(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标"""
+    from tools.editor import is_in_unlink_blacklist, _get_proxy
+
+    wiki_names = _build_wiki_name_set(docs)
+    proxy = _get_proxy(workspace)
+    debts: list[dict] = []
+
+    for d in docs:
+        if d.doc_type != "plot":
+            continue
+        label = f"plot/{d.name}"
+        links = extract_wikilinks(d.content)
+
+        blacklist_targets = {
+            link for link in links
+            if link not in wiki_names and is_in_unlink_blacklist(workspace, link)
+        }
+        if blacklist_targets:
+            new_content = d.content
+            for target in blacklist_targets:
+                old_lower = target.strip().lower()
+
+                def _make_unlinker(old_lower):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == old_lower:
+                            return raw_alias.lstrip("|") if raw_alias else raw_target
+                        return match.group(0)
+                    return _replace
+
+                new_content = re.sub(
+                    r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]",
+                    _make_unlinker(old_lower), new_content,
+                )
+            proxy.update_doc(doc_type="plot", name=d.name,
+                             content=new_content, chapter=0)
+            d.content = new_content
+            links = extract_wikilinks(new_content)
+
+        for link in links:
+            if link not in wiki_names:
+                debts.append({
+                    "type": "plot_broken_link",
+                    "file": label,
+                    "target": link,
+                    "context": f"[[{link}]]",
+                })
+
+    return debts
+
+
+def check_plot_range(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查剧情卡片的 chapters 字段是否超出最大章节号"""
+    max_chapter = _get_max_chapter(workspace)
+    if max_chapter == 0:
+        return []
+
+    from tools.editor import _get_proxy
+    from tools.chapter import parse_chapter_spec
+    proxy = _get_proxy(workspace)
+    auto_fixes: list[dict] = []
+
+    for d in docs:
+        if d.doc_type != "plot" or not d.chapters:
+            continue
+
+        numbers = re.findall(r"\d+", str(d.chapters))
+        if not numbers:
+            continue
+
+        max_in_field = max(int(n) for n in numbers)
+        if max_in_field > max_chapter:
+            nums = parse_chapter_spec(str(d.chapters))
+            valid_nums = [n for n in nums if n <= max_chapter]
+            new_chapters = _compact_chapter_list(valid_nums) if valid_nums else str(max_chapter)
+
+            proxy.update_doc(doc_type="plot", name=d.name,
+                             chapters=new_chapters, chapter=0)
+            d.chapters = new_chapters
+            auto_fixes.append({
+                "type": "plot_range_fixed",
+                "file": f"plot/{d.name}",
+                "detail": f"chapters 超出最大章节 {max_chapter}，已自动修正为 {new_chapters}",
+                "auto_fixed": True,
+            })
+
+    return auto_fixes
+
+
 # ── 未结束剧情卡片检测 ──────────────────────────────────────────
 
 UNENDED_PLOT_GAP = 10  # 卡片最大章节比最新章节落后超过此值即判定可收尾
 
 
-def check_unended_plots(workspace: Path) -> list[dict]:
-    """检测可收尾但未结束的剧情卡片
-
-    判定条件：
-    - ended=false（或缺失）
-    - chapters 中的最大数值 ≤ 最新章节号 - UNENDED_PLOT_GAP
-    """
+def check_unended_plots(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检测可收尾但未结束的剧情卡片"""
     max_chapter = _get_max_chapter(workspace)
     if max_chapter <= UNENDED_PLOT_GAP:
-        return []
-
-    plot_root = workspace / "plot"
-    if not plot_root.exists():
         return []
 
     debts: list[dict] = []
     threshold = max_chapter - UNENDED_PLOT_GAP
 
-    for fp in sorted(plot_root.rglob("*.md")):
-        if fp.name == "index.md":
-            continue
-        text = fp.read_text(encoding="utf-8")
-        meta, _ = _parse_frontmatter(text)
-
-        # 已结束则跳过
-        ended = meta.get("ended", meta.get("end", False))
-        if ended in (True, "true", "True", "是", "yes"):
+    for d in docs:
+        if d.doc_type != "plot" or d.ended or not d.chapters:
             continue
 
-        chapters_raw = meta.get("chapters", meta.get("chapter", ""))
-        if not chapters_raw:
-            continue
-
-        numbers = re.findall(r"\d+", str(chapters_raw))
+        numbers = re.findall(r"\d+", str(d.chapters))
         if not numbers:
             continue
 
@@ -658,42 +519,29 @@ def check_unended_plots(workspace: Path) -> list[dict]:
         if max_in_card <= threshold:
             debts.append({
                 "type": "unended_plot",
-                "file": fp.relative_to(workspace).as_posix(),
-                "name": meta.get("title", fp.stem),
+                "file": f"plot/{d.name}",
+                "name": d.name,
                 "detail": f"最新章节最大章节 {max_chapter}，本卡最大章节 {max_in_card}，建议使用 end_plot 结束",
             })
 
     return debts
 
 
-def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
-    """检查 wiki 词条在最近章节中的出场情况
-
-    对每个 changed wiki 文件：
-    1. 用 get_aliases 生成关键词
-    2. 扫描最近 APPEARANCE_SCAN_CHAPTERS 章
-    3. 返回出场信息
-    """
+def check_appearance(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """检查 wiki 词条在最近章节中的出场情况"""
     max_chapter = _get_max_chapter(workspace)
     if max_chapter == 0:
         return []
 
-    # 确定扫描范围（最近 N 章）
     start_chapter = max(1, max_chapter - APPEARANCE_SCAN_CHAPTERS + 1)
     scan_range = list(range(start_chapter, max_chapter + 1))
 
     results: list[dict] = []
-
-    for fp in changed_files:
-        rel = fp.relative_to(workspace).as_posix()
-        if not rel.startswith("wiki/"):
+    for d in docs:
+        if d.doc_type != "wiki":
             continue
 
-        text = fp.read_text(encoding="utf-8")
-        meta, _ = _parse_frontmatter(text)
-        title = meta.get("title", fp.stem)
-
-        keywords = get_aliases(title)
+        keywords = get_aliases(d.name)
         appeared_in: list[int] = []
 
         for ch_num in scan_range:
@@ -706,8 +554,8 @@ def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
                     break
 
         results.append({
-            "page": rel,
-            "title": title,
+            "page": f"wiki/{d.category}/{d.name}",
+            "title": d.name,
             "keywords": keywords,
             "appeared_in": appeared_in,
             "recent_activity": len(appeared_in) > 0,
@@ -719,53 +567,34 @@ def check_appearance(workspace: Path, changed_files: list[Path]) -> list[dict]:
 # ── 短名→全名自动修复 ──────────────────────────────────────────────
 
 
-def _build_short_name_map(workspace: Path) -> dict[str, str]:
-    """构建短名→全名的映射，用于自动修复 wikilink 断链
-
-    规则：
-    - "叶蛮（阿蛮）" → 短名 "叶蛮"（括号前缀）+ 别名 "阿蛮"（来自 get_aliases）
-    - "叶家【紫玉大陆】" → 短名 "叶家"（【】前缀）
-    - 冲突时（同一短名指向多个全名）→ 跳过，不加入映射
-
-    Returns:
-        {short_name: full_stem_name}
-    """
+def _build_short_name_map(docs: list[LintDoc]) -> dict[str, str]:
+    """构建短名→全名的映射，用于自动修复 wikilink 断链"""
     short_map: dict[str, str] = {}
-    wiki_root = workspace / "wiki"
-    if not wiki_root.exists():
-        return short_map
 
-    for fp in sorted(wiki_root.rglob("*.md")):
-        if fp.name in ("index.md", "relations.yaml"):
+    for d in docs:
+        if d.doc_type != "wiki":
             continue
-        stem = fp.stem
-
-        # 候选短名列表
+        stem = d.name
         candidates = []
 
-        # 1. 来自 get_aliases 的别名（如 "阿蛮" ← "叶蛮（阿蛮）"）
         for alias in get_aliases(stem):
             if alias != stem:
                 candidates.append(alias)
 
-        # 2. 括号前缀：如 "叶蛮" ← "叶蛮（阿蛮）"
         paren_match = re.match(r"^(.+?)（[^）]+）$", stem)
         if paren_match:
             prefix = paren_match.group(1)
             if prefix != stem:
                 candidates.append(prefix)
 
-        # 3. 消歧义前缀：如 "叶家" ← "叶家【紫玉大陆】"
         bracket_match = re.match(r"^(.+?)【[^】]+】$", stem)
         if bracket_match:
             prefix = bracket_match.group(1)
             if prefix != stem:
                 candidates.append(prefix)
 
-        # 加入映射，冲突则跳过
         for c in candidates:
             if c in short_map and short_map[c] != stem:
-                # 冲突：同一短名指向不同全名 → 删除（不自动修复）
                 del short_map[c]
             elif c not in short_map:
                 short_map[c] = stem
@@ -773,112 +602,100 @@ def _build_short_name_map(workspace: Path) -> dict[str, str]:
     return short_map
 
 
-def auto_fix_short_name_wikilinks(workspace: Path) -> list[dict]:
-    """自动修复短名 wikilink 为全名
-
-    遍历所有 wiki/ 和 plot/ 下的 .md 文件，将 [[短名]] 自动替换为 [[全名]]。
-    处理整个文件（含 frontmatter），因为 description/state 字段也可能包含 wikilink。
-    在断链检查之前执行，修掉后不再报债务。
-
-    Returns:
-        修复记录列表
-    """
-    short_map = _build_short_name_map(workspace)
+def auto_fix_short_name_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+    """自动修复短名 wikilink 为全名"""
+    from tools.editor import _get_proxy
+    short_map = _build_short_name_map(docs)
     if not short_map:
         return []
 
-    # 按名称长度降序排列，避免短名是长名子串时误匹配
+    proxy = _get_proxy(workspace)
     short_names = sorted(short_map.keys(), key=len, reverse=True)
-
     fixes: list[dict] = []
     wikilink_re = re.compile(r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]")
 
-    for root_dir in ["wiki", "plot"]:
-        root = workspace / root_dir
-        if not root.exists():
+    for d in docs:
+        if d.doc_type == "rule" or not d.content:
             continue
-        for fp in sorted(root.rglob("*.md")):
-            if fp.name in ("index.md", "relations.yaml"):
-                continue
-            rel = fp.relative_to(workspace).as_posix()
-            text = fp.read_text(encoding="utf-8")
 
-            new_text = text
-            for short_name in short_names:
-                full_name = short_map[short_name]
-                old_lower = short_name.strip().lower()
-                new_clean = full_name.strip()
+        new_content = d.content
+        for short_name in short_names:
+            full_name = short_map[short_name]
+            old_lower = short_name.strip().lower()
+            new_clean = full_name.strip()
 
-                def _make_replacer(old_lower, new_clean):
-                    def _replace(match):
-                        raw_target = match.group(1)
-                        raw_alias = match.group(2) or ""
-                        if raw_target.strip().lower() == old_lower:
-                            return f"[[{new_clean}{raw_alias}]]"
-                        return match.group(0)
-                    return _replace
+            def _make_replacer(old_lower, new_clean):
+                def _replace(match):
+                    raw_target = match.group(1)
+                    raw_alias = match.group(2) or ""
+                    if raw_target.strip().lower() == old_lower:
+                        return f"[[{new_clean}{raw_alias}]]"
+                    return match.group(0)
+                return _replace
 
-                new_text = wikilink_re.sub(
-                    _make_replacer(old_lower, new_clean),
-                    new_text,
-                )
+            new_content = wikilink_re.sub(
+                _make_replacer(old_lower, new_clean), new_content)
 
-            if new_text != text:
-                fp.write_text(new_text, encoding="utf-8")
-                fixes.append({
-                    "type": "short_name_fixed",
-                    "file": rel,
-                    "detail": "短名 wikilink 已自动修复为全名",
-                    "auto_fixed": True,
-                })
+        if new_content != d.content:
+            proxy.update_doc(doc_type=d.doc_type, name=d.name,
+                             category=d.category or None,
+                             content=new_content, chapter=0)
+            d.content = new_content
+            fixes.append({
+                "type": "short_name_fixed",
+                "file": f"{d.doc_type}/{d.name}",
+                "detail": "短名 wikilink 已自动修复为全名",
+                "auto_fixed": True,
+            })
 
     return fixes
 
 
 # ── 入口函数 ─────────────────────────────────────────────────────────
 
+
 def run_lint(workspace: Path, chapters: str | None = None) -> str:
     """运行全套 lint 检查，写入 debt JSON，返回格式化摘要"""
-    changed_files = _get_changed_files(workspace)
+    docs = _gather_all_docs(workspace)
 
-    if not changed_files:
-        return "（无文件需要检查）"
+    if not docs:
+        return "（无文档需要检查）"
 
-    # 1. YAML 结构
-    yaml_debts = check_yaml_structure(workspace, changed_files)
+    # 1. 正文结构
+    content_debts = check_content(workspace, docs)
 
-    # 1.5 短名→全名 wikilink 自动修复（在断链检查之前执行，修掉后不再报债务）
-    short_name_fixes = auto_fix_short_name_wikilinks(workspace)
+    # 1.5 短名→全名 wikilink 自动修复（在断链检查之前执行）
+    short_name_fixes = auto_fix_short_name_wikilinks(workspace, docs)
 
     # 2. Wikilink 断链
-    link_debts = check_wikilinks(workspace, changed_files)
+    link_debts = check_wikilinks(workspace, docs)
 
     # 3. 规则文档 wikilink
-    rules_fixes = check_rules_wikilinks(workspace)
+    rules_fixes = check_rules_wikilinks(workspace, docs)
 
     # 4. State 检查
-    state_debts, state_fixes = check_state(workspace, changed_files)
+    state_debts, state_fixes = check_state(workspace, docs)
 
-    # 5. 类别检查
-    category_fixes = check_category(workspace, changed_files)
+    # 5. 类别检查（v5 中由 DB 保证一致性）
+    category_fixes = check_category(workspace, docs)
 
     # 6. 正文长度
-    length_debts = check_doc_length(workspace, changed_files)
+    length_debts = check_doc_length(workspace, docs)
 
     # 6.5 description 长度
-    desc_debts = check_description_length(workspace, changed_files)
+    desc_debts = check_description_length(workspace, docs)
 
     # 7. 剧情链接
-    plot_link_debts = check_plot_links(workspace)
+    plot_link_debts = check_plot_links(workspace, docs)
 
     # 8. 剧情范围
-    plot_range_fixes = check_plot_range(workspace)
+    plot_range_fixes = check_plot_range(workspace, docs)
 
     # 8.5 未结束剧情卡片检测
-    unended_plot_debts = check_unended_plots(workspace)
+    unended_plot_debts = check_unended_plots(workspace, docs)
 
     # 9. 出场检查
-    appearance_results = check_appearance(workspace, changed_files)
+    appearance_results = check_appearance(workspace, docs)
 
     # ── 构建 debt_data ──
     debt_data: dict[str, list] = {
@@ -889,7 +706,7 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
         "desc_verbose": [d for d in desc_debts if d["type"] == "desc_verbose"],
         "plot_broken_links": [d for d in plot_link_debts if d["type"] == "plot_broken_link"],
         "appearance": appearance_results,
-        "file_errors": [d for d in yaml_debts if d.get("auto_fixed") is not True],
+        "file_errors": [d for d in content_debts if d.get("auto_fixed") is not True],
         "unended_plots": unended_plot_debts,
     }
 
@@ -898,28 +715,25 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
     with open(debt_fp, "w", encoding="utf-8") as f:
         json.dump(debt_data, f, ensure_ascii=False, indent=2)
 
-    # ── 构建关系图（可选，如果 import 可用） ──
+    # ── 构建关系图（可选） ──
     try:
         from auto.relation_extractor import build_relations, save_relations
         relations = build_relations(workspace)
         if relations:
             save_relations(workspace, relations)
-    except ImportError:
+    except Exception:
         pass
 
     # ── 格式化摘要 ──
     lines = [
         "📋 Lint 检查报告",
         f"检查时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"检查文件数：{len(changed_files)}",
+        f"检查文档数：{len(docs)}",
         "",
     ]
 
-    # 自动修复汇总（含 yaml 自动修复）
-    yaml_auto_fixes = [d for d in yaml_debts if d.get("auto_fixed")]
-    all_fixes = (
-        short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes + yaml_auto_fixes
-    )
+    # 自动修复汇总
+    all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes
     total_fixed = len(all_fixes)
     if all_fixes:
         lines.append("## 代码 lint 完成\n")
@@ -962,7 +776,7 @@ def run_lint(workspace: Path, chapters: str | None = None) -> str:
     # 出场统计
     active_count = sum(1 for r in appearance_results if r["recent_activity"])
     if appearance_results:
-        lines.append(f"### 出场统计")
+        lines.append("### 出场统计")
         lines.append(f"活跃 {active_count}/{len(appearance_results)} 个词条")
         lines.append("")
 

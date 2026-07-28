@@ -4,6 +4,7 @@
 核心实现在 tools/editor.py（统一编辑器，支持 wiki / plot / rule 三种类型）。
 """
 
+import re
 from pathlib import Path
 
 from tools.editor import (
@@ -42,13 +43,15 @@ def _ensure_category_dir(workspace: Path, category: str) -> Path:
 
 
 def _category_exists(workspace: Path, category: str) -> bool:
-    """检查 wiki 类别目录是否存在"""
-    cat_dir = _wiki_root(workspace) / category
-    return cat_dir.is_dir()
+    """检查 wiki 类别是否存在（v5：从 DB categories 表查询）"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.get_category_by_name(category) is not None
 
 
 def new_wiki(workspace: Path, category: str, name: str, content: str = "",
-             description: str = "", state: str = "", tags: list = None,
+             description: str = "", state: str = "", keywords: str = "",
+             tags: list = None,
              updated: int | None = None) -> str:
     """新建 wiki 文档（薄代理层 → tools.editor.create_doc）"""
     # 防御：禁止在规则类别下创建 wiki 词条
@@ -66,19 +69,20 @@ def new_wiki(workspace: Path, category: str, name: str, content: str = "",
     return _create_doc(
         workspace, doc_type="wiki", name=name, content=content,
         category=category, description=description, state=state,
-        tags=tags, updated=updated,
+        keywords=keywords, tags=tags, updated=updated,
     )
 
 
 def edit_wiki(workspace: Path, category: str, name: str,
               content: str = None, description: str = None,
-              state: str = None, tags: list = None,
+              state: str = None, keywords: str = None,
+              tags: list = None,
               updated: int | None = None) -> str:
     """编辑 wiki 文档（薄代理层 → tools.editor.edit_doc）"""
     return _edit_doc(
         workspace, doc_type="wiki", name=name, content=content,
         category=category, description=description, state=state,
-        tags=tags, updated=updated,
+        keywords=keywords, tags=tags, updated=updated,
     )
 
 
@@ -117,7 +121,7 @@ def delete_wiki(workspace: Path, category: str, name: str) -> str:
 
 
 def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True) -> str:
-    """读取 wiki 文档
+    """读取 wiki 文档（v5：调 proxy）
 
     Args:
         category: 类别名
@@ -127,22 +131,13 @@ def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True)
     Returns:
         文档全文（含 frontmatter）或错误消息
     """
-    fp = _wiki_file(workspace, category, name)
-    if not fp.exists():
-        return f"错误：词条「{name}」不存在"
-
-    content = fp.read_text(encoding="utf-8")
-    if not yaml_only:
-        return content
-
-    meta, _ = _parse_frontmatter(content)
-    if meta:
-        return _build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
-    return content
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.read_doc("wiki", name, category=category, yaml_only=yaml_only)
 
 
 def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20) -> str:
-    """查看类别下的 wiki 列表（分页）
+    """查看类别下的 wiki 列表（分页，v5：调 proxy）
 
     Args:
         category: 类别名
@@ -152,45 +147,23 @@ def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20
     Returns:
         格式化的列表字符串
     """
-    cat_dir = _wiki_root(workspace) / category
-    if not cat_dir.exists():
-        return f"错误：类别「{category}」不存在"
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    result = proxy.list_docs("wiki", category=category, page=page, page_size=page_size)
 
-    files = sorted(cat_dir.glob("*.md"))
-    # 过滤掉 index.md
-    files = [f for f in files if f.name != "index.md"]
-    if not files:
-        return f"类别「{category}」下暂无词条"
-
-    total = len(files)
-    total_pages = (total + page_size - 1) // page_size
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_files = files[start:end]
-
-    lines = [f"类别「{category}」词条列表（第 {page}/{total_pages} 页，共 {total} 个）："]
-    for fp in page_files:
-        meta, _ = _parse_frontmatter(fp.read_text(encoding="utf-8"))
-        title = meta.get("title", fp.stem)
-        desc = meta.get("description", "")
-        if desc and len(desc) > 50:
-            desc = desc[:50] + "..."
-        line = f"  - {title}"
-        if desc:
-            line += f"：{desc}"
-        lines.append(line)
-
-    # 翻页提示
-    if total_pages > 1:
-        if page < total_pages:
-            lines.append(f"")
-            lines.append(f"⚠️ 当前只显示第 {page} 页（共 {total_pages} 页），如需查找某个词条请继续翻页查看（传入 page={page + 1}）。")
-            lines.append(f"   不要因为本页没看到就下结论说词条不存在，先翻完所有页再判断！")
-        else:
-            lines.append(f"")
-            lines.append(f"✅ 已是最后一页。")
-
-    return "\n".join(lines)
+    # 翻页提示补充
+    if "第 " in result and "共 " in result:
+        import re
+        m = re.search(r"第 (\d+)/(\d+) 页", result)
+        if m:
+            total_pages = int(m.group(2))
+            page = int(m.group(1))
+            if total_pages > 1 and page < total_pages:
+                result += f"\n\n⚠️ 当前只显示第 {page} 页（共 {total_pages} 页），如需查找某个词条请继续翻页查看（传入 page={page + 1}）。"
+                result += f"\n   不要因为本页没看到就下结论说词条不存在，先翻完所有页再判断！"
+            elif total_pages > 1 and page >= total_pages:
+                result += f"\n\n✅ 已是最后一页。"
+    return result
 
 
 def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: str = None) -> str:
@@ -208,22 +181,19 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
         检查结果
     """
     if text:
-        # 文本匹配模式：遍历所有 wiki 词条，看名称是否在 text 中出现
-        from tools.wiki import _wiki_root
-        root = _wiki_root(workspace)
-        if not root.exists():
-            return "错误：wiki 目录不存在"
+        # 文本匹配模式：遍历所有 wiki 词条，看名称是否在 text 中出现（v5：从 DB 读取）
+        from tools.editor import _get_proxy
+        proxy = _get_proxy(workspace)
+        cats = proxy.list_categories()
+        if not cats:
+            return "（暂无类别）"
 
         matches = []
-        for category_dir in sorted(root.iterdir()):
-            if not category_dir.is_dir():
-                continue
-            for wiki_file in sorted(category_dir.glob("*.md")):
-                if wiki_file.name == "index.md":
-                    continue
-                entity_name = wiki_file.stem
-                if entity_name in text:
-                    matches.append(f"[{category_dir.name}] {entity_name}")
+        for cat in cats:
+            mains = proxy._db.wiki_list_main(cat["id"])
+            for m in mains:
+                if m["name"] in text:
+                    matches.append(f"[{cat['name']}] {m['name']}")
 
         if not matches:
             return "未在文本中匹配到已知实体。"
@@ -253,13 +223,13 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
 
 def check_wiki_yaml(workspace: Path, category: str = "",
                     name: str = "") -> str:
-    """检查 wiki 文档的 YAML 结构完整性
+    """检查 wiki 文档的结构完整性（v5：从 DB/proxy 读取）
 
     检查项目：
-    - frontmatter 是否存在（以 --- 开头）
-    - frontmatter 是否恰好一组（不允许多组重复）
-    - 正文内容是否为空/None
-    - 正文是否包含符合类别的基本章节结构
+    - 正文内容是否为空
+    - 正文是否过短
+    - 正文是否包含 Markdown 章节标题
+    - 必要字段是否齐全
 
     Args:
         workspace: 工作区路径
@@ -269,91 +239,71 @@ def check_wiki_yaml(workspace: Path, category: str = "",
     Returns:
         格式化的检查报告
     """
-    root = _wiki_root(workspace)
-    if not root.exists():
-        return "错误：wiki 目录不存在"
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
 
-    # 收集要检查的文件列表
-    files_to_check: list[Path] = []
-    if category:
-        cat_dir = root / category
-        if not cat_dir.exists():
-            return f"错误：类别「{category}」不存在"
-        if name:
-            fp = cat_dir / f"{name}.md"
-            if not fp.exists():
-                return f"错误：词条「{name}」不存在"
-            files_to_check.append(fp)
-        else:
-            files_to_check = sorted(cat_dir.glob("*.md"))
-            files_to_check = [f for f in files_to_check if f.name != "index.md"]
-            if not files_to_check:
-                return f"类别「{category}」下暂无词条"
-    else:
-        # 所有类别
-        for cat_dir in sorted(root.iterdir()):
-            if cat_dir.is_dir():
-                for fp in sorted(cat_dir.glob("*.md")):
-                    if fp.name != "index.md":
-                        files_to_check.append(fp)
+    # 收集要检查的文档列表: [(cat_name, doc_name, content)]
+    docs_to_check: list[tuple[str, str, str]] = []
 
-    if not files_to_check:
+    cats = proxy.list_categories("wiki")
+    if not cats:
+        return "错误：暂无 wiki 类别"
+
+    for cat in cats:
+        cat_name = cat["name"]
+        if category and cat_name != category:
+            continue
+        mains = proxy._db.wiki_list_main(cat["id"])
+        for m in mains:
+            if name and m["name"] != name:
+                continue
+            full = proxy.read_doc("wiki", m["name"], category=cat_name, yaml_only=False)
+            if full.startswith("错误"):
+                continue
+            _, body = _parse_frontmatter(full)
+            docs_to_check.append((cat_name, m["name"], body))
+
+    if category and not any(c["name"] == category for c in cats):
+        return f"错误：类别「{category}」不存在"
+    if name and not docs_to_check:
+        return f"错误：词条「{name}」不存在"
+    if not docs_to_check:
         return "未找到任何 wiki 词条"
 
-    # 逐文件检查
+    # 逐项检查
     report_lines = []
     issue_count = 0
     ok_count = 0
 
-    for fp in files_to_check:
-        relative = fp.relative_to(root)
-        text = fp.read_text(encoding="utf-8")
+    for cat_name, doc_name, body in docs_to_check:
         issues = []
 
-        # 1. 检查 frontmatter 结构（只检测文件开头的 ---，不把正文水平线误判）
-        frontmatter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)", text, re.DOTALL)
-        if not frontmatter_match:
-            issues.append("❌ 缺少标准 frontmatter（不以 --- 开头和结尾）")
-        else:
-            # 检查 body 开头是否紧跟着另一组 frontmatter
-            body_text = frontmatter_match.group(2)
-            if re.match(r"^\s*---\s*\n", body_text):
-                issues.append("❌ frontmatter 重复（文件开头有多组 --- 块）")
-
-        # 2. 检查正文
-        meta, body = _parse_frontmatter(text)
         if not body or body.strip() in ("", "None"):
             issues.append("❌ 正文为空")
         else:
-            # 3. 检查正文长度（至少有一些实质性内容）
             if len(body.strip()) < 20:
                 issues.append(f"⚠️ 正文过短（仅 {len(body.strip())} 字符）")
-
-            # 4. 检查正文是否包含章节标题（有 ## 才算是结构化内容）
             if not re.search(r"^##\s+\S", body, re.MULTILINE):
                 issues.append("⚠️ 正文缺少 Markdown 章节标题（##）")
 
-        # 5. 检查必要字段
-        cat_name = relative.parts[0]
-        if meta:
-            if "type" not in meta:
-                issues.append("⚠️ frontmatter 缺少 type 字段")
+        # 检查必要字段
+        meta_full = proxy.read_doc("wiki", doc_name, category=cat_name, yaml_only=True)
+        if not meta_full.startswith("错误"):
+            meta, _ = _parse_frontmatter(meta_full)
             if "title" not in meta:
                 issues.append("⚠️ frontmatter 缺少 title 字段")
-            if "updated" not in meta:
-                issues.append("⚠️ frontmatter 缺少 updated 字段")
+            if "type" not in meta:
+                issues.append("⚠️ frontmatter 缺少 type 字段")
 
-        # 输出
         if issues:
             issue_count += 1
-            report_lines.append(f"\n[{relative}]")
+            report_lines.append(f"\n[{cat_name}/{doc_name}]")
             for issue in issues:
                 report_lines.append(f"  {issue}")
         else:
             ok_count += 1
 
-    # 汇总
-    summary = f"\n---\n检查完毕：共 {len(files_to_check)} 个词条，通过 {ok_count} 个，异常 {issue_count} 个。"
+    summary = f"\n---\n检查完毕：共 {len(docs_to_check)} 个词条，通过 {ok_count} 个，异常 {issue_count} 个。"
     report_lines.append(summary)
 
     return "\n".join(report_lines)
@@ -363,20 +313,24 @@ def check_wiki_yaml(workspace: Path, category: str = "",
 
 
 def get_wiki_meta(workspace: Path, category: str, name: str) -> dict:
-    """获取 wiki 文档的 frontmatter 元数据"""
-    fp = _wiki_file(workspace, category, name)
-    if not fp.exists():
+    """获取 wiki 文档的 frontmatter 元数据（v5：调 proxy）"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    full = proxy.read_doc("wiki", name, category=category, yaml_only=False)
+    if full.startswith("错误"):
         return {}
-    meta, _ = _parse_frontmatter(fp.read_text(encoding="utf-8"))
+    meta, _ = _parse_frontmatter(full)
     return meta
 
 
 def get_wiki_body(workspace: Path, category: str, name: str) -> str:
-    """获取 wiki 文档的正文（不含 frontmatter）"""
-    fp = _wiki_file(workspace, category, name)
-    if not fp.exists():
+    """获取 wiki 文档的正文（不含 frontmatter，v5：调 proxy）"""
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    full = proxy.read_doc("wiki", name, category=category, yaml_only=False)
+    if full.startswith("错误"):
         return ""
-    _, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
+    _, body = _parse_frontmatter(full)
     return body
 
 
@@ -406,6 +360,7 @@ def batch_create_wiki(workspace: Path, items: list[dict]) -> str:
                 content=item.get("content", ""),
                 description=item.get("description", ""),
                 state=item.get("state", ""),
+                keywords=item.get("keywords", ""),
                 tags=item.get("tags"),
             )
             if result.startswith("错误："):
@@ -465,6 +420,7 @@ def batch_edit_wiki(workspace: Path, items: list[dict]) -> str:
                 content=item.get("content"),
                 description=item.get("description"),
                 state=item.get("state"),
+                keywords=item.get("keywords"),
                 tags=item.get("tags"),
             )
             if result.startswith("错误："):

@@ -190,34 +190,22 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
     if not chapter_nums:
         return f"错误：章节区间格式无效「{chapters}」"
 
-    # 2. 校验所有声明的 wiki 存在
+    # 2. 校验所有声明的 wiki 存在（v5：通过 proxy 查找）
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
     for name in new_wiki + updated_wiki:
-        found = False
-        from tools.wiki import _wiki_root
-        root = _wiki_root(workspace)
-        if root.exists():
-            for cat_dir in root.iterdir():
-                if cat_dir.is_dir() and (cat_dir / f"{name}.md").exists():
-                    found = True
-                    break
-        if not found:
+        if proxy.find_doc("wiki", name) is None:
             return f"错误：wiki 词条「{name}」不存在，请检查并重试"
 
     # 3. 校验所有声明的 rules 存在
-    rules_root = workspace / "rules"
     for name in new_rules + updated_rules:
-        if not (rules_root / f"{name}.md").exists():
+        if proxy.find_doc("rule", name) is None:
             return f"错误：规则文档「{name}」不存在，请检查并重试"
 
     # 4. 校验所有声明的 plots 存在
-    plot_root = workspace / "plot"
     for name in new_plots + updated_plots:
-        fp = plot_root / f"{name}.md"
-        if not fp.exists():
-            # 也检查 plot/muse/ 子目录
-            muse_fp = plot_root / "muse" / f"{name}.md"
-            if not muse_fp.exists():
-                return f"错误：剧情卡片「{name}」不存在，请检查并重试"
+        if proxy.find_doc("plot", name) is None:
+            return f"错误：剧情卡片「{name}」不存在，请检查并重试"
 
     # 5. 全部校验通过 → 写入 log.json
     log = _ensure_log(workspace)

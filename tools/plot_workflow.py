@@ -28,17 +28,24 @@ class PlotWorkflow:
         """解析剧情卡片名称列表，返回 (成功内容列表, 失败名称列表)"""
         from tools.plot import read_plot, plot_list
 
-        # 获取所有卡片名称
+        # 获取所有卡片名称（兼容 v5 格式和旧版 wikilink 格式）
         all_plots_raw = plot_list(self.workspace, ended="all")
         known_names = set()
         if not (isinstance(all_plots_raw, str) and all_plots_raw.startswith("错误")):
             for line in all_plots_raw.splitlines():
                 line = line.strip()
                 if line.startswith("- "):
-                    # 格式: "- [[卡片名]] | chapters: ..."
-                    m = re.match(r"-\s*\[\[(.+?)\]\]", line)
+                    # v5 格式: "- 卡片名：描述" 或 "- 卡片名"
+                    text = line[2:].strip()
+                    # 旧格式: "- [[卡片名]] | chapters: ..."
+                    m = re.match(r"\[\[(.+?)\]\]", text)
                     if m:
                         known_names.add(m.group(1))
+                    else:
+                        # v5 格式: 取冒号前的部分作为名称
+                        name_part = text.split("：")[0].split(":")[0].strip()
+                        if name_part:
+                            known_names.add(name_part)
 
         successes = []
         failures = []

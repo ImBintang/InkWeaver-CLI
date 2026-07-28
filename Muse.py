@@ -814,9 +814,13 @@ class MuseWorkflow:
 
     # ---- 步骤③→④：写作与审阅循环 ----
 
+    MAX_WRITING_ROUNDS = 3  # 最大写作-审阅轮次
+
     def _step_writing_loop(self):
         """③→④ 写作与审阅循环"""
+        round_count = 0
         while True:
+            round_count += 1
             # ③ 润色写作
             print("=" * 40)
             print("第三步：润色写作")
@@ -896,6 +900,10 @@ class MuseWorkflow:
                     continue
             else:
                 # 自动打回重写
+                if round_count >= self.MAX_WRITING_ROUNDS:
+                    print(f"已达最大轮次（{self.MAX_WRITING_ROUNDS}），强制通过。")
+                    self.io.save_final(polished)
+                    break
                 print(f"分数 {review_result['score']} < 85，自动打回重写。")
                 self.issues = review_result["issues"]
                 self.io.next_round()

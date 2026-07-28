@@ -44,7 +44,7 @@ def _plot_file(workspace: Path, name: str) -> Path:
 
 
 def read_plot(workspace: Path, name: str, yaml_only: bool = True) -> str:
-    """读取指定剧情卡片
+    """读取指定剧情卡片（v5：调 proxy）
     
     Args:
         name: 剧情卡片名称
@@ -53,23 +53,13 @@ def read_plot(workspace: Path, name: str, yaml_only: bool = True) -> str:
     Returns:
         文档内容或错误消息
     """
-    fp = _plot_file(workspace, name)
-    if not fp.exists():
-        return f"错误：剧情卡片「{name}」不存在"
-    
-    content = fp.read_text(encoding="utf-8")
-    if not yaml_only:
-        return content
-    
-    # 只返回 frontmatter
-    meta, _ = _parse_frontmatter(content)
-    if not meta:
-        return content  # 没有 frontmatter 就返回全文
-    return _build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.read_doc("plot", name, yaml_only=yaml_only)
 
 
 def plot_list(workspace: Path, page: int = 1, page_size: int = 20, ended: str = "false") -> str:
-    """列出剧情卡片（分页），支持 ended 过滤
+    """列出剧情卡片（分页），支持 ended 过滤（v5：调 proxy）
     
     Args:
         page: 页码（从 1 开始）
@@ -79,68 +69,34 @@ def plot_list(workspace: Path, page: int = 1, page_size: int = 20, ended: str = 
     Returns:
         格式化的列表字符串
     """
-    idx_content = _ensure_index(workspace)
-    lines = idx_content.split("\n")
-    
-    plots = []
-    current_section = None
-    for line in lines:
-        if line.strip() == "## 未结束":
-            current_section = "unended"
-        elif line.strip() == "## 已结束":
-            current_section = "ended"
-        else:
-            parsed = _parse_index_line(line)
-            if parsed:
-                plots.append(parsed)
-    
-    # 过滤
-    if ended == "true":
-        plots = [p for p in plots if p["ended"]]
-    elif ended == "false":
-        plots = [p for p in plots if not p["ended"]]
-    # "all" 不过滤
-    
-    if not plots:
-        return "暂无剧情卡片"
-    
-    total = len(plots)
-    total_pages = (total + page_size - 1) // page_size
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_plots = plots[start:end]
-    
-    status_label = "未结束" if ended == "false" else ("已结束" if ended == "true" else "全部")
-    lines_out = [f"剧情卡片列表（{status_label}，第 {page}/{total_pages} 页，共 {total} 张）："]
-    for p in page_plots:
-        status = "✅ 已结束" if p["ended"] else "⏳ 未结束"
-        notes = f" | {p['end_notes']}" if p.get("end_notes") else ""
-        lines_out.append(f"  - [[{p['name']}]] | chapters: {p['chapters']} | {status}{notes}")
-    
-    return "\n".join(lines_out)
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.list_docs("plot", page=page, page_size=page_size, ended=ended)
 
 
 def new_plot(workspace: Path, name: str, chapters: str,
              content: str = "", description: str = "",
-             state: str = "", tags: list = None,
+             state: str = "", keywords: str = "",
+             tags: list = None,
              updated: int | None = None) -> str:
     """新建剧情卡片（薄代理层 → tools.editor.create_doc）"""
     return _create_doc(
         workspace, doc_type="plot", name=name, content=content,
-        description=description, state=state, tags=tags,
-        chapters=chapters, updated=updated,
+        description=description, state=state, keywords=keywords,
+        tags=tags, chapters=chapters, updated=updated,
     )
 
 
 def edit_plot(workspace: Path, name: str, chapters: str = None,
               content: str = None, description: str = None,
-              state: str = None, tags: list = None,
+              state: str = None, keywords: str = None,
+              tags: list = None,
               updated: int | None = None) -> str:
     """编辑剧情卡片（薄代理层 → tools.editor.edit_doc）"""
     return _edit_doc(
         workspace, doc_type="plot", name=name, content=content,
-        description=description, state=state, tags=tags,
-        chapters=chapters, updated=updated,
+        description=description, state=state, keywords=keywords,
+        tags=tags, chapters=chapters, updated=updated,
     )
 
 
@@ -171,42 +127,25 @@ def edit_plot_wikilink(workspace: Path, name: str,
 
 
 def end_plot(workspace: Path, name: str, end_notes: str = "") -> str:
-    """将指定剧情卡片标注为已结束
-    
+    """将指定剧情卡片标注为已结束（v5：调 proxy）
+
     Args:
         name: 剧情卡片标题
         end_notes: 收尾语
-    
+
     Returns:
         操作结果消息
     """
-    fp = _plot_file(workspace, name)
-    if not fp.exists():
-        return f"错误：剧情卡片「{name}」不存在"
-    
-    meta, body = _parse_frontmatter(fp.read_text(encoding="utf-8"))
-    
-    # _parse_frontmatter 返回字符串，需兼容 "True"/"true"/True
-    ended_val = meta.get("ended")
-    if ended_val is True or str(ended_val).lower() == "true":
-        return f"剧情卡片「{name}」已是结束状态"
-    
-    meta["ended"] = True
-    meta["updated"] = str(date.today())
-    if end_notes:
-        meta["end_notes"] = end_notes
-    
-    fp.write_text(_build_frontmatter(meta) + body, encoding="utf-8")
-    _update_index_end(workspace, name, end_notes)
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    result = proxy.end_plot(name, end_notes)
     # 记录到 log.json
-    try:
-        record_extraction(workspace, [], [], [name])
-    except Exception:
-        pass
-    msg = f"✅ 剧情卡片「{name}」已标记为结束"
-    if end_notes:
-        msg += f"\n收尾语：{end_notes}"
-    return msg
+    if not result.startswith("错误"):
+        try:
+            record_extraction(workspace, [], [], [name])
+        except Exception:
+            pass
+    return result
 
 
 def delete_plot(workspace: Path, name: str) -> str:
@@ -215,7 +154,7 @@ def delete_plot(workspace: Path, name: str) -> str:
 
 
 def query_plot_by_chapters(workspace: Path, chapters: str) -> str:
-    """查询指定章节区间覆盖的剧情卡片。
+    """查询指定章节区间覆盖的剧情卡片（v5：调 proxy）。
 
     返回格式：
     | 标题 | 覆盖区间 | 状态 |
@@ -228,24 +167,36 @@ def query_plot_by_chapters(workspace: Path, chapters: str) -> str:
         格式化的剧情卡片列表
     """
     from tools.chapter import parse_chapter_spec
+    from tools.editor import _get_proxy
     target = set(parse_chapter_spec(chapters))
 
-    plot_dir = _plot_root(workspace)
-    if not plot_dir.exists():
-        return "暂无剧情卡片。"
+    proxy = _get_proxy(workspace)
+    # 从 DB 获取所有剧情卡片（含已结束）
+    mains = proxy._db.plot_list_main()
+
+    # 合并缓存中新增的
+    cache_entries = [
+        v for v in proxy._cache.values()
+        if v.doc_type == "plot" and not v.is_deleted and v.is_new
+    ]
 
     results = []
-    for f in sorted(plot_dir.glob("*.md")):
-        if f.name == "index.md":
+    for m in mains:
+        card_chapters = m.get("chapters", "")
+        if not card_chapters:
             continue
-        meta, _ = _parse_frontmatter(f.read_text(encoding="utf-8"))
-        if not meta:
-            continue
-        card_chapters = meta.get("chapters", "")
         card_set = set(parse_chapter_spec(card_chapters))
-        if target & card_set:  # 有交集
-            ended = "已结束" if meta.get("ended") in (True, "true", "True") else "未结束"
-            results.append(f"| {meta.get('title', f.stem)} | {card_chapters} | {ended} |")
+        if target & card_set:
+            ended = "已结束" if m.get("ended") else "未结束"
+            results.append(f"| {m['name']} | {card_chapters} | {ended} |")
+
+    for doc in cache_entries:
+        if not doc.chapters:
+            continue
+        card_set = set(parse_chapter_spec(doc.chapters))
+        if target & card_set:
+            ended = "已结束" if doc.ended else "未结束"
+            results.append(f"| {doc.name} | {doc.chapters} | {ended} |")
 
     if not results:
         return f"章节 {chapters} 范围内无关联的剧情卡片。"

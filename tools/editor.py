@@ -1,5 +1,8 @@
 """统一文档编辑器 — wiki / plot / rule 共用一套创建、修改、删除工具
 
+v5.0 改造：底层实现从文件读写改为调 db/proxy.py 的 ProxyService。
+原有 parse_frontmatter / build_frontmatter 保留（迁移脚本仍需使用）。
+
 设计参考：
   - learn-claude-code s02: edit_file 的精确文本替换模式（old_text → new_text）
   - llm-wiki lint-fixes.ts: wikilink 定向替换（rewriteWikilinkTarget）
@@ -20,6 +23,44 @@
 import json
 import re
 from pathlib import Path
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from tools.db.proxy import ProxyService
+
+
+# ── Proxy 注册表 ──
+
+_proxy_instances: dict[str, "ProxyService"] = {}
+
+
+def register_proxy(workspace: Path, proxy: "ProxyService"):
+    """由 JianzhiAgent 初始化时调用"""
+    _proxy_instances[str(workspace.resolve())] = proxy
+
+
+def unregister_proxy(workspace: Path):
+    """工作区删除时清理代理实例"""
+    _proxy_instances.pop(str(workspace.resolve()), None)
+
+
+def _get_proxy(workspace: Path):
+    ws_key = str(workspace.resolve())
+    existing = _proxy_instances.get(ws_key)
+    if existing is not None:
+        # 健康检查：检测 DB 连接是否已关闭
+        try:
+            existing._db.conn.execute("SELECT 1")
+            return existing
+        except Exception:
+            # DB 已关闭，移除旧实例并重建
+            _proxy_instances.pop(ws_key, None)
+    # 兜底：独立使用场景（如 db_migrate）或重建
+    from tools.db.service import SQLiteService
+    from tools.db.proxy import ProxyService
+    db = SQLiteService(workspace / "wiki.db")
+    _proxy_instances[ws_key] = ProxyService(db)
+    return _proxy_instances[ws_key]
 
 
 # ── 目录映射 ──────────────────────────────────────────────────────────────────
@@ -125,10 +166,11 @@ def create_doc(workspace: Path, doc_type: str, name: str,
                category: str | None = None,
                description: str = "",
                state: str = "",
+               keywords: str = "",
                tags: list | None = None,
                chapters: str = "",
                updated: int | None = None) -> str:
-    """统一创建 wiki / plot / rule 文档
+    """统一创建 wiki / plot / rule 文档（v5：调 proxy 替代文件写入）
 
     Args:
         doc_type: "wiki" | "plot" | "rule"
@@ -137,6 +179,7 @@ def create_doc(workspace: Path, doc_type: str, name: str,
         category: wiki 类别（仅 wiki 需要）
         description: 描述（wiki / plot）
         state: 状态（wiki / plot）
+        keywords: 关键词（逗号分隔）
         tags: 标签（wiki / plot）
         chapters: 覆盖章节（仅 plot 需要），如 "1-5,7-10"
         updated: 更新章节号，None 默认 0
@@ -144,46 +187,13 @@ def create_doc(workspace: Path, doc_type: str, name: str,
     Returns:
         操作结果消息
     """
-    fp = resolve_path(workspace, doc_type, name, category)
-    if fp.exists():
-        type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-        return f"错误：{type_label}「{name}」已存在"
-
-    # 构建 frontmatter
-    meta = {"title": name, "updated": updated if updated is not None else 0}
-    if doc_type == "wiki":
-        meta["type"] = category
-        if description:
-            meta["description"] = description
-        if state:
-            meta["state"] = state
-        if tags:
-            meta["tags"] = tags
-    elif doc_type == "plot":
-        meta["type"] = "plot"
-        meta["description"] = description
-        meta["chapters"] = chapters
-        meta["ended"] = False
-        if state:
-            meta["state"] = state
-        if tags:
-            meta["tags"] = tags
-    elif doc_type == "rule":
-        meta["type"] = "rule"
-
-    ensure_parent_dir(fp)
-    fp.write_text(build_frontmatter(meta) + content, encoding="utf-8")
-
-    # 更新 plot 索引
-    if doc_type == "plot":
-        _update_plot_index_add(workspace, name, chapters)
-
-    # 记录到 log.json
-    _record_extraction_log(workspace, doc_type, name, operation="create")
-
-    type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    detail = f"（章节 {chapters}）" if doc_type == "plot" else ""
-    return f"已创建{type_label}：{name}{detail}"
+    proxy = _get_proxy(workspace)
+    return proxy.add_doc(
+        doc_type=doc_type, name=name, category=category,
+        content=content, description=description, state=state,
+        keywords=keywords, tags=tags, chapter=updated or 0,
+        chapters=chapters or "",
+    )
 
 
 # ── 统一编辑（字段级） ──────────────────────────────────────────────────────
@@ -194,43 +204,18 @@ def edit_doc(workspace: Path, doc_type: str, name: str,
              category: str | None = None,
              description: str | None = None,
              state: str | None = None,
+             keywords: str | None = None,
              tags: list | None = None,
              chapters: str | None = None,
              updated: int | None = None) -> str:
-    """统一编辑 wiki / plot / rule 文档（字段级）"""
-    try:
-        meta, body, fp = read_doc(workspace, doc_type, name, category)
-    except FileNotFoundError as e:
-        return str(e)
-
-    if updated is not None:
-        meta["updated"] = updated
-    if description is not None:
-        meta["description"] = description
-    if state is not None:
-        if state == "" and "state" in meta:
-            del meta["state"]
-        else:
-            meta["state"] = state
-    if tags is not None:
-        meta["tags"] = tags
-    if chapters is not None:
-        meta["chapters"] = chapters
-    if content is not None:
-        body = content
-
-    fp.write_text(build_frontmatter(meta) + body, encoding="utf-8")
-
-    # 更新 plot 索引
-    if doc_type == "plot":
-        current_chapters = meta.get("chapters", chapters or "")
-        _update_plot_index_edit(workspace, name, current_chapters)
-
-    # 记录到 log.json
-    _record_extraction_log(workspace, doc_type, name, operation="edit")
-
-    type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    return f"已更新{type_label}：{name}"
+    """统一编辑 wiki / plot / rule 文档（v5：调 proxy 替代文件写入）"""
+    proxy = _get_proxy(workspace)
+    return proxy.update_doc(
+        doc_type=doc_type, name=name, category=category,
+        content=content, description=description, state=state,
+        keywords=keywords, tags=tags, chapter=updated or 0,
+        chapters=chapters,
+    )
 
 
 # ── 手术刀式编辑：正文精确文本替换 ──────────────────────────────────────────
@@ -239,7 +224,7 @@ def edit_doc(workspace: Path, doc_type: str, name: str,
 def edit_doc_text(workspace: Path, doc_type: str, name: str,
                   old_text: str, new_text: str,
                   category: str | None = None) -> str:
-    """在正文中精确匹配一段文本并替换（不涉及 frontmatter）
+    """在正文中精确匹配一段文本并替换（不涉及 frontmatter，v5：调 proxy）
 
     参考 learn-claude-code s02 的 edit_file 模式：
     只替换 body 中第一次出现的 old_text，避免影响 frontmatter。
@@ -254,23 +239,25 @@ def edit_doc_text(workspace: Path, doc_type: str, name: str,
     Returns:
         操作结果消息
     """
-    try:
-        meta, body, fp = read_doc(workspace, doc_type, name, category)
-    except FileNotFoundError as e:
-        return str(e)
+    proxy = _get_proxy(workspace)
+    # 通过 proxy 读取全文
+    full = proxy.read_doc(doc_type, name, category=category, yaml_only=False)
+    if full.startswith("错误"):
+        return full
+
+    # 解析 frontmatter 和 body
+    meta, body = parse_frontmatter(full)
 
     if old_text not in body:
         type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
         return f"错误：在{type_label}「{name}」正文中未找到匹配的文本"
 
     body = body.replace(old_text, new_text, 1)
-    fp.write_text(build_frontmatter(meta) + body, encoding="utf-8")
-
-    # 更新 plot 索引（正文变更不影响索引，跳过）
-    _record_extraction_log(workspace, doc_type, name, operation="edit")
-
-    type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    return f"已更新{type_label}「{name}」正文（文本替换）"
+    # 通过 proxy 写回
+    return proxy.update_doc(
+        doc_type=doc_type, name=name, category=category,
+        content=body, chapter=0,
+    )
 
 
 # ── Unlink 黑名单 ──────────────────────────────────────────────────────────
@@ -337,10 +324,14 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
     Returns:
         操作结果消息
     """
-    try:
-        meta, body, fp = read_doc(workspace, doc_type, name, category)
-    except FileNotFoundError as e:
-        return str(e)
+    proxy = _get_proxy(workspace)
+    # 通过 proxy 读取全文
+    full = proxy.read_doc(doc_type, name, category=category, yaml_only=False)
+    if full.startswith("错误"):
+        return full
+
+    # 解析 frontmatter 和 body
+    meta, body = parse_frontmatter(full)
 
     old_lower = old_target.strip().lower()
 
@@ -376,8 +367,11 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
         type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
         return f"错误：在{type_label}「{name}」中未找到指向「{old_target}」的 wikilink"
 
-    fp.write_text(build_frontmatter(meta) + new_body, encoding="utf-8")
-    _record_extraction_log(workspace, doc_type, name, operation="edit")
+    # 通过 proxy 写回
+    result = proxy.update_doc(
+        doc_type=doc_type, name=name, category=category,
+        content=new_body, chapter=0,
+    )
 
     # 如果取消链接且要求记忆，则加入黑名单
     if mode == "unlink" and remember:
@@ -393,24 +387,9 @@ def edit_doc_wikilink(workspace: Path, doc_type: str, name: str,
 
 def delete_doc(workspace: Path, doc_type: str, name: str,
                category: str | None = None) -> str:
-    """统一删除 wiki / plot / rule 文档"""
-    try:
-        fp = resolve_path(workspace, doc_type, name, category)
-    except ValueError as e:
-        return str(e)
-
-    if not fp.exists():
-        type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-        return f"错误：{type_label}「{name}」不存在"
-
-    fp.unlink()
-
-    # 从 plot 索引中移除
-    if doc_type == "plot":
-        _remove_from_plot_index(workspace, name)
-
-    type_label = {"wiki": "词条", "plot": "剧情卡片", "rule": "规则文档"}.get(doc_type, "文档")
-    return f"已删除{type_label}：{name}"
+    """统一删除 wiki / plot / rule 文档（v5：调 proxy）"""
+    proxy = _get_proxy(workspace)
+    return proxy.delete_doc(doc_type=doc_type, name=name, category=category)
 
 
 # ── Plot 索引管理（内部） ────────────────────────────────────────────────────

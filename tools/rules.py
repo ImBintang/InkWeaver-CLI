@@ -31,37 +31,18 @@ def _ensure_rules_dir(workspace: Path) -> Path:
 
 
 def rules_list(workspace: Path) -> str:
-    """查看规则档案列表
+    """查看规则档案列表（v5：调 proxy）
 
     Returns:
         格式化的规则列表
     """
-    root = _rules_root(workspace)
-    if not root.exists():
-        return "（rules 目录不存在）"
-
-    files = sorted(root.glob("*.md"))
-    if not files:
-        return "（暂无规则文档）"
-
-    lines = ["规则文档列表："]
-    for fp in files:
-        title = fp.stem
-        # 读取第一行作为描述
-        content = fp.read_text(encoding="utf-8").strip()
-        first_line = content.splitlines()[0] if content else ""
-        if first_line.startswith("# "):
-            first_line = first_line[2:]
-        line = f"  - {title}"
-        if first_line and first_line != title:
-            line += f"：{first_line}"
-        lines.append(line)
-
-    return "\n".join(lines)
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.list_docs("rule")
 
 
 def read_rule(workspace: Path, name: str, yaml_only: bool = True) -> str:
-    """读取指定规则文档
+    """读取指定规则文档（v5：调 proxy）
 
     Args:
         name: 规则名（不含 .md 后缀）
@@ -70,32 +51,26 @@ def read_rule(workspace: Path, name: str, yaml_only: bool = True) -> str:
     Returns:
         规则文档全文或错误消息
     """
-    fp = _rules_root(workspace) / f"{name}.md"
-    if not fp.exists():
-        return f"错误：规则文档「{name}」不存在"
-
-    content = fp.read_text(encoding="utf-8")
-    if not yaml_only:
-        return content
-
-    from tools.editor import parse_frontmatter, build_frontmatter
-    meta, _ = parse_frontmatter(content)
-    if meta:
-        return build_frontmatter(meta) + "> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
-    return content
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    return proxy.read_doc("rule", name, yaml_only=yaml_only)
 
 
-def new_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
+def new_rule(workspace: Path, name: str, content: str,
+             keywords: str = "", updated: int | None = None) -> str:
     """新建规则文档（薄代理层 → tools.editor.create_doc）"""
     return _create_doc(
-        workspace, doc_type="rule", name=name, content=content, updated=updated,
+        workspace, doc_type="rule", name=name, content=content,
+        keywords=keywords, updated=updated,
     )
 
 
-def edit_rule(workspace: Path, name: str, content: str, updated: int | None = None) -> str:
+def edit_rule(workspace: Path, name: str, content: str,
+              keywords: str = None, updated: int | None = None) -> str:
     """编辑规则文档（薄代理层 → tools.editor.edit_doc）"""
     return _edit_doc(
-        workspace, doc_type="rule", name=name, content=content, updated=updated,
+        workspace, doc_type="rule", name=name, content=content,
+        keywords=keywords, updated=updated,
     )
 
 
@@ -126,4 +101,3 @@ def edit_rule_wikilink(workspace: Path, name: str,
 def delete_rule(workspace: Path, name: str) -> str:
     """删除规则文档（薄代理层 → tools.editor.delete_doc）"""
     return _delete_doc(workspace, doc_type="rule", name=name)
-    return f"已删除规则文档：{name}"

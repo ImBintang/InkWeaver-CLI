@@ -78,6 +78,14 @@ class JianzhiAgent(BaseAgent):
         self._last_tool_call_id = ""
         self.review_session = None  # 妙笔审阅会话（由 MuseWorkflow 设置）
 
+        # v5.0：初始化 DB 服务
+        from tools.db.service import SQLiteService
+        from tools.db.proxy import ProxyService
+        from tools.editor import register_proxy
+        self._db_service = SQLiteService(workspace / "wiki.db")
+        self._proxy = ProxyService(self._db_service)
+        register_proxy(workspace, self._proxy)
+
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
 
@@ -466,6 +474,7 @@ class JianzhiAgent(BaseAgent):
                             "content": {"type": "string", "description": "正文内容"},
                             "description": {"type": "string", "description": "描述"},
                             "state": {"type": "string", "description": "状态"},
+                            "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
                         },
                         "required": ["category", "name", "content"],
@@ -485,6 +494,7 @@ class JianzhiAgent(BaseAgent):
                             "content": {"type": "string", "description": "新正文"},
                             "description": {"type": "string", "description": "新描述"},
                             "state": {"type": "string", "description": "新状态"},
+                            "keywords": {"type": "string", "description": "新关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
                         },
                         "required": ["category", "name"],
@@ -516,6 +526,7 @@ class JianzhiAgent(BaseAgent):
                         "properties": {
                             "name": {"type": "string", "description": "规则名"},
                             "content": {"type": "string", "description": "文档全文"},
+                            "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
                         },
                         "required": ["name", "content"],
                     },
@@ -531,6 +542,7 @@ class JianzhiAgent(BaseAgent):
                         "properties": {
                             "name": {"type": "string", "description": "规则名"},
                             "content": {"type": "string", "description": "新全文"},
+                            "keywords": {"type": "string", "description": "新关键词（逗号分隔）"},
                         },
                         "required": ["name", "content"],
                     },
@@ -563,6 +575,7 @@ class JianzhiAgent(BaseAgent):
                             "chapters": {"type": "string", "description": "覆盖章节范围，如 \"1-5,7-10\""},
                             "description": {"type": "string", "description": "描述"},
                             "state": {"type": "string", "description": "状态"},
+                            "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
                         },
                         "required": ["name", "content", "chapters"],
                     },
@@ -581,6 +594,7 @@ class JianzhiAgent(BaseAgent):
                             "chapters": {"type": "string", "description": "新章节范围"},
                             "description": {"type": "string", "description": "新描述"},
                             "state": {"type": "string", "description": "新状态"},
+                            "keywords": {"type": "string", "description": "新关键词（逗号分隔）"},
                         },
                         "required": ["name"],
                     },
@@ -663,6 +677,7 @@ class JianzhiAgent(BaseAgent):
                             "category": {"type": "string", "description": "wiki 类别（仅 doc_type=wiki 时需要）"},
                             "description": {"type": "string", "description": "描述（wiki/plot）"},
                             "state": {"type": "string", "description": "状态（wiki/plot 动态信息）"},
+                            "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
                             "chapters": {"type": "string", "description": "覆盖章节（仅 doc_type=plot 时需要），如 \"1-5,7-10\""},
                         },
@@ -684,6 +699,7 @@ class JianzhiAgent(BaseAgent):
                             "category": {"type": "string", "description": "wiki 类别（仅 wiki 需要）"},
                             "description": {"type": "string", "description": "新描述"},
                             "state": {"type": "string", "description": "新状态（空字符串删除此字段）"},
+                            "keywords": {"type": "string", "description": "新关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
                             "chapters": {"type": "string", "description": "新章节范围（仅 plot）"},
                         },
@@ -829,6 +845,7 @@ class JianzhiAgent(BaseAgent):
                                     "content": {"type": "string", "description": "正文内容"},
                                     "description": {"type": "string", "description": "描述（可选）"},
                                     "state": {"type": "string", "description": "状态（可选）"},
+                                    "keywords": {"type": "string", "description": "关键词，逗号分隔（可选）"},
                                     "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
                                 },
                                 "required": ["category", "name", "content"],
@@ -860,6 +877,7 @@ class JianzhiAgent(BaseAgent):
                                     "content": {"type": "string", "description": "正文内容（可选）"},
                                     "description": {"type": "string", "description": "描述（可选）"},
                                     "state": {"type": "string", "description": "状态（可选）"},
+                                    "keywords": {"type": "string", "description": "关键词，逗号分隔（可选）"},
                                     "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
                                 },
                                 "required": ["category", "name"],
@@ -943,39 +961,61 @@ class JianzhiAgent(BaseAgent):
             from tools.workflow import submit_plan as _submit_plan
             plan_str = args.get("plan_json", "{}")
             result = _submit_plan(self.workspace, plan_str)
+            # 解析 JSON，非 pending_review 状态直接透传（如校验错误）
             try:
                 result_data = json.loads(result)
-                if result_data.get("status") == "pending_review":
-                    self.cli.print_plan(result_data)
-                    self.cli.print_info("请确认是否执行此计划 (y/n)：")
-                    confirm = input().strip().lower()
-                    if confirm == "y":
-                        plan = result_data.get("plan", {})
-                        if self.permission.mode == "review":
-                            # 审核阶段：合并到现有白名单，不重置
-                            return self.permission.submit_review_plan(plan)
-                        else:
-                            self.permission.submit_plan(plan)
-                            return json.dumps({
-                                "status": "approved",
-                                "message": "计划已通过，写权限已开放，可以开始执行。"
-                            }, ensure_ascii=False)
+            except json.JSONDecodeError:
+                return result
+
+            if result_data.get("status") == "pending_review":
+                self.cli.print_plan(result_data)
+                self.cli.print_info("请确认是否执行此计划 (y/n)：")
+                confirm = input().strip().lower()
+                if confirm == "y":
+                    plan = result_data.get("plan", {})
+                    if self.permission.mode == "review":
+                        # 审核阶段：合并到现有白名单，不重置
+                        return self.permission.submit_review_plan(plan)
                     else:
-                        self.cli.print_info("请输入打回理由：")
-                        reason = input().strip()
+                        try:
+                            self.permission.submit_plan(plan)
+                            # v5.0：加载白名单条目到缓存
+                            if hasattr(self, '_proxy') and self._proxy is not None:
+                                self._proxy.load_whitelist(plan)
+                        except Exception as e:
+                            err_msg = f"计划批准流程异常：{e}。请重试或联系管理员。"
+                            self.cli.print_info(err_msg)
+                            if self.cli.logger:
+                                self.cli.logger.write("ERROR", f"submit_plan 异常：{e}")
+                            return json.dumps({
+                                "status": "error",
+                                "message": err_msg,
+                            }, ensure_ascii=False)
                         return json.dumps({
-                            "status": "rejected",
-                            "reason": reason,
-                            "message": f"计划被打回，理由：{reason}。请根据理由修改后重新提交。"
+                            "status": "approved",
+                            "message": "计划已通过，写权限已开放，可以开始执行。"
                         }, ensure_ascii=False)
-            except (json.JSONDecodeError, Exception):
-                pass
+                else:
+                    self.cli.print_info("请输入打回理由：")
+                    reason = input().strip()
+                    return json.dumps({
+                        "status": "rejected",
+                        "reason": reason,
+                        "message": f"计划被打回，理由：{reason}。请根据理由修改后重新提交。"
+                    }, ensure_ascii=False)
+
             return result
 
         if name == "review_workflow":
             from tools.workflow import review_workflow as _review_workflow
             self._archive_context()
             self.permission.switch_review()
+            # v5.0：进入审核前暂存缓存
+            if hasattr(self, '_proxy') and self._proxy is not None and self._proxy.is_cache_loaded():
+                snapshot_dir = self.workspace / "session"
+                snapshot_dir.mkdir(parents=True, exist_ok=True)
+                snapshot_path = snapshot_dir / "cache_snapshot.json"
+                self._proxy.snapshot(snapshot_path)
             # 自动运行 lint
             try:
                 from tools.lint import run_lint
@@ -991,8 +1031,40 @@ class JianzhiAgent(BaseAgent):
             from tools.workflow import finish_task as _wf_finish
             from tools.diff import finish_task as _diff_finish
             # 沿用旧 finish_task 逻辑：校验存在性 + 记录 log.json + 构建关系图
-            scope = str(sorted(self.permission.whitelist.read_chapters or [0]))
-            _diff_finish(self.workspace, scope)
+            chapter_range = sorted(self.permission.whitelist.read_chapters or [])
+            # 将章节列表转为合法的 spec 字符串（如 "1,2,3,4,5"）
+            scope = ",".join(str(ch) for ch in chapter_range) if chapter_range else "0"
+            # 从 proxy 缓存中收集新建/更新的条目名称
+            new_wiki, updated_wiki = [], []
+            new_rules, updated_rules = [], []
+            new_plots, updated_plots = [], []
+            if hasattr(self, '_proxy') and self._proxy is not None:
+                for (doc_type, _), doc in self._proxy._cache.items():
+                    if doc.is_deleted:
+                        continue
+                    if doc_type == "wiki":
+                        (new_wiki if doc.is_new else updated_wiki).append(doc.name)
+                    elif doc_type == "rule":
+                        (new_rules if doc.is_new else updated_rules).append(doc.name)
+                    elif doc_type == "plot":
+                        (new_plots if doc.is_new else updated_plots).append(doc.name)
+            # 仅在有合法章节范围时记录日志和 flush（防止空 chapters 的伪调用清空缓存）
+            if chapter_range:
+                _diff_finish(self.workspace, scope,
+                             new_wiki=new_wiki, updated_wiki=updated_wiki,
+                             new_rules=new_rules, updated_rules=updated_rules,
+                             new_plots=new_plots, updated_plots=updated_plots)
+                # v5.0：flush 缓存到 DB
+                if hasattr(self, '_proxy') and self._proxy is not None and self._proxy.is_cache_loaded():
+                    scope_chapter = chapter_range[-1]
+                    try:
+                        self._proxy.flush(scope_chapter=scope_chapter)
+                    except Exception as e:
+                        self.cli.print_info(f"DB flush 失败：{e}")
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"DB 写入失败：{e}。缓存已保留，可重试。"
+                        }, ensure_ascii=False)
             self.permission.reset()
             # 标记等待 chat() 清理上下文
             self._finish_pending = True

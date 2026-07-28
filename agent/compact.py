@@ -277,8 +277,18 @@ class PersistCache:
         return data.get("result_preview", "(无预览)")
 
     def should_persist(self, tool_name: str, result: str) -> bool:
-        """判断工具结果是否需要 persist"""
+        """判断工具结果是否需要 persist
+
+        注意：错误结果和空结果不应被缓存，否则 LLM 看不到失败信息，
+        会误以为操作成功（v5.0.2 修复）。
+        """
         if tool_name in PERSIST_NEVER:
+            return False
+        # 错误结果不缓存 — 让 LLM 看到失败信息
+        if result.startswith("错误：") or result.startswith("错误:"):
+            return False
+        # 批量操作空结果不缓存（如 {"success": 0, "failed": 0, "items": []}）
+        if '"success": 0' in result and '"failed": 0' in result:
             return False
         if tool_name in PERSIST_ALWAYS:
             return True
@@ -293,9 +303,19 @@ class PersistCache:
             "result_preview": result[:200],
             "full_output": result,
         })
-        # 构建友好的占位符
+        # 构建友好的占位符（包含关键统计信息，避免 LLM 误判）
         name = params.get("name", params.get("category", ""))
         items = params.get("items", [])
+        # 批量操作：从结果中提取成功/失败统计
+        if tool_name.startswith("batch_"):
+            import json as _json
+            try:
+                stats = _json.loads(result)
+                s = stats.get("success", 0)
+                f = stats.get("failed", 0)
+                return f"[{tool_name} 已执行，成功 {s} 个，失败 {f} 个。详情已缓存 session/compact_cache.json]"
+            except (ValueError, TypeError):
+                pass
         if items:
             return f"[{tool_name} 已执行 ({len(items)} items)，结果已缓存 session/compact_cache.json]"
         if name:
