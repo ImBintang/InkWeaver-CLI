@@ -103,9 +103,10 @@ def chapter_list(workspace_path: Path) -> str:
     entries = []
     for row in rows:
         num = row["chapter_num"]
-        title = row["title"] or f"第{num}章"
+        title = row["title"]
+        label = f"第{num}章 {title}" if title else f"第{num}章"
         status = "[已处理]" if _is_processed(num, processed_ranges) else "[未处理]"
-        entries.append(f"{title} {status}")
+        entries.append(f"{label} {status}")
 
     return "\n".join(entries)
 
@@ -133,8 +134,9 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
         if row is None:
             parts.append(f"## 第{num}章（不存在）")
         else:
-            title = row["title"] or f"第{num}章"
-            parts.append(f"## {title}\n\n{row['content']}")
+            title = row["title"]
+            heading = f"第{num}章 {title}" if title else f"第{num}章"
+            parts.append(f"## {heading}\n\n{row['content']}")
 
     return "\n\n".join(parts)
 
@@ -177,7 +179,7 @@ def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> s
             result_lines.append(f"第{num}章: （不存在）")
             continue
 
-        label = row["title"] or f"第{num}章"
+        label = f"第{num}章 {row['title']}" if row['title'] else f"第{num}章"
         body = row["content"]
         counts = []
         for kw in keywords:
@@ -218,8 +220,9 @@ def show_chapter(workspace_path: Path, num: int) -> str:
     if row is None:
         return f"错误：第{num}章不存在"
 
-    title = row["title"] or f"第{num}章"
-    return f"{title}\n\n{row['content']}"
+    title = row["title"]
+    heading = f"第{num}章 {title}" if title else f"第{num}章"
+    return f"{heading}\n\n{row['content']}"
 
 
 # ---- 中文数字映射 ----
@@ -289,8 +292,12 @@ def write_chapter(workspace_path: Path, num: int, content: str) -> str:
 
     content = content.strip()
     lines = content.splitlines()
-    title = lines[0].strip() if lines else f"第{num}章"
+    raw_title = lines[0].strip() if lines else ""
     body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+
+    # 剥离章节号前缀，只存纯标题
+    from tools.workspace import strip_chapter_prefix
+    title = strip_chapter_prefix(raw_title) if raw_title else ""
 
     db = _get_db(workspace_path)
     db.chapter_upsert(num, title, body)

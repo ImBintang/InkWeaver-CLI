@@ -238,15 +238,21 @@ def check_content(workspace: Path, docs: list[LintDoc]) -> list[dict]:
     return debts
 
 
-def check_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[dict]:
+def check_wikilinks(workspace: Path, docs: list[LintDoc],
+                    all_docs: list[LintDoc] | None = None) -> list[dict]:
     """检查文档中的 wikilink 是否指向已存在的目标
+
+    Args:
+        docs: 需要检查的文档列表（白名单过滤后）
+        all_docs: 全量文档列表（用于构建合法目标集）。为 None 时用 docs。
 
     额外检查 unlink 黑名单：对于黑名单内的目标，自动取消链接并跳过债务。
     """
     from tools.editor import is_in_unlink_blacklist, _get_proxy
 
-    wiki_names = _build_wiki_name_set(docs)
-    rules_names = _build_rules_name_set(docs)
+    target_docs = all_docs if all_docs is not None else docs
+    wiki_names = _build_wiki_name_set(target_docs)
+    rules_names = _build_rules_name_set(target_docs)
     valid_targets = wiki_names | rules_names
 
     proxy = _get_proxy(workspace)
@@ -644,11 +650,149 @@ def auto_fix_short_name_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[
     return fixes
 
 
+# ── 断链重要性评分 ─────────────────────────────────────────────────
+
+IMPORTANCE_MENTION_THRESHOLD = 3   # 提及条目数阈值
+IMPORTANCE_FREQUENCY_THRESHOLD = 10  # 词频阈值
+IMPORTANCE_CHAPTER_THRESHOLD = 3   # 章节范围阈值
+
+
+def score_link_importance(workspace: Path, link_debts: list[dict],
+                          chapter_scope: list[int]) -> dict[str, dict]:
+    """对断链目标整合评分
+
+    三维度：
+      1. 提及条目数（多少个已有条目引用了该断链目标）
+      2. 词频（在提取章节正文中的出现次数）
+      3. 章节范围（在多少章正文中出现）
+
+    Returns:
+        {target: {mention_count, frequency, chapter_count, chapters, level, sources}}
+    """
+    # 1. 按 target 聚合
+    aggregated: dict[str, dict] = {}
+    for debt in link_debts:
+        target = debt.get("target", "")
+        if not target:
+            continue
+        if target not in aggregated:
+            aggregated[target] = {"sources": set(), "frequency": 0, "chapters": []}
+        aggregated[target]["sources"].add(debt.get("file", ""))
+
+    if not aggregated:
+        return {}
+
+    # 2. 预加载章节正文（避免重复读取）
+    chapter_texts: dict[int, str] = {}
+    for ch_num in chapter_scope:
+        text = _read_chapter_text(workspace, ch_num)
+        if text:
+            chapter_texts[ch_num] = text
+
+    # 3. 对每个 target 计算三维度
+    scores: dict[str, dict] = {}
+    for target, info in aggregated.items():
+        mention_count = len(info["sources"])
+
+        # 词频 + 章节范围
+        frequency = 0
+        appeared_chapters: list[int] = []
+        for ch_num, text in chapter_texts.items():
+            count = text.count(target)
+            if count > 0:
+                frequency += count
+                appeared_chapters.append(ch_num)
+
+        chapter_count = len(appeared_chapters)
+
+        # 等级计算
+        level = 0
+        if mention_count >= IMPORTANCE_MENTION_THRESHOLD:
+            level += 1
+        if frequency >= IMPORTANCE_FREQUENCY_THRESHOLD:
+            level += 1
+        if chapter_count >= IMPORTANCE_CHAPTER_THRESHOLD:
+            level += 1
+
+        scores[target] = {
+            "mention_count": mention_count,
+            "frequency": frequency,
+            "chapter_count": chapter_count,
+            "chapters": sorted(appeared_chapters),
+            "level": level,
+            "sources": sorted(info["sources"]),
+        }
+
+    return scores
+
+
+def auto_unlink_low_importance(workspace: Path, docs: list[LintDoc],
+                               scores: dict[str, dict]) -> list[dict]:
+    """对重要性等级 0 的断链目标自动取消链接
+
+    不记入黑名单。返回自动修复记录列表。
+    """
+    from tools.editor import _get_proxy
+
+    # 筛选等级 0 的 target
+    unlink_targets = {
+        target for target, info in scores.items() if info["level"] == 0
+    }
+    if not unlink_targets:
+        return []
+
+    proxy = _get_proxy(workspace)
+    fixes: list[dict] = []
+
+    for d in docs:
+        if not d.content:
+            continue
+
+        # 检查该文档是否包含需要 unlink 的目标
+        links_in_doc = extract_wikilinks(d.content)
+        targets_to_unlink = {lk for lk in links_in_doc if lk in unlink_targets}
+        if not targets_to_unlink:
+            continue
+
+        new_content = d.content
+        for target in targets_to_unlink:
+            target_lower = target.strip().lower()
+
+            def _make_unlinker(t_lower):
+                def _replace(match):
+                    raw_target = match.group(1)
+                    raw_alias = match.group(2) or ""
+                    if raw_target.strip().lower() == t_lower:
+                        return raw_alias.lstrip("|") if raw_alias else raw_target
+                    return match.group(0)
+                return _replace
+
+            new_content = re.sub(
+                r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]",
+                _make_unlinker(target_lower), new_content,
+            )
+
+        if new_content != d.content:
+            proxy.update_doc(doc_type=d.doc_type, name=d.name,
+                             category=d.category or None,
+                             content=new_content, chapter=0)
+            d.content = new_content
+            fixes.append({
+                "type": "importance_auto_unlink",
+                "file": f"{d.doc_type}/{d.name}",
+                "detail": f"重要性等级0，自动取消链接：{', '.join(sorted(targets_to_unlink))}",
+                "auto_fixed": True,
+            })
+
+    return fixes
+
+
 # ── 入口函数 ─────────────────────────────────────────────────────────
 
 
 def run_lint(workspace: Path, chapters: str | None = None,
-             whitelist: list[tuple[str, str]] | None = None) -> str:
+             whitelist: list[tuple[str, str]] | None = None,
+             chapter_scope: list[int] | None = None) -> str:
     """运行全套 lint 检查，写入 debt JSON，返回格式化摘要
 
     Args:
@@ -657,10 +801,13 @@ def run_lint(workspace: Path, chapters: str | None = None,
         whitelist: 可选，白名单 [(doc_type, name), ...]。
                    传入时只检查白名单内的文档（任务内 lint）。
                    为 None 时检查全量（全局 lint）。
+        chapter_scope: 可选，提取计划章节号列表。
+                       传入时启用断链重要性评分与等级0自动unlink。
     """
     docs = _gather_all_docs(workspace)
 
-    # 白名单过滤
+    # 白名单过滤（保留全量用于断链目标判定）
+    all_docs = docs
     if whitelist is not None:
         wl_set = set(whitelist)
         docs = [d for d in docs if (d.doc_type, d.name) in wl_set]
@@ -674,8 +821,21 @@ def run_lint(workspace: Path, chapters: str | None = None,
     # 1.5 短名→全名 wikilink 自动修复（在断链检查之前执行）
     short_name_fixes = auto_fix_short_name_wikilinks(workspace, docs)
 
-    # 2. Wikilink 断链
-    link_debts = check_wikilinks(workspace, docs)
+    # 2. Wikilink 断链（用全量 docs 构建合法目标集）
+    link_debts = check_wikilinks(workspace, docs, all_docs=all_docs)
+
+    # 2.5 断链重要性评分（仅在传入 chapter_scope 时启用）
+    importance_scores: dict[str, dict] = {}
+    importance_unlink_fixes: list[dict] = []
+    if chapter_scope and link_debts:
+        importance_scores = score_link_importance(workspace, link_debts, chapter_scope)
+        # 等级0自动unlink
+        importance_unlink_fixes = auto_unlink_low_importance(workspace, docs, importance_scores)
+        # 从 link_debts 中移除已自动处理的等级0条目
+        link_debts = [
+            d for d in link_debts
+            if importance_scores.get(d.get("target", ""), {}).get("level", 0) > 0
+        ]
 
     # 3. 规则文档 wikilink
     rules_fixes = check_rules_wikilinks(workspace, docs)
@@ -715,6 +875,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
         "appearance": appearance_results,
         "file_errors": [d for d in content_debts if d.get("auto_fixed") is not True],
         "unended_plots": unended_plot_debts,
+        "importance_scores": importance_scores,
     }
 
     # 写入 debt JSON
@@ -740,13 +901,33 @@ def run_lint(workspace: Path, chapters: str | None = None,
     ]
 
     # 自动修复汇总
-    all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes
+    all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes + importance_unlink_fixes
     total_fixed = len(all_fixes)
     if all_fixes:
         lines.append("## 代码 lint 完成\n")
         lines.append(f"### 自动修复（{total_fixed} 项）")
         for fix in all_fixes:
             lines.append(f"  ✅ {fix['file']}: {fix['detail']}")
+        lines.append("")
+
+    # 断链重要性评估摘要
+    if importance_scores:
+        forced = {t: s for t, s in importance_scores.items() if s["level"] >= 2}
+        level1 = {t: s for t, s in importance_scores.items() if s["level"] == 1}
+        level0 = {t: s for t, s in importance_scores.items() if s["level"] == 0}
+        lines.append("### 断链重要性评估")
+        if forced:
+            lines.append(f"🔴 强制债务（等级≥2，{len(forced)} 项 — 必须创建）")
+            for t, s in sorted(forced.items(), key=lambda x: (-x[1]["level"], -x[1]["frequency"])):
+                lines.append(f"  {t}（等级{s['level']} / {s['mention_count']}条目提及 / 词频{s['frequency']} / 覆盖{s['chapter_count']}章）")
+        if level1:
+            lines.append(f"🟡 LLM判断（等级1，{len(level1)} 项）")
+            for t, s in sorted(level1.items(), key=lambda x: -x[1]["frequency"]):
+                lines.append(f"  {t}（{s['mention_count']}条目 / 词频{s['frequency']} / {s['chapter_count']}章）")
+        if level0:
+            lines.append(f"⚪ 已自动unlink（等级0，{len(level0)} 项）：{', '.join(sorted(level0.keys())[:10])}")
+            if len(level0) > 10:
+                lines.append(f"  ... 另有 {len(level0) - 10} 项")
         lines.append("")
 
     # 需人工处理的债务

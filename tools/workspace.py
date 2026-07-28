@@ -94,6 +94,21 @@ def _find_chapter_title(line: str) -> str | None:
     return None
 
 
+# 用于剥离章节号前缀，提取纯标题
+_CHAPTER_PREFIX_RE = re.compile(
+    r"^(?:第[零一二三四五六七八九十百千万\d]+[章回节部卷]|\d+[章回节部卷]|Chapter\s+\d+|序章|序言|尾声|楔子|番外|后记|前言|引子)\s*[:：]?\s*",
+    re.IGNORECASE
+)
+
+
+def strip_chapter_prefix(title: str) -> str:
+    """从章节标题行中剥离章节号前缀，返回纯标题
+
+    例："第35章 方四娘" → "方四娘"，"序章" → ""
+    """
+    return _CHAPTER_PREFIX_RE.sub("", title).strip()
+
+
 def import_novel(workspace_path: Path, file_path: str) -> str:
     """导入小说，按章节拆分，写入 DB
 
@@ -144,7 +159,7 @@ def import_novel(workspace_path: Path, file_path: str) -> str:
 
     for i, (title, content_lines) in enumerate(chapters, 1):
         body = "\n".join(content_lines).strip()
-        db.chapter_upsert(i, title, body)
+        db.chapter_upsert(i, strip_chapter_prefix(title), body)
 
     return f"成功导入 {len(chapters)} 章"
 
@@ -193,7 +208,10 @@ def list_latest_chapters(workspace_path: Path, n: int = 50) -> str:
 
     lines = []
     for ch in latest:
-        lines.append(f"  第{ch['chapter_num']}章  {ch['title']}")
+        num = ch['chapter_num']
+        title = ch['title']
+        label = f"第{num}章 {title}" if title else f"第{num}章"
+        lines.append(f"  {label}")
 
     total = len(all_chapters)
     shown = len(lines)
@@ -219,7 +237,10 @@ def export_novel(workspace_path: Path) -> str:
     for ch in all_chapters:
         full = db.chapter_get(ch["chapter_num"])
         if full and full.get("content"):
-            parts.append(f"{full['title']}\n{full['content']}")
+            num = full['chapter_num']
+            title = full['title']
+            heading = f"第{num}章 {title}" if title else f"第{num}章"
+            parts.append(f"{heading}\n{full['content']}")
 
     if not parts:
         return "错误：所有章节均为空"

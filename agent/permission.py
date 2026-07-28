@@ -223,6 +223,11 @@ class PermissionManager:
         for item in plan_json.get("edit_plot", []):
             self.whitelist.edit_plot.add(item["name"])
             self.whitelist.read_plot.add(item["name"])
+        # v5.4.2：支持审核阶段申请创建类别
+        for item in plan_json.get("new_category", []):
+            self.whitelist.new_category.add(item["name"])
+        for item in plan_json.get("edit_category", []):
+            self.whitelist.edit_category.add(item["name"])
         return json.dumps({
             "status": "approved",
             "message": "补充计划已合并到白名单，可以继续执行。"
@@ -299,7 +304,7 @@ class PermissionManager:
                 return (
                     f"[权限拦截] review 模式下，{tool_name}({param_info}) "
                     f"不在本次计划范围内，无权读取。\n"
-                    f"可以使用 wiki_list/plot_list/chapter_list 等工具查看存在性。"
+                    f"可以使用 wiki_list/plot_list/chapter_list/read_index 等工具查看存在性与写作规范。"
                 )
 
         return None  # 放行

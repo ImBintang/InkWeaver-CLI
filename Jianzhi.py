@@ -346,6 +346,19 @@ class JianzhiAgent(BaseAgent):
             {
                 "type": "function",
                 "function": {
+                    "name": "read_index",
+                    "description": "读取指定类别的 index（含 writing_guide 写作规范）。不传 category 则查看所有类别概览。写词条前必须先调用此工具获取写作规范。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": {"type": "string", "description": "类别名（不传则查看所有类别）"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "wiki_list",
                     "description": "查看指定类别下的 wiki 词条列表（分页，每页 20 个）。注意：必须翻完所有页才能确认某个词条不存在！不要只看第一页就下结论！",
                     "parameters": {
@@ -1130,17 +1143,37 @@ class JianzhiAgent(BaseAgent):
                         for (_, _), doc in self._proxy._cache.items()
                         if not doc.is_deleted
                     ]
-                lint_result = run_lint(self.workspace, whitelist=lint_whitelist)
+                chapter_scope = sorted(self.permission.whitelist.read_chapters or [])
+                lint_result = run_lint(self.workspace, whitelist=lint_whitelist,
+                                       chapter_scope=chapter_scope or None)
             except Exception:
                 lint_result = "（lint 检查异常）"
+            # v5.4.2：断链重要性等级3审核节点
+            forced_debts_approved = []
+            forced = self._extract_forced_debts()
+            if forced:
+                approved, rejected = self._audit_forced_debts(forced)
+                if rejected:
+                    self._unlink_rejected(rejected)
+                forced_debts_approved = approved
             # 标记等待 chat() 清理上下文（不清 self.messages，避免 agent_loop 的 tool result 链断裂）
-            self._review_pending = {"lint_result": lint_result}
+            self._review_pending = {"lint_result": lint_result, "forced_debts": forced_debts_approved}
             self._stop_agent_loop = True
             return _review_workflow(self.workspace)
 
         if name == "finish_task":
             from tools.workflow import finish_task as _wf_finish
             from tools.diff import finish_task as _diff_finish
+            # v5.4.2：检查强制债务是否已解决
+            forced_unresolved = self._check_forced_debt_resolved()
+            if forced_unresolved:
+                return json.dumps({
+                    "status": "error",
+                    "message": (
+                        f"强制债务未解决：{', '.join(forced_unresolved)}。"
+                        f"请先通过 submit_plan 申请白名单扩展并创建对应词条。"
+                    )
+                }, ensure_ascii=False)
             # 沿用旧 finish_task 逻辑：校验存在性 + 记录 log.json + 构建关系图
             chapter_range = sorted(self.permission.whitelist.read_chapters or [])
             # 将章节列表转为合法的 spec 字符串（如 "1,2,3,4,5"）
@@ -1191,6 +1224,7 @@ class JianzhiAgent(BaseAgent):
             "chapter_list": self._handle_chapter_list,
             # Wiki 只读工具
             "category_list": lambda **kw: category_tools.category_list(self.workspace),
+            "read_index": lambda **kw: category_tools.read_index(self.workspace, **kw),
             "wiki_list": lambda **kw: wiki_tools.wiki_list(self.workspace, **kw),
             "read_wiki": self._handle_read_wiki,
             "check_wiki": lambda **kw: wiki_tools.check_wiki(self.workspace, **kw),
@@ -1295,7 +1329,10 @@ class JianzhiAgent(BaseAgent):
         titles = []
         for n in nums:
             ch = self._db_service.chapter_get(n)
-            titles.append(ch["title"] if ch else f"第{n}章")
+            if ch and ch["title"]:
+                titles.append(f"第{n}章 {ch['title']}")
+            else:
+                titles.append(f"第{n}章")
         self.context.track_chapter(
             [str(n) for n in nums],
             titles,
@@ -1404,6 +1441,127 @@ class JianzhiAgent(BaseAgent):
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
         self.cli.print_info(f"上下文已存档至：{path}")
 
+    # ---- v5.4.2 断链重要性审核 ----
+
+    def _extract_forced_debts(self) -> list[dict]:
+        """从 lint-debt.json 读取重要性等级≥2的断链条目"""
+        fp = self.workspace / DEBT_FILE
+        if not fp.exists():
+            return []
+        try:
+            data = json.loads(fp.read_text(encoding="utf-8"))
+            scores = data.get("importance_scores", {})
+            forced = []
+            for target, info in scores.items():
+                if info.get("level", 0) >= 2:
+                    forced.append({"target": target, **info})
+            # 按等级降序、词频降序排列
+            forced.sort(key=lambda x: (-x.get("level", 0), -x.get("frequency", 0)))
+            return forced
+        except Exception:
+            return []
+
+    def _audit_forced_debts(self, forced: list[dict]) -> tuple[list[dict], list[dict]]:
+        """阻塞式用户审核：返回 (approved, rejected)"""
+        self.cli.print_info("")
+        self.cli.print_info("⚠️ 以下断链实体重要性等级≥2，进入强制债务审核：")
+        for i, item in enumerate(forced, 1):
+            self.cli.print_info(
+                f"  [{i}] {item['target']}"
+                f"（等级{item.get('level', '?')} / "
+                f"{item['mention_count']}条目提及 / "
+                f"词频{item['frequency']} / "
+                f"覆盖{item['chapter_count']}章）"
+            )
+        self.cli.print_info("")
+        self.cli.print_info('回车=全部通过，输入拒绝编号（如 "2" 或 "1,2"）：')
+
+        response = self.cli.read_line()
+        # None (Ctrl+C) 或空字符串（回车）→ 全部通过
+        if response is None or response.strip() == "":
+            return forced, []
+
+        # 解析拒绝编号
+        try:
+            reject_ids = {int(x.strip()) for x in response.split(",") if x.strip()}
+        except ValueError:
+            # 无法解析→全部通过
+            return forced, []
+
+        approved = []
+        rejected = []
+        for i, item in enumerate(forced, 1):
+            if i in reject_ids:
+                rejected.append(item)
+            else:
+                approved.append(item)
+
+        if rejected:
+            names = ", ".join(item["target"] for item in rejected)
+            self.cli.print_info(f"已拒绝：{names}，将自动取消链接。")
+
+        return approved, rejected
+
+    def _unlink_rejected(self, rejected: list[dict]):
+        """对被拒绝的断链目标执行 unlink（遍历 proxy 缓存中所有文档）"""
+        import re as _re
+        if not hasattr(self, '_proxy') or self._proxy is None:
+            return
+
+        targets = {item["target"] for item in rejected}
+
+        for (doc_type, _), doc in list(self._proxy._cache.items()):
+            if doc.is_deleted or not doc.content:
+                continue
+            # 检查是否包含需要 unlink 的目标
+            has_target = any(t in doc.content for t in targets)
+            if not has_target:
+                continue
+
+            new_content = doc.content
+            for target in targets:
+                target_lower = target.strip().lower()
+
+                def _make_unlinker(t_lower):
+                    def _replace(match):
+                        raw_target = match.group(1)
+                        raw_alias = match.group(2) or ""
+                        if raw_target.strip().lower() == t_lower:
+                            return raw_alias.lstrip("|") if raw_alias else raw_target
+                        return match.group(0)
+                    return _replace
+
+                new_content = _re.sub(
+                    r"\[\[([^\]|]+?)(\|[^\]]+?)?\]\]",
+                    _make_unlinker(target_lower), new_content,
+                )
+
+            if new_content != doc.content:
+                self._proxy.update_doc(
+                    doc_type=doc_type, name=doc.name,
+                    category=doc.category or None,
+                    content=new_content, chapter=0
+                )
+
+    def _check_forced_debt_resolved(self) -> list[str]:
+        """检查强制债务是否已解决，返回未解决的 target 列表"""
+        forced_debts = []
+        if hasattr(self, '_review_pending') and self._review_pending:
+            forced_debts = self._review_pending.get("forced_debts", [])
+        if not forced_debts:
+            return []
+
+        unresolved = []
+        for item in forced_debts:
+            target = item["target"] if isinstance(item, dict) else item
+            # 检查 proxy 中是否已存在该 wiki 词条
+            if hasattr(self, '_proxy') and self._proxy is not None:
+                if self._proxy.find_doc("wiki", target) is None:
+                    unresolved.append(target)
+            else:
+                unresolved.append(target)
+        return unresolved
+
     def _inject_review_context(self, lint_result: str = ""):
         """注入 review 首轮信息：计划JSON + lint 结果 + 已创建条目快照"""
         parts = ["【系统】你已进入 Review 审核工作流。"]
@@ -1434,6 +1592,38 @@ class JianzhiAgent(BaseAgent):
         parts.append("- 使用 wiki_list / plot_list / chapter_list 可查看存在性但不可读内容")
         parts.append("- 以上是自动 lint 的债务清单，请据此进行语义审查和修复")
         parts.append("")
+
+        # v5.4.2：注入强制创建清单
+        forced_debts = []
+        if hasattr(self, '_review_pending') and self._review_pending:
+            forced_debts = self._review_pending.get("forced_debts", [])
+        if forced_debts:
+            parts.append("### 🚨🚨🚨 强制债务（最高优先级 — 必须首先处理）")
+            parts.append("")
+            parts.append("**以下实体已经用户审核确认，必须创建词条。这是不可跳过的硬性要求。**")
+            parts.append("**你必须在处理其他任何债务之前，先完成以下所有实体的创建。**")
+            parts.append("**不得忽略、跳过、或以任何理由拒绝创建。不得对这些实体执行 unlink。**")
+            parts.append("")
+            for item in forced_debts:
+                t = item["target"] if isinstance(item, dict) else item
+                if isinstance(item, dict):
+                    parts.append(
+                        f"- **{t}**（等级{item.get('level', '?')} / "
+                        f"{item.get('mention_count', '?')}条目提及 / "
+                        f"词频{item.get('frequency', '?')} / "
+                        f"覆盖{item.get('chapter_count', '?')}章）"
+                    )
+                else:
+                    parts.append(f"- **{t}**")
+            parts.append("")
+            parts.append("**执行步骤（每个实体都必须完成）：**")
+            parts.append("1. 调用 `submit_plan` 提交包含所有强制实体的 new_wiki 计划（必要时含 new_category）")
+            parts.append("2. 用户确认后，逐个调用 `new_wiki` 创建词条（内容≥300字）")
+            parts.append("3. 创建完成后才可继续处理其他债务")
+            parts.append("")
+            parts.append("❗❗ finish_task 会校验上述实体是否已全部创建。任何一个未创建都将阻塞任务结束。")
+            parts.append("")
+
         parts.append("### 断链（broken_link）处理规则")
         parts.append("lint 报告的 broken_link 需要按以下规则区分处理：")
         parts.append("")
@@ -1450,6 +1640,9 @@ class JianzhiAgent(BaseAgent):
         parts.append("**④ 次要实体** — 一次性配角、普通妖兽、泛称物品等，不值得独立建词条。")
         parts.append("   → 使用 `edit_doc_wikilink(mode=\"unlink\", remember=false)` 取消链接，**不**记入黑名单。")
         parts.append("")
+        if forced_debts:
+            parts.append("**禁止**：上方「强制债务」清单中的实体不适用④，不得 unlink，必须走③流程创建。违反将导致 finish_task 永久阻塞。")
+            parts.append("")
         parts.append("### 未结束剧情卡片处理规则")
         parts.append("lint 报告的 unended_plots 表示剧情卡片章节范围已结束但未标记收尾。")
         parts.append("对于这些卡片，调用 `end_plot(name=\"...\", end_notes=\"...\")` 结束，end_notes 必须填写收尾语。")
