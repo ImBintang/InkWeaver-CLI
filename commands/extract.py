@@ -81,13 +81,15 @@ def _compute_range(ws: Path, chapters_flag: str) -> tuple[int | None, int | None
     if chapters_flag:
         # 手动指定：解析 "21-30" 格式
         parts = chapters_flag.split("-")
-        if len(parts) == 2:
-            return int(parts[0]), int(parts[1])
-        elif len(parts) == 1:
-            n = int(parts[0])
-            return n, n
-        else:
+        try:
+            if len(parts) == 2:
+                return int(parts[0]), int(parts[1])
+            elif len(parts) == 1:
+                n = int(parts[0])
+                return n, n
+        except ValueError:
             return None, None
+        return None, None
 
     # 自动计算
     processed_max = _get_processed_max(ws)
@@ -111,13 +113,24 @@ def _get_processed_max(ws: Path) -> int:
         return 0
     try:
         data = json.loads(log_path.read_text(encoding="utf-8"))
-        processed = data.get("processed", [])
-        if not processed:
+        processed = data.get("processed", {})
+        # 兼容新格式（dict: {"chapter_ranges": [...], ...}）和旧格式（list）
+        if isinstance(processed, dict):
+            ranges = processed.get("chapter_ranges", [])
+        elif isinstance(processed, list):
+            ranges = processed
+        else:
             return 0
-        # processed 可能是 [[1,20], [21,30]] 格式
+        if not ranges:
+            return 0
+        from tools.chapter import parse_chapter_spec
         max_ch = 0
-        for item in processed:
-            if isinstance(item, list) and len(item) == 2:
+        for item in ranges:
+            if isinstance(item, str):
+                nums = parse_chapter_spec(item)
+                if nums:
+                    max_ch = max(max_ch, max(nums))
+            elif isinstance(item, list) and len(item) == 2:
                 max_ch = max(max_ch, item[1])
             elif isinstance(item, int):
                 max_ch = max(max_ch, item)

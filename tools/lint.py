@@ -401,11 +401,18 @@ def check_description_length(workspace: Path, docs: list[LintDoc]) -> list[dict]
     return debts
 
 
-def check_plot_links(workspace: Path, docs: list[LintDoc]) -> list[dict]:
-    """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标"""
+def check_plot_links(workspace: Path, docs: list[LintDoc],
+                     all_docs: list[LintDoc] | None = None) -> list[dict]:
+    """检查剧情卡片中的 wikilink 是否指向已存在的 wiki 目标
+
+    Args:
+        docs: 需要检查的文档列表（白名单过滤后）
+        all_docs: 全量文档列表（用于构建合法目标集）。为 None 时用 docs。
+    """
     from tools.editor import is_in_unlink_blacklist, _get_proxy
 
-    wiki_names = _build_wiki_name_set(docs)
+    target_docs = all_docs if all_docs is not None else docs
+    wiki_names = _build_wiki_name_set(target_docs)
     proxy = _get_proxy(workspace)
     debts: list[dict] = []
 
@@ -852,8 +859,8 @@ def run_lint(workspace: Path, chapters: str | None = None,
     # 6.5 description 长度
     desc_debts = check_description_length(workspace, docs)
 
-    # 7. 剧情链接
-    plot_link_debts = check_plot_links(workspace, docs)
+    # 7. 剧情链接（用全量 docs 构建合法目标集）
+    plot_link_debts = check_plot_links(workspace, docs, all_docs=all_docs)
 
     # 8. 剧情范围
     plot_range_fixes = check_plot_range(workspace, docs)

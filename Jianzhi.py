@@ -1158,6 +1158,8 @@ class JianzhiAgent(BaseAgent):
                 forced_debts_approved = approved
             # 标记等待 chat() 清理上下文（不清 self.messages，避免 agent_loop 的 tool result 链断裂）
             self._review_pending = {"lint_result": lint_result, "forced_debts": forced_debts_approved}
+            # v5.4.2 fix：强制债务独立存储，供 finish_task 校验（_review_pending 会在 chat() 中被 del）
+            self._forced_debts_pending = forced_debts_approved
             self._stop_agent_loop = True
             return _review_workflow(self.workspace)
 
@@ -1210,6 +1212,8 @@ class JianzhiAgent(BaseAgent):
                             "message": f"DB 写入失败：{e}。缓存已保留，可重试。"
                         }, ensure_ascii=False)
             self.permission.reset()
+            # 清除强制债务标记
+            self._forced_debts_pending = []
             # 标记等待 chat() 清理上下文
             self._finish_pending = True
             self._stop_agent_loop = True
@@ -1545,9 +1549,7 @@ class JianzhiAgent(BaseAgent):
 
     def _check_forced_debt_resolved(self) -> list[str]:
         """检查强制债务是否已解决，返回未解决的 target 列表"""
-        forced_debts = []
-        if hasattr(self, '_review_pending') and self._review_pending:
-            forced_debts = self._review_pending.get("forced_debts", [])
+        forced_debts = getattr(self, '_forced_debts_pending', None) or []
         if not forced_debts:
             return []
 

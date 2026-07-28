@@ -770,7 +770,7 @@ class MuseWorkflow:
             prev_num = self.target_chapter - 1
             from tools.chapter import read_chapters
             prev_text = read_chapters(self.workspace, str(prev_num))
-            if prev_text.startswith("错误"):
+            if "（不存在）" in prev_text or prev_text.startswith("错误"):
                 print(f"错误：第 {prev_num} 章不存在，请先导入后再写第 {self.target_chapter} 章。")
                 import sys
                 sys.exit(1)
@@ -1265,8 +1265,8 @@ class MuseWorkflow:
                 level = issue.get("level", "?")
                 desc = issue.get("description", "")
                 sug = issue.get("suggestion", "")
-                prev_lines.append(f"①②③④⑤⑥⑦⑧⑨⑩"[idx] if idx <= 10 else f"{idx}.")
-                prev_lines[-1] = f"{'①②③④⑤⑥⑦⑧⑨⑩'[idx-1] if idx <= 10 else str(idx)} [{level}] {desc} → {sug}"
+                marker = "①②③④⑤⑥⑦⑧⑨⑩"[idx - 1] if idx <= 10 else f"{idx}."
+                prev_lines.append(f"{marker} [{level}] {desc} → {sug}")
             context_parts.append(
                 f"## 上轮审阅意见（共{len(review_session.previous_issues)}条）\n"
                 + "\n".join(prev_lines)
@@ -1297,7 +1297,7 @@ class MuseWorkflow:
         if self.target_chapter and self.target_chapter > 1:
             prev_num = self.target_chapter - 1
             text = read_chapters(self.workspace, str(prev_num))
-            if text.startswith("错误"):
+            if "（不存在）" in text or text.startswith("错误"):
                 return ""
             return text
     
@@ -1314,7 +1314,7 @@ class MuseWorkflow:
             return ""
         last_num = int(m.group(1))
         text = read_chapters(self.workspace, str(last_num))
-        if text.startswith("错误"):
+        if "（不存在）" in text or text.startswith("错误"):
             return ""
         return text
 
