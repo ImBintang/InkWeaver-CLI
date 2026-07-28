@@ -172,7 +172,7 @@ def get_workspace_name(workspace_path: Path) -> str:
 
 
 def list_latest_chapters(workspace_path: Path, n: int = 50) -> str:
-    """列出最新N章的章节号和标题
+    """列出最新N章的章节号和标题（v5.2：从 DB 读取）
 
     Args:
         workspace_path: 工作区路径
@@ -181,51 +181,45 @@ def list_latest_chapters(workspace_path: Path, n: int = 50) -> str:
     Returns:
         格式化的章节列表
     """
-    doc_dir = workspace_path / "document"
-    if not doc_dir.exists():
-        return "（尚无章节）"
+    from tools.editor import _get_proxy
+    db = _get_proxy(workspace_path)._db
+    all_chapters = db.chapter_list_all()
 
-    files = sorted(doc_dir.glob("c*.md"))
-    if not files:
+    if not all_chapters:
         return "（尚无章节）"
 
     # 取最新N章
-    latest = files[-n:] if n < len(files) else files
+    latest = all_chapters[-n:] if n < len(all_chapters) else all_chapters
 
     lines = []
-    for fp in latest:
-        text = fp.read_text(encoding="utf-8").strip()
-        title = text.splitlines()[0] if text else fp.stem
-        # 提取章节号
-        chapter_num = int(fp.stem.lstrip("c"))
-        lines.append(f"  第{chapter_num}章  {title}")
+    for ch in latest:
+        lines.append(f"  第{ch['chapter_num']}章  {ch['title']}")
 
-    total = len(files)
+    total = len(all_chapters)
     shown = len(lines)
     header = f"最新 {shown} 章（共 {total} 章）："
     return header + "\n" + "\n".join(lines)
 
 
 def export_novel(workspace_path: Path) -> str:
-    """将工作区所有章节合并导出为 txt 文件
+    """将工作区所有章节合并导出为 txt 文件（v5.2：从 DB 读取）
 
     Returns:
         成功/失败信息
     """
-    doc_dir = workspace_path / "document"
-    if not doc_dir.exists():
-        return "错误：工作区没有 document 目录"
+    from tools.editor import _get_proxy
+    db = _get_proxy(workspace_path)._db
+    all_chapters = db.chapter_list_all()
 
-    files = sorted(doc_dir.glob("c*.md"))
-    if not files:
+    if not all_chapters:
         return "错误：工作区尚无章节"
 
     # 合并内容
     parts = []
-    for fp in files:
-        text = fp.read_text(encoding="utf-8").strip()
-        if text:
-            parts.append(text)
+    for ch in all_chapters:
+        full = db.chapter_get(ch["chapter_num"])
+        if full and full.get("content"):
+            parts.append(f"{full['title']}\n{full['content']}")
 
     if not parts:
         return "错误：所有章节均为空"
@@ -235,4 +229,4 @@ def export_novel(workspace_path: Path) -> str:
     content = "\n\n".join(parts) + "\n"
     output_path.write_text(content, encoding="utf-8")
 
-    return f"已导出 {len(files)} 章到 {output_path.name}"
+    return f"已导出 {len(parts)} 章到 {output_path.name}"

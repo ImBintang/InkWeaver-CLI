@@ -44,9 +44,10 @@ def ask(
     if json_mode:
         # 从 Agent 的最后输出中提取答案
         answer = _extract_last_answer(jianzhi)
+        tools = _extract_tools_called(jianzhi)
         fmt.summary(
             answer=answer,
-            tools_called=getattr(jianzhi, '_tools_called_log', []),
+            tools_called=tools,
             tokens=token_data,
             elapsed=elapsed,
         )
@@ -56,8 +57,21 @@ def ask(
 
 def _extract_last_answer(jianzhi) -> str:
     """从 Agent 历史中提取最后一条 assistant 回复"""
-    history = getattr(jianzhi, 'history', [])
+    history = getattr(jianzhi, 'messages', [])
     for msg in reversed(history):
         if msg.get("role") == "assistant" and msg.get("content"):
             return msg["content"].strip()
     return ""
+
+
+def _extract_tools_called(jianzhi) -> list:
+    """从 Agent 消息历史中提取调用过的工具名"""
+    tools = []
+    history = getattr(jianzhi, 'messages', [])
+    for msg in history:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                name = tc.get("function", {}).get("name", "")
+                if name and name not in tools:
+                    tools.append(name)
+    return tools

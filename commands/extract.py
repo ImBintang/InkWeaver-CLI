@@ -54,9 +54,17 @@ def extract(
         token_data = None
         if tokens and (tokens.get("input", 0) > 0 or tokens.get("output", 0) > 0):
             token_data = {"input": tokens["input"], "output": tokens["output"], "total": tokens["total"]}
+        # 从消息历史提取工具调用
+        tools = []
+        for msg in getattr(jianzhi, 'messages', []):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    name = tc.get("function", {}).get("name", "")
+                    if name and name not in tools:
+                        tools.append(name)
         fmt.summary(
             answer=f"知识提取完成：第{start_ch}~{end_ch}章",
-            tools_called=getattr(jianzhi, '_tools_called_log', []),
+            tools_called=tools,
             tokens=token_data,
             elapsed=elapsed,
         )

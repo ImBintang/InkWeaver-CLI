@@ -37,23 +37,21 @@ def kb_list(
         for cat in cats:
             if category and cat["name"] != category:
                 continue
-            docs = proxy.list_docs("wiki", category=cat["name"])
-            for doc in docs:
-                lines.append(f"[wiki/{cat['name']}] {doc}")
+            mains = proxy._db.wiki_list_main(cat["id"])
+            for m in mains:
+                lines.append(f"[wiki/{cat['name']}] {m['name']}")
 
-    # plot 剧情卡片
-    if not type_filter or type_filter == "plot":
-        plots = proxy.list_docs("plot")
-        for p in plots:
-            lines.append(f"[plot] {p}")
+    # plot 剧情卡片（--category 过滤时跳过，plot 无类别概念）
+    if (not type_filter or type_filter == "plot") and not category:
+        mains = proxy._db.plot_list_main()
+        for m in mains:
+            lines.append(f"[plot] {m['name']}")
 
-    # rule 规则
-    if not type_filter or type_filter == "rule":
-        from tools.rules import rules_list
-        result = rules_list(ws)
-        if result and not result.startswith("（"):
-            for line in result.strip().splitlines():
-                lines.append(f"[rule] {line.strip()}")
+    # rule 规则（--category 过滤时跳过，rule 无类别概念）
+    if (not type_filter or type_filter == "rule") and not category:
+        mains = proxy._db.rule_list_main()
+        for m in mains:
+            lines.append(f"[rule] {m['name']}")
 
     if not lines:
         output = "（知识库为空）"

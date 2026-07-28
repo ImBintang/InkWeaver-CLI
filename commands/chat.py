@@ -109,9 +109,18 @@ def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
 
     elif command == "chapters":
         n = 50
-        if len(parts) > 1:
+        # 支持 /chapters 5 和 /chapters -n 5 两种格式
+        args = parts[1:]
+        if "-n" in args:
+            idx = args.index("-n")
+            if idx + 1 < len(args):
+                try:
+                    n = int(args[idx + 1])
+                except ValueError:
+                    pass
+        elif args:
             try:
-                n = int(parts[1])
+                n = int(args[0])
             except ValueError:
                 pass
         from tools import workspace as workspace_tools

@@ -100,10 +100,11 @@ class IOChannel:
         self._log("TOOL", f"{self._current_tool_line} -> {msg}")
 
     def print_plan(self, plan_summary: dict):
-        """格式化展示提取计划（复用旧逻辑）"""
+        """格式化展示提取计划（json 模式下静默）"""
+        if self.fmt.json_mode:
+            self._log("PLAN", str(plan_summary)[:2000])
+            return
         from cli import CLI
-        # 临时复用旧 CLI 的 print_plan 格式化
-        # TODO: 后续迁移到 OutputFormatter
         old_cli = CLI()
         old_cli.logger = self.session
         old_cli.print_plan(plan_summary)

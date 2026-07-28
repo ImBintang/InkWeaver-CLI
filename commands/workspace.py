@@ -1,5 +1,6 @@
 """workspace 子命令组 — 工作区管理"""
 
+import json
 import shutil
 import typer
 from pathlib import Path
@@ -50,7 +51,11 @@ def ws_switch(
 
     config.setdefault("workspace", {})["last"] = name
     save_config(config)
-    fmt.result(f"已切换到工作区「{name}」")
+    if json_mode:
+        print(json.dumps({"status": "success", "message": f"已切换到工作区「{name}」"},
+                         ensure_ascii=False))
+    else:
+        fmt.result(f"已切换到工作区「{name}」")
 
 
 @app.command("create")
@@ -70,7 +75,11 @@ def ws_create(
 
     config.setdefault("workspace", {})["last"] = name
     save_config(config)
-    fmt.result(f"已创建工作区「{name}」")
+    if json_mode:
+        print(json.dumps({"status": "success", "message": f"已创建工作区「{name}」"},
+                         ensure_ascii=False))
+    else:
+        fmt.result(f"已创建工作区「{name}」")
 
 
 @app.command("rename")
@@ -94,7 +103,11 @@ def ws_rename(
 
     config.setdefault("workspace", {})["last"] = name
     save_config(config)
-    fmt.result(f"已重命名为「{name}」")
+    if json_mode:
+        print(json.dumps({"status": "success", "message": f"已重命名为「{name}」"},
+                         ensure_ascii=False))
+    else:
+        fmt.result(f"已重命名为「{name}」")
 
 
 @app.command("delete")
@@ -124,7 +137,11 @@ def ws_delete(
         remaining = sorted([d for d in ws_dir.iterdir() if d.is_dir()])
         config.setdefault("workspace", {})["last"] = remaining[0].name if remaining else ""
         save_config(config)
-        fmt.result("已删除。")
+        if json_mode:
+            print(json.dumps({"status": "success", "message": "已删除"},
+                             ensure_ascii=False))
+        else:
+            fmt.result("已删除。")
     else:
         fmt.error("删除失败（文件可能被占用）")
         raise typer.Exit(1)
