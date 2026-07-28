@@ -27,8 +27,13 @@ from tools.polish import polish_draft
 
 @dataclass
 class ReviewSession:
-    """一次审阅会话的状态，由 report_issue/review_done 工具共享"""
+    """一次审阅会话的状态，由 report_issue/review_done 工具共享
+
+    v5.4: 新增 previous_issues 供增量审阅上下文注入。
+    """
     issues: list = field(default_factory=list)
+    previous_issues: list = field(default_factory=list)  # 上轮审阅意见
+    previous_score: int | None = None  # 上轮分数（仅供参考展示）
 
     def report_issue(self, level: int, quote: str, description: str, suggestion: str) -> str:
         """记录一条审阅问题"""
@@ -724,6 +729,7 @@ class MuseWorkflow:
         self.plot_summary: str = ""
         self.current_draft: str = ""
         self.issues: list = []  # 携带到下一轮的 issue 列表
+        self.change_log: list[str] = []  # v5.4: Writer 修改轮的变更日志
         self._token_stats = {}  # step_name -> {input, output, total}
         self._token_total = {"input": 0, "output": 0, "total": 0}
         self._io_channel = io  # v5.2: IOChannel 实例
@@ -1067,13 +1073,17 @@ class MuseWorkflow:
     MAX_WRITING_ROUNDS = 3  # 最大写作-审阅轮次
 
     def _step_writing_loop(self):
-        """③→④ 写作与审阅循环"""
+        """③→④ 写作与审阅循环
+
+        v5.4: R2+ Writer 使用手术刀编辑，审阅者收到 change_log + 上轮 issues。
+        """
         round_count = 0
+        previous_review_result: dict | None = None  # v5.4: 保存上轮审阅结果
         while True:
             round_count += 1
             # ③ 润色写作
             print("=" * 40)
-            print("第三步：润色写作")
+            print(f"第三步：润色写作（第 {round_count} 轮）")
             self.current_draft = self._run_writer()
             polished = polish_draft(self.current_draft)
             self.io.save_draft(polished)
@@ -1083,6 +1093,11 @@ class MuseWorkflow:
             # ④ 写作审阅
             print("正在进行写作审阅...")
             review_session = ReviewSession()
+
+            # v5.4: R2+ 注入上轮 issues 和分数（供分数保底逻辑）
+            if previous_review_result:
+                review_session.previous_issues = previous_review_result["issues"]
+                review_session.previous_score = previous_review_result["score"]
 
             # 自动字数检查：将字数问题注入审阅会话
             word_count_issues = self._check_word_count(polished)
@@ -1094,6 +1109,7 @@ class MuseWorkflow:
             print(f"  [自动字数检查] {lv}：正文共 {cn_count} 字")
 
             review_result = self._run_reviewer(polished, review_session)
+            previous_review_result = review_result  # v5.4: 保存本轮结果
 
             # 保存审阅意见到 review.md
             review_md_lines = [
@@ -1151,9 +1167,10 @@ class MuseWorkflow:
                 self.io.next_round()
 
     def _run_writer(self) -> str:
-        """运行 Writer 创作正文（纯 chat，无工具）
+        """运行 Writer 创作正文
 
-        首次写作使用 muse_writer，修改轮（有审阅意见时）使用 muse_writer_revise。
+        v5.4: R1 走 wf.run()（全文创作）；R2+ 走 wf.run_revise()（手术刀编辑）。
+        修改轮输出 edits JSON，后端 apply 到 draft 上，大幅减少 output token。
         """
         from tools.writing_workflow import WritingWorkflow
         from agent.skill import SkillRegistry
@@ -1174,33 +1191,49 @@ class MuseWorkflow:
 
         last_chapter = self._get_last_chapter_full()
 
-        # 如果是重写轮次（round > 1），传入上一轮草稿
-        previous_draft = self.current_draft if self.io.round > 1 else ""
-
         # v5.3: 注入 style 记忆
         from tools.memory import get_memories_for_prompt
         memory_block = get_memories_for_prompt(self.workspace, ["style"], limit=5)
 
-        result = wf.run(
-            outline=self.outline,
-            prior_knowledge=self.prior_knowledge,
-            plot_summary=self.plot_summary,
-            last_chapter=last_chapter,
-            review_issues=self.issues if self.issues else None,
-            previous_draft=previous_draft,
-            memory_block=memory_block,
-        )
-        self.io.save_session_log([{"role": "assistant", "content": result}])
-        step_name = f"writing_round_{self.io.round}"
-        self._update_token_stats_from_wf(step_name, wf)
-        self._save_token_stats()
-        return result
+        if is_revise and self.current_draft:
+            # v5.4: 手术刀修改轮 — 输出 edits JSON
+            new_draft, changes = wf.run_revise(
+                draft=self.current_draft,
+                review_issues=self.issues,
+                outline=self.outline,
+                last_chapter=last_chapter,
+                change_log=self.change_log if self.change_log else None,
+                memory_block=memory_block,
+            )
+            self.change_log = changes  # 保存变更日志供审阅者参考
+            self.io.save_session_log([{"role": "assistant", "content": new_draft}])
+            step_name = f"writing_round_{self.io.round}"
+            self._update_token_stats_from_wf(step_name, wf)
+            self._save_token_stats()
+            return new_draft
+        else:
+            # R1 或无草稿：全文创作模式
+            result = wf.run(
+                outline=self.outline,
+                prior_knowledge=self.prior_knowledge,
+                plot_summary=self.plot_summary,
+                last_chapter=last_chapter,
+                review_issues=self.issues if self.issues else None,
+                previous_draft="",
+                memory_block=memory_block,
+            )
+            self.change_log = []  # R1 无变更日志
+            self.io.save_session_log([{"role": "assistant", "content": result}])
+            step_name = f"writing_round_{self.io.round}"
+            self._update_token_stats_from_wf(step_name, wf)
+            self._save_token_stats()
+            return result
 
     def _run_reviewer(self, draft: str, review_session: ReviewSession) -> dict:
         """运行 Reviewer 审阅正文（仅 report_issue / review_done / agent_output 工具）
 
-        上下文只包含：上一章全文 → 大纲 → 正文
-        不包含先验知识和前情提要，避免总结性内容影响评审判断。
+        上下文：上一章全文 → 大纲 → 正文
+        v5.4 R2+：额外注入修改记录 + 上轮审阅意见（增量审阅模式）。
         """
         agent = self._create_restricted_agent(
             skill_names=["muse_reviewer.skill.md"],
@@ -1218,6 +1251,26 @@ class MuseWorkflow:
             context_parts.append(f"## 上一章全文\n{last_chapter}")
         context_parts.append(f"## 大纲/草稿\n{self.outline}")
         context_parts.append(f"## 正文\n{draft}")
+
+        # v5.4: R2+ 注入修改记录和上轮审阅意见（触发增量审阅模式）
+        if review_session.previous_issues:
+            # 修改记录（本轮 Writer 变更）
+            if self.change_log:
+                change_lines = "\n".join(f"- {c}" for c in self.change_log)
+                context_parts.append(f"## 修改记录（本轮 Writer 变更）\n{change_lines}")
+
+            # 上轮审阅意见
+            prev_lines = []
+            for idx, issue in enumerate(review_session.previous_issues, 1):
+                level = issue.get("level", "?")
+                desc = issue.get("description", "")
+                sug = issue.get("suggestion", "")
+                prev_lines.append(f"①②③④⑤⑥⑦⑧⑨⑩"[idx] if idx <= 10 else f"{idx}.")
+                prev_lines[-1] = f"{'①②③④⑤⑥⑦⑧⑨⑩'[idx-1] if idx <= 10 else str(idx)} [{level}] {desc} → {sug}"
+            context_parts.append(
+                f"## 上轮审阅意见（共{len(review_session.previous_issues)}条）\n"
+                + "\n".join(prev_lines)
+            )
 
         # v5.3: 审阅注入 style + correction 记忆
         from tools.memory import get_memories_for_prompt

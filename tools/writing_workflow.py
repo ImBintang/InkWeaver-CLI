@@ -2,8 +2,11 @@
 
 由 MuseWorkflow 直接调用，不经过 MuseAgent。
 上下文顺序：上一章全文 → 大纲 → 先验知识 → 前情提要 → 审阅意见
+
+v5.4: 新增 run_revise() — 手术刀式修改轮，输出 edits JSON 而非全文。
 """
 
+import json
 from pathlib import Path
 
 from api import LLMClient
@@ -112,3 +115,99 @@ class WritingWorkflow:
         result = response.get("content", "").strip()
         self._log("WRITING_WF_END", result[:200])
         return result
+
+    def run_revise(self, draft: str, review_issues: list,
+                   outline: str = "", last_chapter: str = "",
+                   change_log: list[str] | None = None,
+                   memory_block: str = "") -> tuple[str, list[str]]:
+        """执行手术刀式修改轮（v5.4）
+
+        LLM 输出 edits JSON，后端 apply 到 draft 上。
+        如果 LLM 输出纯文本（fallback），则视为全文重写。
+
+        Args:
+            draft: 当前草稿全文
+            review_issues: 审阅意见列表
+            outline: 大纲（供参考）
+            last_chapter: 上一章全文（供参考衍接）
+            change_log: 上轮变更日志
+            memory_block: 记忆注入
+
+        Returns:
+            (new_draft, change_log)
+        """
+        from tools.muse_edits import apply_writer_edits, parse_edits_response
+
+        # 组装上下文
+        sections = []
+        if last_chapter:
+            sections.append(f"## 上一章全文\n{last_chapter}")
+        if outline:
+            sections.append(f"## 大纲/草稿\n{outline}")
+        sections.append(f"## 上一轮草稿（需根据审阅意见修改）\n{draft}")
+
+        # 审阅意见
+        if review_issues:
+            issues_lines = []
+            for i in review_issues:
+                level = i.get('level', '用户')
+                desc = i['description']
+                sug = i.get('suggestion', '')
+                if sug:
+                    issues_lines.append(f"- [{level}] {desc}\n  → 建议：{sug}")
+                else:
+                    issues_lines.append(f"- [{level}] {desc}")
+            sections.append("## 审阅意见\n" + "\n".join(issues_lines))
+
+        # 上轮变更记录
+        if change_log:
+            sections.append("## 上轮修改记录\n" + "\n".join(f"- {c}" for c in change_log))
+
+        # 记忆注入
+        if memory_block:
+            sections.append(memory_block)
+
+        context = "\n\n".join(sections)
+
+        # 使用修改轮 skill
+        if self.writer_skill_text:
+            system_prompt = (
+                "你是妙笔（Muse），一个专业的长篇小说修改专家。\n"
+                "你的任务是精确修正草稿中的问题，而非重写全文。\n"
+                "\n"
+                "# Skill 指令\n"
+                f"{self.writer_skill_text}"
+            )
+        else:
+            system_prompt = (
+                "你是妙笔（Muse），一个专业的长篇小说修改专家。\n"
+                "输出格式必须是 JSON：{\"edits\": [...], \"notes\": \"...\"}\n"
+                "工具：replace_text / delete_text / rewrite_paragraph\n"
+                "只改有问题的地方，不要输出全文。"
+            )
+
+        messages = [{"role": "user", "content": context}]
+        response = self.llm.chat(
+            messages=messages,
+            system_prompt=system_prompt,
+            tools=None,
+        )
+
+        if "usage" in response:
+            self._last_usage = response["usage"]
+
+        raw_output = response.get("content", "").strip()
+        self._log("REVISE_WF_END", raw_output[:200])
+
+        # 解析 LLM 输出
+        edits, mode = parse_edits_response(raw_output)
+
+        if mode == "edits" and edits:
+            # 手术刀模式：应用编辑指令
+            new_draft, changes = apply_writer_edits(draft, edits)
+            return new_draft, changes
+        else:
+            # Fallback：LLM 输出了全文（旧模式兼容）
+            # 简单生成 change_log
+            changes = ["[全文重写] LLM 未输出 edits JSON，回退到全文模式"]
+            return raw_output, changes

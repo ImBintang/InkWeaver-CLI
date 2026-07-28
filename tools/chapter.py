@@ -142,6 +142,9 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
 def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> str:
     """分章节统计关键词词频（从 DB）
 
+    v5.4：接入 name_utils.expand_keywords，同词条多名称统一统计。
+    例如词条「叶寒（寒叔）」，搜索"寒叔"时会合并"叶寒"的词频。
+
     Args:
         chapters: 范围表达式
         keywords: 关键词列表 ["主角", "系统"]
@@ -157,7 +160,15 @@ def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> s
     rows = db.chapter_get_range(nums)
     found = {r["chapter_num"]: r for r in rows}
 
-    patterns = {kw: re.compile(re.escape(kw), re.IGNORECASE) for kw in keywords}
+    # v5.4: 别名扩展 — 将关键词扩展为含变体的搜索集
+    from tools.name_utils import expand_keywords
+    expanded = expand_keywords(workspace_path, keywords)
+
+    # 为每个原始关键词构建所有变体的正则
+    kw_patterns: dict[str, list[tuple[str, re.Pattern]]] = {}
+    for kw in keywords:
+        variants = expanded.get(kw, [kw])
+        kw_patterns[kw] = [(v, re.compile(re.escape(v), re.IGNORECASE)) for v in variants]
 
     result_lines = []
     for num in nums:
@@ -170,8 +181,24 @@ def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> s
         body = row["content"]
         counts = []
         for kw in keywords:
-            count = len(patterns[kw].findall(body))
-            counts.append(f'  "{kw}": {count}')
+            variants = kw_patterns[kw]
+            if len(variants) == 1:
+                # 无扩展，直接统计
+                count = len(variants[0][1].findall(body))
+                counts.append(f'  "{kw}": {count}')
+            else:
+                # 多名称合并统计
+                total = 0
+                detail_parts = []
+                for variant_name, pattern in variants:
+                    c = len(pattern.findall(body))
+                    total += c
+                    if c > 0:
+                        detail_parts.append(f"{variant_name}={c}")
+                # 输出合并结果 + 标注
+                other_names = [v for v, _ in variants if v != kw]
+                annotation = f'(含"{"、".join(other_names)}")' if other_names else ""
+                counts.append(f'  "{kw}"{annotation}: {total}')
         result_lines.append(f"{label}:\n" + "\n".join(counts))
 
     return "\n\n".join(result_lines)

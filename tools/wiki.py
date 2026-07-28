@@ -174,19 +174,25 @@ def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20
 def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: str = None) -> str:
     """检查 wiki 词条在指定章节或文本中是否出现
 
-    用法一：check_wiki(name="张三", chapters="1-5") — 查词条在章节中
-    用法二：check_wiki(text="张三走进大殿") — 查文本包含哪些实体
+    v5.4：接入 name_utils 别名扩展，同词条多名称统一匹配。
+    - name 模式：通过 resolve_name 解析规范名，用所有变体做子串匹配
+    - text 模式：遍历词条时用 get_search_names 的所有变体做匹配
+
+    用法一：check_wiki(name="寒叔", chapters="1-5") — 查词条在章节中（别名自动解析）
+    用法二：check_wiki(text="叶寒走进大殿") — 查文本包含哪些实体
 
     Args:
-        name: 词条名（与 chapters 配合使用）
+        name: 词条名（与 chapters 配合使用，支持别名）
         chapters: 章节范围表达式
         text: 任意文本，自动匹配其中包含的实体名
 
     Returns:
         检查结果
     """
+    from tools.name_utils import get_search_names, resolve_name
+
     if text:
-        # 文本匹配模式：遍历所有 wiki 词条，看名称是否在 text 中出现（v5：从 DB 读取）
+        # 文本匹配模式：遍历所有 wiki 词条，用所有名称变体做子串匹配
         from tools.editor import _get_proxy
         proxy = _get_proxy(workspace)
         cats = proxy.list_categories()
@@ -197,8 +203,12 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
         for cat in cats:
             mains = proxy._db.wiki_list_main(cat["id"])
             for m in mains:
-                if m["name"] in text:
-                    matches.append(f"[{cat['name']}] {m['name']}")
+                # v5.4: 用所有名称变体做匹配
+                variants = get_search_names(m["name"])
+                for variant in variants:
+                    if variant in text:
+                        matches.append(f"[{cat['name']}] {m['name']}")
+                        break  # 命中一个变体即可
 
         if not matches:
             return "未在文本中匹配到已知实体。"
@@ -207,6 +217,16 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
     # 原有逻辑：查词条在章节中是否出现
     if not name or not chapters:
         return "错误：请提供 name+chapters（查章节匹配）或 text（查文本匹配）"
+
+    # v5.4: 解析别名 → 规范名 → 搜索变体集
+    canonical = resolve_name(workspace, name)
+    if canonical:
+        search_names = get_search_names(canonical)
+        display_name = canonical
+    else:
+        # 未在 DB 中找到，直接用原始名
+        search_names = [name]
+        display_name = name
 
     from tools.chapter import read_chapters, parse_chapter_spec
     chapter_text = read_chapters(workspace, chapters)
@@ -217,13 +237,15 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
     found = []
     for num in nums:
         chapter_text = read_chapters(workspace, str(num))
-        if name in chapter_text:
+        # 任一名称变体命中即算出现
+        if any(variant in chapter_text for variant in search_names):
             found.append(num)
 
     if found:
-        return f"词条「{name}」出现在第 {found} 章"
+        alias_note = f"（匹配名称：{'、'.join(search_names)}）" if len(search_names) > 1 else ""
+        return f"词条「{display_name}」出现在第 {found} 章{alias_note}"
     else:
-        return f"词条「{name}」未出现在指定章节中"
+        return f"词条「{display_name}」未出现在指定章节中"
 
 
 def check_wiki_yaml(workspace: Path, category: str = "",
