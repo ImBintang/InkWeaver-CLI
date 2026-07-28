@@ -1,6 +1,5 @@
-"""文档差异对比工具：检测新增/修改的章节"""
+"""文档差异对比工具（v5.1 已废弃 doc_diff，改用 chapter_list + DB）"""
 
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -29,105 +28,18 @@ def _save_log(workspace: Path, log: dict):
         json.dump(log, f, ensure_ascii=False, indent=2)
 
 
-def _md5(text: str) -> str:
-    """计算字符串的 MD5"""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
-def _is_covered_by_ranges(filename: str, ranges: list[str]) -> bool:
-    """检查文件名（如 c005.md）是否被某个章节区间覆盖"""
-    from tools.chapter import parse_chapter_spec
-    m = re.match(r"c?0*(\d+)\.md", filename)
-    if not m:
-        return False
-    num = int(m.group(1))
-    for r in ranges:
-        nums = parse_chapter_spec(r)
-        if num in nums:
-            return True
-    return False
-
-
 def doc_diff(workspace: Path) -> str:
-    """对比哈希，了解文档变更（新增/修改的章节）
+    """[DEPRECATED] 对比哈希，了解文档变更。v5.1 已改用 chapter_list 替代。
 
-    Returns:
-        变更摘要
+    现在直接返回 chapter_list 的结果（含 [已处理]/[未处理] 标记）。
     """
-    doc_dir = workspace / "document"
-    if not doc_dir.exists() or not list(doc_dir.glob("*.md")):
-        return "（document 目录不存在或无章节文件）"
-
-    log = _ensure_log(workspace)
-    old_files = log.get("files", {})
-
-    current_files = {}
-    for fp in sorted(doc_dir.glob("c*.md")):
-        content = fp.read_text(encoding="utf-8")
-        current_files[fp.name] = _md5(content)
-
-    new_files = []
-    modified_files = []
-    deleted_files = []
-
-    for name, md5 in current_files.items():
-        if name not in old_files:
-            new_files.append(name)
-        elif old_files[name] != md5:
-            modified_files.append(name)
-
-    for name in old_files:
-        if name not in current_files:
-            deleted_files.append(name)
-
-    # 过滤已处理的章节
-    processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
-    if processed_ranges:
-        new_files = [f for f in new_files if not _is_covered_by_ranges(f, processed_ranges)]
-        modified_files = [f for f in modified_files if not _is_covered_by_ranges(f, processed_ranges)]
-
-    # 更新 log.json 中的文件记录
-    log["files"] = current_files
-    _save_log(workspace, log)
-
-    if not new_files and not modified_files and not deleted_files:
-        return "（无变更）"
-
-    lines = ["文档变更："]
-    if new_files:
-        lines.append(f"  新增（{len(new_files)} 个）：{', '.join(new_files)}")
-    if modified_files:
-        lines.append(f"  修改（{len(modified_files)} 个）：{', '.join(modified_files)}")
-    if deleted_files:
-        lines.append(f"  删除（{len(deleted_files)} 个）：{', '.join(deleted_files)}")
-
-    return "\n".join(lines)
+    from tools.chapter import chapter_list
+    return chapter_list(workspace)
 
 
 def get_changed_chapters(workspace: Path) -> list:
-    """获取变更的章节文件名列表（供程序调用）"""
-    doc_dir = workspace / "document"
-    if not doc_dir.exists():
-        return []
-
-    log = _ensure_log(workspace)
-    old_files = log.get("files", {})
-
-    current_files = {}
-    for fp in sorted(doc_dir.glob("c*.md")):
-        content = fp.read_text(encoding="utf-8")
-        current_files[fp.name] = _md5(content)
-
-    changed = []
-    for name, md5 in current_files.items():
-        if name not in old_files or old_files[name] != md5:
-            changed.append(name)
-
-    # 更新 log
-    log["files"] = current_files
-    _save_log(workspace, log)
-
-    return changed
+    """[DEPRECATED] 获取变更的章节文件名列表。v5.1 已改用 DB。"""
+    return []
 
 
 def record_extraction(workspace: Path, chapters: list, new_entries: list, updated_entries: list):
@@ -145,31 +57,34 @@ def record_extraction(workspace: Path, chapters: list, new_entries: list, update
 
 
 def get_unprocessed_chapters(workspace: Path, limit: int = 10) -> list[int]:
-    """获取未处理的章节号列表（从小到大排序），至多 limit 个"""
-    doc_dir = workspace / "document"
-    if not doc_dir.exists():
+    """获取未处理的章节号列表（从小到大排序），至多 limit 个
+
+    v5.1：从 DB chapters 表 + log.json processed.chapter_ranges 计算。
+    """
+    from tools.db.service import SQLiteService
+    from tools.chapter import parse_chapter_spec
+
+    db_path = workspace / "wiki.db"
+    if not db_path.exists():
         return []
 
+    db = SQLiteService(db_path)
+    all_chapters = db.chapter_list_all()  # [{"num": 1, "title": "..."}]
+    if not all_chapters:
+        db.close()
+        return []
+
+    # 从 log.json 获取已处理范围
     log = _ensure_log(workspace)
-    old_files = log.get("files", {})
     processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
+    processed_nums = set()
+    for r in processed_ranges:
+        processed_nums.update(parse_chapter_spec(r))
 
-    unprocessed = set()
-    for fp in sorted(doc_dir.glob("c*.md")):
-        name = fp.name
-        m = re.match(r"c?0*(\d+)\.md", name)
-        if not m:
-            continue
-        num = int(m.group(1))
-        # 全新文件或已修改但未处理的文件
-        if name not in old_files:
-            if not processed_ranges or not _is_covered_by_ranges(name, processed_ranges):
-                unprocessed.add(num)
-        elif processed_ranges and not _is_covered_by_ranges(name, processed_ranges):
-            unprocessed.add(num)
-
-    result = sorted(unprocessed)
-    return result[:limit]
+    # 过滤未处理的
+    unprocessed = [ch["chapter_num"] for ch in all_chapters if ch["chapter_num"] not in processed_nums]
+    db.close()
+    return sorted(unprocessed)[:limit]
 
 
 def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,

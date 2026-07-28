@@ -162,7 +162,7 @@ _HELP_TEXT = """可用指令：
 
   知识管理：
     /update               触发知识提取
-    /diff                 查看新增/修改的章节
+    /diff                 查看章节列表（含处理状态）
     /memory               查看记忆索引
     /memory -n <name>     查看指定记忆文档
     /list -n <name>       查看指定类别的 wiki 列表
@@ -327,17 +327,17 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        # 检查是否已有章节
-        doc_dir = jianzhi.workspace / "document"
-        existing = sorted(doc_dir.glob("c*.md")) if doc_dir.exists() else []
-        if existing:
-            cli.print_info("工作区已有章节，确认删除后重新导入？(y/N)")
+        # 检查是否已有章节（v5.1：从 DB 查询）
+        from tools.editor import _get_proxy
+        db = _get_proxy(jianzhi.workspace)._db
+        existing_count = db.chapter_count()
+        if existing_count > 0:
+            cli.print_info(f"工作区已有 {existing_count} 章，确认删除后重新导入？(y/N)")
             confirm = input().strip().lower()
             if confirm != "y":
                 cli.print_info("已取消导入。")
                 return True, jianzhi
-            for f in existing:
-                f.unlink()
+            db.chapter_delete_all()
         result = workspace_tools.import_novel(jianzhi.workspace, path)
         cli.print_info(result)
 
@@ -472,8 +472,8 @@ def handle_command(cmd: str, cli: CLI, jianzhi: JianzhiAgent | None, config: dic
         if jianzhi is None:
             cli.print_info("请先进入一个工作区")
             return True, jianzhi
-        from tools.diff import doc_diff
-        cli.print_info(doc_diff(jianzhi.workspace))
+        from tools.chapter import chapter_list
+        cli.print_info(chapter_list(jianzhi.workspace))
 
     elif command == "memory":
         if jianzhi is None:

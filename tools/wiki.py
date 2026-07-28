@@ -120,19 +120,24 @@ def delete_wiki(workspace: Path, category: str, name: str) -> str:
     return _delete_doc(workspace, doc_type="wiki", name=name, category=category)
 
 
-def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True) -> str:
+def read_wiki(workspace: Path, category: str, name: str, yaml_only: bool = True,
+             version: int = None) -> str:
     """读取 wiki 文档（v5：调 proxy）
 
     Args:
         category: 类别名
         name: 词条名
         yaml_only: True 只返回 frontmatter，False 返回全文
+        version: 可选，指定版本的 updated_chapter。为空时读取 current_version。
 
     Returns:
         文档全文（含 frontmatter）或错误消息
     """
     from tools.editor import _get_proxy
     proxy = _get_proxy(workspace)
+
+    if version is not None:
+        return proxy.read_doc_version("wiki", name, version, yaml_only=yaml_only)
     return proxy.read_doc("wiki", name, category=category, yaml_only=yaml_only)
 
 

@@ -229,11 +229,10 @@ PERSIST_ALWAYS = {
     "new_wiki", "edit_wiki", "batch_create_wiki", "batch_edit_wiki",
     "new_rule", "edit_rule", "new_plot", "edit_plot",
     "create_doc", "edit_doc", "edit_doc_text",
-    "lint_report",
 }
 
 # 读取类工具的结果必须完整保留，不能被 PersistCache 吞掉
-PERSIST_NEVER = {"read_chapters", "read_wiki", "read_plot"}
+PERSIST_NEVER = {"read_chapters", "read_wiki", "read_plot", "lint_report"}
 
 
 class PersistCache:

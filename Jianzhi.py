@@ -28,7 +28,13 @@ DEBT_FILE = "lint-debt.json"
 
 
 def _read_lint_report(workspace: Path) -> str:
-    """读取 lint-debt.json 返回完整债务报告"""
+    """重新运行 lint 检查（刷新 lint-debt.json）并返回完整债务报告"""
+    # 先重跑 lint 以反映当前缓存/DB 的最新状态
+    try:
+        from tools.lint import run_lint
+        run_lint(workspace)
+    except Exception:
+        pass  # 即使 run_lint 失败，仍尝试读取旧报告
     fp = workspace / DEBT_FILE
     if not fp.exists():
         return "（lint 报告不存在，请先运行 lint 检查）"
@@ -131,7 +137,7 @@ class JianzhiAgent(BaseAgent):
             "- 使用 rules_list 查看规则文档列表",
             "- 使用 read_rule <规则名> 读取规则文档",
             "- 使用 read_memory 读取记忆索引/<name> 读取指定记忆",
-            "- 使用 doc_diff 查看新增/修改的章节",
+            "- 使用 chapter_list 查看章节列表（含 [已处理]/[未处理] 标记）",
             "- 使用 context_query 查询当前上下文中已引用的 wiki/规则/剧情卡片列表",
             "",
             "### 知识库优先 RAG 原则（重要）",
@@ -159,6 +165,13 @@ class JianzhiAgent(BaseAgent):
             "- 请先阅读章节和已有知识库，制定提取计划",
             "- 通过 submit_plan 提交计划，等待用户审阅",
             "",
+            "### 重新提取模式（re-extract）",
+            "当用户要求「重新提取 X-Y 章」「重新更新某几个章节的知识」时，使用重新提取模式：",
+            "- 规划阶段：自由读取所有版本（read_wiki(version=N) 可查看历史版本）",
+            "- submit_plan 时传 mode: \"re-extract\" + scope",
+            "- 执行阶段：系统自动加载基础版本（≤ scope 最大章节的最近版本），无需手动指定",
+            "- flush 时系统自动决定插入新版本或覆盖同章节版本",
+            "",
             "### 🔴 计划提交强制规则（重要）",
             "当你完成分析、准备好知识提取计划后，**必须**调用 submit_plan 工具提交计划（传入 plan_json 字符串），",
             "**禁止**将计划内容以文本形式直接输出。",
@@ -169,6 +182,20 @@ class JianzhiAgent(BaseAgent):
             "- 白名单外的写操作会被拦截",
             "- 使用 batch_create_wiki / batch_edit_wiki 批量操作",
             "- 完成后调用 review_workflow 进入审核",
+            "",
+            "### ✍️ 写作质量要求（执行阶段必须遵守）",
+            "**先调用 read_index(类别名) 获取该类别的 writing_guide，按规范结构撰写正文。**",
+            "| 字段 | 最低要求 | 说明 |",
+            "|------|---------|------|",
+            "| description | 30-80字 | 一句话概括词条核心身份，禁止只写名字或职位 |",
+            "| state | 20-100字 | 当前状态快照（境界/位置/关系/动态），state_required 类别必填 |",
+            "| content | ≥300字 | 按类别 writing_guide 分段撰写，使用 [[wikilink]] 交叉引用 |",
+            "",
+            "**禁止行为**：",
+            "- ❌ description 只写「叶家少主」「赤云城家族」等 ≤15字的标签式描述",
+            "- ❌ state 只写「肉仙五重」「存在」等 ≤10字的片段",
+            "- ❌ content 不参考 writing_guide 结构，只写 2-3 句流水账",
+            "- ❌ 跳过 read_index 直接凭记忆写作",
             "",
             "### Review 审核模式（review_workflow）",
             "- 进入后上下文清空，只能读取计划内的章节/wiki/plot",
@@ -322,13 +349,14 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "read_wiki",
-                    "description": "读取指定 wiki 词条。默认只返回 frontmatter（yaml_only=true），设置 yaml_only=false 可查看全文。先查 category_list 得到类别名再调用。",
+                    "description": "读取指定 wiki 词条。默认只返回 frontmatter（yaml_only=true），设置 yaml_only=false 可查看全文。先查 category_list 得到类别名再调用。可选传 version 参数读取历史版本。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
                             "name": {"type": "string", "description": "词条名"},
                             "yaml_only": {"type": "boolean", "description": "是否只返回 frontmatter（默认 true，false 返回全文）"},
+                            "version": {"type": "integer", "description": "可选，指定版本的 updated_chapter 值。不传则读取当前版本。"},
                         },
                         "required": ["category", "name"],
                     },
@@ -367,12 +395,13 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "read_plot",
-                    "description": "读取指定剧情卡片。yaml_only=true 只返回 frontmatter。",
+                    "description": "读取指定剧情卡片。yaml_only=true 只返回 frontmatter。可选传 version 参数读取历史版本。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "剧情卡片名"},
                             "yaml_only": {"type": "boolean", "description": "是否只读 frontmatter（默认 true）"},
+                            "version": {"type": "integer", "description": "可选，指定版本的 updated_chapter 值。不传则读取当前版本。"},
                         },
                         "required": ["name"],
                     },
@@ -432,7 +461,7 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "doc_diff",
-                    "description": "对比文档哈希，查看新增/修改的章节",
+                    "description": "[DEPRECATED] 已废弃，请使用 chapter_list 替代。查看章节列表（含处理状态）。",
                     "parameters": {"type": "object", "properties": {}},
                 },
             },
@@ -471,13 +500,13 @@ class JianzhiAgent(BaseAgent):
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
                             "name": {"type": "string", "description": "词条名"},
-                            "content": {"type": "string", "description": "正文内容"},
-                            "description": {"type": "string", "description": "描述"},
-                            "state": {"type": "string", "description": "状态"},
+                            "content": {"type": "string", "description": "正文内容（按类别 writing_guide 结构撰写，≥300字，使用 [[wikilink]] 交叉引用）"},
+                            "description": {"type": "string", "description": "一句话概括词条核心身份（30-80字，如：叶家少主，丹田被废后获寒叔传承走上重修之路）"},
+                            "state": {"type": "string", "description": "当前状态快照（20-100字，如：肉仙五重，隐居叶家修炼铁打功，与秦家退婚事件后关系紧张）"},
                             "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
                         },
-                        "required": ["category", "name", "content"],
+                        "required": ["category", "name", "content", "description"],
                     },
                 },
             },
@@ -491,9 +520,9 @@ class JianzhiAgent(BaseAgent):
                         "properties": {
                             "category": {"type": "string", "description": "类别名"},
                             "name": {"type": "string", "description": "词条名"},
-                            "content": {"type": "string", "description": "新正文"},
-                            "description": {"type": "string", "description": "新描述"},
-                            "state": {"type": "string", "description": "新状态"},
+                            "content": {"type": "string", "description": "新正文（保持 ≥300字，按类别 writing_guide 结构）"},
+                            "description": {"type": "string", "description": "新描述（30-80字，概括核心身份）"},
+                            "state": {"type": "string", "description": "新状态（20-100字，当前快照）"},
                             "keywords": {"type": "string", "description": "新关键词（逗号分隔）"},
                             "tags": {"type": "array", "items": {"type": "string"}, "description": "新标签"},
                         },
@@ -566,7 +595,7 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "new_plot",
-                    "description": "新建剧情卡片。",
+                    "description": "新建剧情卡片。keywords 为必填项，用于后续检索与写作参考。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -575,9 +604,9 @@ class JianzhiAgent(BaseAgent):
                             "chapters": {"type": "string", "description": "覆盖章节范围，如 \"1-5,7-10\""},
                             "description": {"type": "string", "description": "描述"},
                             "state": {"type": "string", "description": "状态"},
-                            "keywords": {"type": "string", "description": "关键词（逗号分隔）"},
+                            "keywords": {"type": "string", "description": "关键词（逗号分隔，必填，如：叶匀,狼山,突破）"},
                         },
-                        "required": ["name", "content", "chapters"],
+                        "required": ["name", "content", "chapters", "keywords"],
                     },
                 },
             },
@@ -604,13 +633,14 @@ class JianzhiAgent(BaseAgent):
                 "type": "function",
                 "function": {
                     "name": "end_plot",
-                    "description": "结束剧情卡片（设置 ended=true）。",
+                    "description": "结束剧情卡片（设置 ended=true），并记录收尾语。",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "剧情卡片名"},
+                            "end_notes": {"type": "string", "description": "收尾语（简述该剧情线如何完结，如：叶匀击败狼王后离开狼山）"},
                         },
-                        "required": ["name"],
+                        "required": ["name", "end_notes"],
                     },
                 },
             },
@@ -806,8 +836,9 @@ class JianzhiAgent(BaseAgent):
                 "description": "提交知识提取/修改计划。调用后 Agent 暂停，用户审阅计划。"
                                 "计划通过后写权限开放，白名单外的写操作会被拦截。"
                                 "单次提取不得超过 20 章。若用户未指定，默认 10 章。"
-                                "计划 JSON 包括：scope（提取范围）, new_category, new_wiki, "
-                                "edit_wiki, new_rule, edit_rule, new_plot, edit_plot。"
+                                "计划 JSON 包括：scope（提取范围）, mode（可选，\"extract\" 或 \"re-extract\"）, "
+                                "new_category, new_wiki, edit_wiki, new_rule, edit_rule, new_plot, edit_plot。"
+                                "重新提取时 mode=\"re-extract\"，系统自动加载基础版本。"
                                 "每项字段说明："
                                 "new_wiki/edit_wiki 每项需含 category（类别）, name（词条名）, chapters（章节号）, reason（理由）；"
                                 "new_rule/edit_rule 每项需含 name（规则名）, reason（规则说明）；"
@@ -842,13 +873,13 @@ class JianzhiAgent(BaseAgent):
                                 "properties": {
                                     "category": {"type": "string", "description": "类别名"},
                                     "name": {"type": "string", "description": "词条名"},
-                                    "content": {"type": "string", "description": "正文内容"},
-                                    "description": {"type": "string", "description": "描述（可选）"},
-                                    "state": {"type": "string", "description": "状态（可选）"},
-                                    "keywords": {"type": "string", "description": "关键词，逗号分隔（可选）"},
+                                    "content": {"type": "string", "description": "正文内容（按类别 writing_guide 结构撰写，≥300字，使用 [[wikilink]] 交叉引用）"},
+                                    "description": {"type": "string", "description": "一句话概括核心身份（30-80字）"},
+                                    "state": {"type": "string", "description": "当前状态快照（20-100字，state_required 类别必填）"},
+                                    "keywords": {"type": "string", "description": "关键词，逗号分隔"},
                                     "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
                                 },
-                                "required": ["category", "name", "content"],
+                                "required": ["category", "name", "content", "description"],
                             },
                         }
                     },
@@ -874,10 +905,10 @@ class JianzhiAgent(BaseAgent):
                                 "properties": {
                                     "category": {"type": "string", "description": "类别名"},
                                     "name": {"type": "string", "description": "词条名"},
-                                    "content": {"type": "string", "description": "正文内容（可选）"},
-                                    "description": {"type": "string", "description": "描述（可选）"},
-                                    "state": {"type": "string", "description": "状态（可选）"},
-                                    "keywords": {"type": "string", "description": "关键词，逗号分隔（可选）"},
+                                    "content": {"type": "string", "description": "正文内容（保持 ≥300字，按类别 writing_guide 结构）"},
+                                    "description": {"type": "string", "description": "描述（30-80字，概括核心身份）"},
+                                    "state": {"type": "string", "description": "状态（20-100字，当前快照）"},
+                                    "keywords": {"type": "string", "description": "关键词，逗号分隔"},
                                     "tags": {"type": "array", "items": {"type": "string"}, "description": "标签（可选）"},
                                 },
                                 "required": ["category", "name"],
@@ -993,7 +1024,14 @@ class JianzhiAgent(BaseAgent):
                             }, ensure_ascii=False)
                         return json.dumps({
                             "status": "approved",
-                            "message": "计划已通过，写权限已开放，可以开始执行。"
+                            "message": "计划已通过，写权限已开放，可以开始执行。",
+                            "writing_reminder": (
+                                "写作质量要求："
+                                "1) 先调用 read_index(类别名) 获取 writing_guide；"
+                                "2) description 30-80字概括核心身份；"
+                                "3) state 20-100字当前状态快照（state_required类别必填）；"
+                                "4) content ≥300字，按 writing_guide 结构分段，使用[[wikilink]]交叉引用。"
+                            )
                         }, ensure_ascii=False)
                 else:
                     self.cli.print_info("请输入打回理由：")
@@ -1016,10 +1054,17 @@ class JianzhiAgent(BaseAgent):
                 snapshot_dir.mkdir(parents=True, exist_ok=True)
                 snapshot_path = snapshot_dir / "cache_snapshot.json"
                 self._proxy.snapshot(snapshot_path)
-            # 自动运行 lint
+            # 自动运行 lint（任务内：只检查白名单内文档）
             try:
                 from tools.lint import run_lint
-                lint_result = run_lint(self.workspace)
+                lint_whitelist = None
+                if hasattr(self, '_proxy') and self._proxy is not None and self._proxy.is_cache_loaded():
+                    lint_whitelist = [
+                        (doc.doc_type, doc.name)
+                        for (_, _), doc in self._proxy._cache.items()
+                        if not doc.is_deleted
+                    ]
+                lint_result = run_lint(self.workspace, whitelist=lint_whitelist)
             except Exception:
                 lint_result = "（lint 检查异常）"
             # 标记等待 chat() 清理上下文（不清 self.messages，避免 agent_loop 的 tool result 链断裂）
@@ -1081,10 +1126,10 @@ class JianzhiAgent(BaseAgent):
             # Wiki 只读工具
             "category_list": lambda **kw: category_tools.category_list(self.workspace),
             "wiki_list": lambda **kw: wiki_tools.wiki_list(self.workspace, **kw),
-            "read_wiki": lambda **kw: wiki_tools.read_wiki(self.workspace, **kw),
+            "read_wiki": self._handle_read_wiki,
             "check_wiki": lambda **kw: wiki_tools.check_wiki(self.workspace, **kw),
             "query_relations": lambda **kw: relation_tools.query_relations(self.workspace, **kw),
-            "read_plot": lambda **kw: plot_tools.read_plot(self.workspace, **kw),
+            "read_plot": self._handle_read_plot,
             "plot_list": lambda **kw: plot_tools.plot_list(self.workspace, **kw),
             "query_plot_by_chapters": lambda **kw: plot_tools.query_plot_by_chapters(self.workspace, **kw),
             "rules_list": lambda **kw: rules_tools.rules_list(self.workspace),
@@ -1178,8 +1223,8 @@ class JianzhiAgent(BaseAgent):
         nums = chapter_tools.parse_chapter_spec(chapters)
         titles = []
         for n in nums:
-            t, _ = chapter_tools._read_chapter_file(self.workspace / "document", n)
-            titles.append(t or f"第{n}章")
+            ch = self._db_service.chapter_get(n)
+            titles.append(ch["title"] if ch else f"第{n}章")
         self.context.track_chapter(
             [str(n) for n in nums],
             titles,
@@ -1191,6 +1236,31 @@ class JianzhiAgent(BaseAgent):
 
     def _handle_chapter_list(self) -> str:
         return chapter_tools.chapter_list(self.workspace)
+
+    def _handle_read_wiki(self, category: str = "", name: str = "",
+                          yaml_only: bool = True, version: int = None, **kw) -> str:
+        """读取 wiki（re-extract 执行阶段忽略 version 参数，返回缓存中的基础版本）"""
+        if (version is not None
+                and self.permission.mode == "executing"
+                and hasattr(self, '_proxy') and self._proxy is not None):
+            # 重新提取执行阶段：白名单内词条忽略 version，走缓存
+            cached = self._proxy._find_in_cache("wiki", name)
+            if cached and cached.base_version_id is not None:
+                version = None  # 强制走缓存路径
+        return wiki_tools.read_wiki(self.workspace, category=category,
+                                    name=name, yaml_only=yaml_only, version=version)
+
+    def _handle_read_plot(self, name: str = "",
+                          yaml_only: bool = True, version: int = None, **kw) -> str:
+        """读取 plot（re-extract 执行阶段忽略 version 参数，返回缓存中的基础版本）"""
+        if (version is not None
+                and self.permission.mode == "executing"
+                and hasattr(self, '_proxy') and self._proxy is not None):
+            cached = self._proxy._find_in_cache("plot", name)
+            if cached and cached.base_version_id is not None:
+                version = None
+        return plot_tools.read_plot(self.workspace, name=name,
+                                    yaml_only=yaml_only, version=version)
 
     def chat(self, user_input: str):
         """处理一条用户输入
@@ -1311,8 +1381,24 @@ class JianzhiAgent(BaseAgent):
         parts.append("")
         parts.append("### 未结束剧情卡片处理规则")
         parts.append("lint 报告的 unended_plots 表示剧情卡片章节范围已结束但未标记收尾。")
-        parts.append("对于这些卡片，调用 `end_plot(name=\"...\", end_notes=\"...\")` 结束。")
+        parts.append("对于这些卡片，调用 `end_plot(name=\"...\", end_notes=\"...\")` 结束，end_notes 必须填写收尾语。")
         parts.append("判断标准：卡片的最大章节号 ≤ 最新章节号 - 10，且卡片故事内容已自然完结。")
+        parts.append("")
+        parts.append("### 剧情卡片 keywords 检查")
+        parts.append("审核时检查所有剧情卡片的 keywords 是否为空。若为空，用 `edit_plot(name=\"...\", keywords=\"...\")` 补充。")
+        parts.append("keywords 应包含该卡片涉及的核心人物、地点、事件关键词，逗号分隔。")
+        parts.append("")
+        parts.append("### 词条字段质量检查（重要）")
+        parts.append("审核时用 `read_wiki` 抽查词条，检查以下字段质量：")
+        parts.append("| 字段 | 最低要求 | 不合格示例 |")
+        parts.append("|------|---------|-----------|")
+        parts.append("| description | 30-80字 | 「叶家少主」「赤云城家族」等 ≤15字标签 |")
+        parts.append("| state | 20-100字 | 「肉仙五重」「存在」等 ≤10字片段 |")
+        parts.append("| content | ≥300字 | 只有 2-3 句话的流水账 |")
+        parts.append("")
+        parts.append("不合格时用 `edit_wiki` 或 `batch_edit_wiki` 补充完善。")
+        parts.append("description 应概括词条核心身份与特征，state 应反映当前境界/位置/关系/动态，")
+        parts.append("content 应按类别 writing_guide 结构分段撰写（先调用 read_index 获取规范）。")
 
         self.messages.append({
             "role": "system",

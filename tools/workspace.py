@@ -95,20 +95,13 @@ def _find_chapter_title(line: str) -> str | None:
 
 
 def import_novel(workspace_path: Path, file_path: str) -> str:
-    """导入小说，按章节拆分
+    """导入小说，按章节拆分，写入 DB
 
     返回格式: "成功导入 12 章" 或 "错误：..."
     """
     src = Path(file_path)
     if not src.exists():
         return f"错误：文件不存在 - {file_path}"
-
-    doc_dir = workspace_path / "document"
-
-    # 检查是否已有章节
-    existing = sorted(doc_dir.glob("c*.md")) if doc_dir.exists() else []
-    if existing:
-        return "错误：工作区已有章节，请先确认是否删除后重新导入"
 
     # 自动检测编码：优先 utf-8，fallback 到 gb18030
     encodings = ["utf-8", "gb18030", "gbk"]
@@ -145,14 +138,13 @@ def import_novel(workspace_path: Path, file_path: str) -> str:
     if not chapters:
         return "错误：未找到任何章节标题。支持的格式：第X章、345章、Chapter X、序章/尾声等"
 
-    # 写入文件
-    doc_dir.mkdir(parents=True, exist_ok=True)
+    # 写入 DB（v5.1：章节入库，title 与 content 分离）
+    from tools.editor import _get_proxy
+    db = _get_proxy(workspace_path)._db
+
     for i, (title, content_lines) in enumerate(chapters, 1):
-        content = title + "\n" + "\n".join(content_lines)
-        # 去除首尾空行
-        content = content.strip() + "\n"
-        file_name = f"c{i:03d}.md"
-        (doc_dir / file_name).write_text(content, encoding="utf-8")
+        body = "\n".join(content_lines).strip()
+        db.chapter_upsert(i, title, body)
 
     return f"成功导入 {len(chapters)} 章"
 

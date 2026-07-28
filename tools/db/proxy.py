@@ -36,6 +36,8 @@ class CachedDoc:
     is_new: bool = False
     is_dirty: bool = False
     is_deleted: bool = False
+    base_version_id: int | None = None  # re-extract 时的基础版本 ID
+    write_mode: str = "insert"          # "insert" | "overwrite"
 
     def to_dict(self) -> dict:
         return {
@@ -290,20 +292,80 @@ class ProxyService:
 
     def read_doc(self, doc_type: str, name: str,
                  category: str = None, yaml_only: bool = True) -> str:
-        """读取文档（缓存优先 → DB 兜底），返回格式与 v4 文件模式一致"""
+        """读取文档（缓存优先 → DB 兖底），返回格式与 v4 文件模式一致"""
         # 1. 查缓存
         doc = self._find_in_cache(doc_type, name)
-
+    
         # 2. 缓存未命中 → 查 DB 并加载到缓存
         if doc is None:
             doc = self._load_from_db(doc_type, name)
             if doc is None:
                 return f"错误：{doc_type}「{name}」不存在"
-
+    
         fm = self._build_frontmatter(doc)
         if yaml_only:
             return fm + "\n> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
         return fm + "\n" + doc.content
+    
+    def read_doc_version(self, doc_type: str, name: str,
+                         version_chapter: int,
+                         yaml_only: bool = True) -> str:
+        """读取指定历史版本（不影响缓存，纯只读）
+    
+        Args:
+            doc_type: "wiki" | "plot" | "rule"
+            name: 词条名
+            version_chapter: 版本的 updated_chapter 值
+            yaml_only: 是否只返回 frontmatter
+        """
+        finder = {
+            "wiki": self._db.wiki_find_main,
+            "plot": self._db.plot_find_main,
+            "rule": self._db.rule_find_main,
+        }
+        main = finder[doc_type](name)
+        if main is None:
+            return f"错误：{doc_type}「{name}」不存在"
+    
+        version_data = self._db.get_version_by_chapter(
+            doc_type, main["id"], version_chapter)
+        if version_data is None:
+            # 列出可用版本供参考
+            from tools.db.version_manager import VersionManager
+            vm = VersionManager(self._db)
+            timeline = vm.get_timeline(doc_type, main["id"])
+            return (f"错误：{doc_type}「{name}」不存在 chapter={version_chapter} 的版本。"
+                    f"可用版本：{timeline}")
+    
+        # 构建临时 CachedDoc 用于生成 frontmatter
+        category = None
+        if doc_type == "wiki":
+            cat_id = version_data.get("category_id")
+            if cat_id:
+                cat = self._db.get_category(cat_id)
+                category = cat["name"] if cat else None
+    
+        doc = CachedDoc(
+            doc_type=doc_type,
+            main_id=main["id"],
+            name=name,
+            category=category,
+            content=version_data.get("content", ""),
+            description=version_data.get("description", ""),
+            state=version_data.get("state", ""),
+            keywords=version_data.get("keywords", ""),
+            tags=version_data.get("tags", []),
+            relations=version_data.get("relations", []),
+            chapter=version_data.get("chapter", 0),
+            chapters=version_data.get("chapters", ""),
+            ended=bool(version_data.get("ended", False)),
+            end_notes=version_data.get("end_notes", ""),
+        )
+        fm = self._build_frontmatter(doc)
+        header = f"[历史版本 chapter={version_chapter}]\n"
+        if yaml_only:
+            return header + fm + "\n> （内容已省略，将 yaml_only 设为 false 可查看全文）\n"
+        return header + fm + "\n" + doc.content
 
     def list_docs(self, doc_type: str, category: str = None,
                   page: int = 1, page_size: int = 20,
@@ -387,20 +449,35 @@ class ProxyService:
     # ── 白名单加载 ──
 
     def load_whitelist(self, plan: dict):
-        """白名单通过后，从 DB 拉取条目到缓存"""
+        """白名单通过后，从 DB 拉取条目到缓存
+
+        re-extract 模式：对 edit 项加载基础版本（而非 current_version），
+        并设置 base_version_id / write_mode 供 flush 时版本分叉使用。
+        """
+        from tools.chapter import parse_chapter_spec
+
+        is_reextract = plan.get("mode") == "re-extract"
+        scope_max = 0
+        if is_reextract:
+            scope_nums = parse_chapter_spec(plan.get("scope", ""))
+            scope_max = max(scope_nums) if scope_nums else 0
+
         # 新增条目：用负 ID 占位
         for item in plan.get("new_wiki", []):
             tid = self._next_temp_id
             self._next_temp_id -= 1
+            # 从计划的 chapters 字段解析第一个章节号
+            ch_nums = parse_chapter_spec(str(item.get("chapters", "")))
+            first_ch = ch_nums[0] if ch_nums else 0
             self._cache[("wiki", tid)] = CachedDoc(
                 doc_type="wiki", main_id=tid,
                 name=item["name"],
                 category=item.get("category", ""),
-                chapter=item.get("chapter", 0),
+                chapter=first_ch,
                 is_new=True, is_dirty=True,
             )
 
-        # 编辑条目：从 DB 拉取
+        # 编辑条目：从 DB 拉取（re-extract 时加载基础版本）
         for item in plan.get("edit_wiki", []):
             name = item["name"]
             if self._find_in_cache("wiki", name):
@@ -408,34 +485,41 @@ class ProxyService:
             main = self._db.wiki_find_main(name)
             if main is None:
                 continue
-            current = self._db.wiki_get_current(main["id"])
-            if current is None:
-                continue
-            cat = self._db.get_category(current.get("category_id"))
-            cat_name = cat["name"] if cat else ""
-            doc = CachedDoc(
-                doc_type="wiki", main_id=main["id"],
-                name=main["name"], category=cat_name,
-                content=current.get("content", ""),
-                description=current.get("description", ""),
-                state=current.get("state", ""),
-                keywords=current.get("keywords", ""),
-                tags=current.get("tags", []),
-                relations=current.get("relations", []),
-                chapter=main.get("updated_chapter", 0),
-                is_new=False, is_dirty=False,
-            )
-            self._cache[("wiki", main["id"])] = doc
+
+            if is_reextract and scope_max > 0:
+                doc = self._load_base_version("wiki", main, scope_max)
+            else:
+                current = self._db.wiki_get_current(main["id"])
+                if current is None:
+                    continue
+                cat = self._db.get_category(current.get("category_id"))
+                cat_name = cat["name"] if cat else ""
+                doc = CachedDoc(
+                    doc_type="wiki", main_id=main["id"],
+                    name=main["name"], category=cat_name,
+                    content=current.get("content", ""),
+                    description=current.get("description", ""),
+                    state=current.get("state", ""),
+                    keywords=current.get("keywords", ""),
+                    tags=current.get("tags", []),
+                    relations=current.get("relations", []),
+                    chapter=main.get("updated_chapter", 0),
+                    is_new=False, is_dirty=False,
+                )
+            if doc:
+                self._cache[("wiki", main["id"])] = doc
 
         # 剧情卡片
         for item in plan.get("new_plot", []):
             tid = self._next_temp_id
             self._next_temp_id -= 1
+            ch_nums = parse_chapter_spec(str(item.get("chapters", "")))
+            first_ch = ch_nums[0] if ch_nums else 0
             self._cache[("plot", tid)] = CachedDoc(
                 doc_type="plot", main_id=tid,
                 name=item["name"],
                 chapters=item.get("chapters", ""),
-                chapter=item.get("chapter", 0),
+                chapter=first_ch,
                 is_new=True, is_dirty=True,
             )
 
@@ -446,23 +530,28 @@ class ProxyService:
             main = self._db.plot_find_main(name)
             if main is None:
                 continue
-            current = self._db.plot_get_current(main["id"])
-            if current is None:
-                continue
-            doc = CachedDoc(
-                doc_type="plot", main_id=main["id"],
-                name=main["name"],
-                content=current.get("content", ""),
-                description=current.get("description", ""),
-                state=current.get("state", ""),
-                chapters=current.get("chapters", ""),
-                ended=bool(current.get("ended", False)),
-                end_notes=current.get("end_notes", ""),
-                relations=current.get("relations", []),
-                chapter=main.get("updated_chapter", 0),
-                is_new=False, is_dirty=False,
-            )
-            self._cache[("plot", main["id"])] = doc
+
+            if is_reextract and scope_max > 0:
+                doc = self._load_base_version("plot", main, scope_max)
+            else:
+                current = self._db.plot_get_current(main["id"])
+                if current is None:
+                    continue
+                doc = CachedDoc(
+                    doc_type="plot", main_id=main["id"],
+                    name=main["name"],
+                    content=current.get("content", ""),
+                    description=current.get("description", ""),
+                    state=current.get("state", ""),
+                    chapters=current.get("chapters", ""),
+                    ended=bool(current.get("ended", False)),
+                    end_notes=current.get("end_notes", ""),
+                    relations=current.get("relations", []),
+                    chapter=main.get("updated_chapter", 0),
+                    is_new=False, is_dirty=False,
+                )
+            if doc:
+                self._cache[("plot", main["id"])] = doc
 
         # 规则文档
         for item in plan.get("new_rule", []):
@@ -474,6 +563,95 @@ class ProxyService:
                 chapter=item.get("chapter", 0),
                 is_new=True, is_dirty=True,
             )
+
+        for item in plan.get("edit_rule", []):
+            name = item["name"]
+            if self._find_in_cache("rule", name):
+                continue
+            main = self._db.rule_find_main(name)
+            if main is None:
+                continue
+
+            if is_reextract and scope_max > 0:
+                doc = self._load_base_version("rule", main, scope_max)
+            else:
+                current = self._db.rule_get_current(main["id"])
+                if current is None:
+                    continue
+                doc = CachedDoc(
+                    doc_type="rule", main_id=main["id"],
+                    name=main["name"],
+                    content=current.get("content", ""),
+                    description=current.get("description", ""),
+                    keywords=current.get("keywords", ""),
+                    chapter=main.get("updated_chapter", 0),
+                    is_new=False, is_dirty=False,
+                )
+            if doc:
+                self._cache[("rule", main["id"])] = doc
+
+    def _load_base_version(self, doc_type: str, main: dict,
+                           scope_max: int) -> CachedDoc | None:
+        """加载基础版本到 CachedDoc（re-extract 专用）
+
+        基础版本 = 时间线中 ≤ scope_max 且最大的版本。
+        同时设置 base_version_id 和 write_mode。
+        """
+        from tools.db.version_manager import VersionManager
+        vm = VersionManager(self._db)
+
+        base_vid = vm.resolve_base_version(doc_type, main["id"], scope_max)
+        if base_vid is None:
+            # 无匹配版本，退化为加载 current_version
+            base_vid = None
+            version_data = None
+        else:
+            version_data = self._db.get_version_by_id(doc_type, base_vid)
+
+        if version_data is None:
+            # 退化：加载 current_version
+            getter = {
+                "wiki": self._db.wiki_get_current,
+                "plot": self._db.plot_get_current,
+                "rule": self._db.rule_get_current,
+            }
+            version_data = getter[doc_type](main["id"])
+            if version_data is None:
+                return None
+            base_vid = None  # 无基础版本 ID
+
+        # 决定写入策略
+        write_mode = vm.decide_write_strategy(doc_type, main["id"], scope_max)
+
+        # 获取类别名（wiki 专用）
+        category = None
+        if doc_type == "wiki":
+            cat_id = version_data.get("category_id")
+            if cat_id:
+                cat = self._db.get_category(cat_id)
+                category = cat["name"] if cat else ""
+
+        doc = CachedDoc(
+            doc_type=doc_type,
+            main_id=main["id"],
+            name=main["name"],
+            category=category,
+            content=version_data.get("content", ""),
+            description=version_data.get("description", ""),
+            state=version_data.get("state", ""),
+            keywords=version_data.get("keywords", ""),
+            tags=version_data.get("tags", []),
+            relations=version_data.get("relations", []),
+            chapter=version_data.get("chapter", 0),
+            chapters=version_data.get("chapters", ""),
+            ended=bool(version_data.get("ended", False)),
+            end_notes=version_data.get("end_notes", ""),
+            is_new=False,
+            is_dirty=False,
+            base_version_id=base_vid,
+            write_mode=write_mode,
+        )
+        return doc
 
     def is_cache_loaded(self) -> bool:
         """是否已有白名单加载的缓存"""
@@ -513,6 +691,8 @@ class ProxyService:
                 "is_new": doc.is_new,
                 "is_dirty": doc.is_dirty,
                 "is_deleted": doc.is_deleted,
+                "base_version_id": doc.base_version_id,
+                "write_mode": doc.write_mode,
             }
             data.append(d)
         path.write_text(
@@ -547,6 +727,8 @@ class ProxyService:
                 is_new=d.get("is_new", False),
                 is_dirty=d.get("is_dirty", False),
                 is_deleted=d.get("is_deleted", False),
+                base_version_id=d.get("base_version_id"),
+                write_mode=d.get("write_mode", "insert"),
             )
             self._cache[key] = doc
             if d["main_id"] and d["main_id"] < max_main_id:
@@ -624,6 +806,9 @@ class ProxyService:
                     created_map[doc.name] = actual_id
 
                 # ── Pass 2: 解析 relations + 创建 version + set_current ──
+                from tools.db.version_manager import VersionManager
+                vm = VersionManager(self._db)
+
                 for (doc_type, main_id), doc in list(self._cache.items()):
                     if doc.is_deleted:
                         continue
@@ -631,9 +816,9 @@ class ProxyService:
                         continue
 
                     actual_id = created_map.get(doc.name, main_id)
-                    # 新建条目用 first_chapter，更新条目用 scope_chapter（本次提取范围）
+                    # 新建条目用 doc.chapter（最新版本），更新条目用 scope_chapter（本次提取范围）
                     if doc.is_new:
-                        actual_ch = doc.first_chapter or doc.chapter or scope_chapter
+                        actual_ch = doc.chapter or doc.first_chapter or scope_chapter
                     else:
                         actual_ch = scope_chapter or doc.chapter
 
@@ -650,29 +835,67 @@ class ProxyService:
                                     seen.add(tid)
                             doc.relations = rel_ids
 
-                    # 创建版本记录
-                    creator = {
-                        "wiki": self._db.wiki_create_version,
-                        "plot": self._db.plot_create_version,
-                        "rule": self._db.rule_create_version,
-                    }[doc_type]
-                    ver_id = creator(actual_id, actual_ch, doc.to_dict())
-
-                    # set_current
-                    if doc_type == "plot":
-                        # Fix 5: 一次性更新所有 plot_main 字段
-                        self._db.plot_set_current(
-                            actual_id, ver_id, actual_ch,
-                            chapters=doc.chapters,
-                            ended=int(doc.ended),
-                            end_notes=doc.end_notes,
-                        )
+                    # ── 版本写入：重新提取走 version_manager，正常提取走原逻辑 ──
+                    if doc.write_mode == "overwrite" and doc.base_version_id:
+                        # 重新提取 + 同章节覆盖：原地更新索引行
+                        self._db.update_version(
+                            doc_type, doc.base_version_id, doc.to_dict())
+                        vm._update_pointer(doc_type, actual_id)
+                        # plot 额外字段
+                        if doc_type == "plot":
+                            self._db.plot_set_current(
+                                actual_id, doc.base_version_id, actual_ch,
+                                chapters=doc.chapters,
+                                ended=int(doc.ended),
+                                end_notes=doc.end_notes,
+                            )
+                    elif not doc.is_new and doc.write_mode == "insert" and doc.base_version_id is not None:
+                        # 重新提取 + 不同章节：插入新版本，由 vm 管理指针
+                        vm.commit(doc_type, actual_id, actual_ch,
+                                  doc.to_dict(), strategy="insert")
+                        # plot 额外字段
+                        if doc_type == "plot":
+                            self._db.plot_set_current(
+                                actual_id,
+                                self._db.list_versions("plot", actual_id)[-1]["id"],
+                                actual_ch,
+                                chapters=doc.chapters,
+                                ended=int(doc.ended),
+                                end_notes=doc.end_notes,
+                            )
                     else:
-                        setter = {
-                            "wiki": self._db.wiki_set_current,
-                            "rule": self._db.rule_set_current,
+                        # 正常提取（原有逻辑）
+                        creator = {
+                            "wiki": self._db.wiki_create_version,
+                            "plot": self._db.plot_create_version,
+                            "rule": self._db.rule_create_version,
                         }[doc_type]
-                        setter(actual_id, ver_id, actual_ch)
+                        ver_id = creator(actual_id, actual_ch, doc.to_dict())
+
+                        # set_current
+                        if doc_type == "plot":
+                            self._db.plot_set_current(
+                                actual_id, ver_id, actual_ch,
+                                chapters=doc.chapters,
+                                ended=int(doc.ended),
+                                end_notes=doc.end_notes,
+                            )
+                        else:
+                            setter = {
+                                "wiki": self._db.wiki_set_current,
+                                "rule": self._db.rule_set_current,
+                            }[doc_type]
+                            setter(actual_id, ver_id, actual_ch)
+
+            # ── 指针一致性修复：确保所有受影响 main 的 current_version 指向 MAX(chapter) ──
+                affected_mains = set()
+                for (doc_type, main_id), doc in list(self._cache.items()):
+                    if not doc.is_deleted and (doc.is_new or doc.is_dirty):
+                        actual_id = created_map.get(doc.name, main_id)
+                        if actual_id > 0:
+                            affected_mains.add((doc_type, actual_id))
+                for doc_type, mid in affected_mains:
+                    vm._update_pointer(doc_type, mid)
 
             # 清理缓存
             self._cache.clear()

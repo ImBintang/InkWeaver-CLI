@@ -414,3 +414,128 @@ class SQLiteService:
             (version_id, chapter, _now(), main_id),
         )
         self._commit()
+
+    # ── 版本查询（v5.1 时间线管理）──
+
+    _INDEX_TABLES = {"wiki": "wiki_index", "plot": "plot_index", "rule": "rules_index"}
+    _MAIN_TABLES = {"wiki": "wiki_main", "plot": "plot_main", "rule": "rules_main"}
+
+    def list_versions(self, doc_type: str, main_id: int) -> list[dict]:
+        """列出某词条的所有版本（按 chapter 升序）"""
+        table = self._INDEX_TABLES[doc_type]
+        cur = self.conn.execute(
+            f"SELECT id, chapter FROM {table} WHERE main_id = ? ORDER BY chapter",
+            (main_id,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def get_version_by_chapter(self, doc_type: str, main_id: int,
+                               chapter: int) -> dict | None:
+        """按 updated_chapter 获取指定版本完整内容"""
+        table = self._INDEX_TABLES[doc_type]
+        cur = self.conn.execute(
+            f"SELECT * FROM {table} WHERE main_id = ? AND chapter = ?",
+            (main_id, chapter),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["tags"] = _parse_json(result.get("tags", "[]"))
+        result["relations"] = _parse_json(result.get("relations", "[]"))
+        return result
+
+    def get_version_by_id(self, doc_type: str, version_id: int) -> dict | None:
+        """按索引表主键获取版本完整内容"""
+        table = self._INDEX_TABLES[doc_type]
+        cur = self.conn.execute(f"SELECT * FROM {table} WHERE id = ?", (version_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["tags"] = _parse_json(result.get("tags", "[]"))
+        result["relations"] = _parse_json(result.get("relations", "[]"))
+        return result
+
+    def update_version(self, doc_type: str, version_id: int, data: dict):
+        """原地更新索引行内容（overwrite 用）"""
+        table = self._INDEX_TABLES[doc_type]
+        self.conn.execute(
+            f"UPDATE {table} SET keywords = ?, description = ?, state = ?, "
+            f"tags = ?, content = ?, relations = ? WHERE id = ?",
+            (
+                data.get("keywords", ""),
+                data.get("description", ""),
+                data.get("state", ""),
+                _ensure_json(data.get("tags", [])),
+                data.get("content", ""),
+                _ensure_json(data.get("relations", [])),
+                version_id,
+            ),
+        )
+        self._commit()
+
+    def set_current_version(self, doc_type: str, main_id: int,
+                            version_id: int, chapter: int):
+        """统一更新 main 表的 current_version 指针"""
+        table = self._MAIN_TABLES[doc_type]
+        self.conn.execute(
+            f"UPDATE {table} SET current_version = ?, updated_chapter = ?, "
+            f"updated_at = ? WHERE id = ?",
+            (version_id, chapter, _now(), main_id),
+        )
+        self._commit()
+
+    # ── Chapters CRUD ──
+
+    def chapter_upsert(self, num: int, title: str, content: str):
+        """INSERT OR REPLACE 章节"""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chapters (chapter_num, title, content, imported_at) "
+            "VALUES (?, ?, ?, ?)",
+            (num, title, content, _now()),
+        )
+        self._commit()
+
+    def chapter_get(self, num: int) -> dict | None:
+        """读取单章"""
+        cur = self.conn.execute(
+            "SELECT chapter_num, title, content, imported_at "
+            "FROM chapters WHERE chapter_num = ?", (num,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def chapter_get_range(self, nums: list[int]) -> list[dict]:
+        """批量读取指定章节号列表"""
+        if not nums:
+            return []
+        placeholders = ",".join("?" * len(nums))
+        cur = self.conn.execute(
+            f"SELECT chapter_num, title, content, imported_at "
+            f"FROM chapters WHERE chapter_num IN ({placeholders}) "
+            f"ORDER BY chapter_num",
+            nums,
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+    def chapter_list_all(self) -> list[dict]:
+        """列出所有章节（num + title）"""
+        cur = self.conn.execute(
+            "SELECT chapter_num, title FROM chapters ORDER BY chapter_num")
+        return [dict(r) for r in cur.fetchall()]
+
+    def chapter_max_num(self) -> int:
+        """返回最大章节号，无章节时返回 0"""
+        cur = self.conn.execute("SELECT MAX(chapter_num) FROM chapters")
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else 0
+
+    def chapter_count(self) -> int:
+        """返回章节总数"""
+        cur = self.conn.execute("SELECT COUNT(*) FROM chapters")
+        return cur.fetchone()[0]
+
+    def chapter_delete_all(self):
+        """清空所有章节（重新导入前使用）"""
+        self.conn.execute("DELETE FROM chapters")
+        self._commit()

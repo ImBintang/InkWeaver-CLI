@@ -107,9 +107,20 @@ CREATE TABLE IF NOT EXISTS rules_index (
 CREATE INDEX IF NOT EXISTS idx_rules_index_main ON rules_index(main_id);
 """
 
+# ── Chapters 表（章节入库）──
+CHAPTERS_TABLE = """
+CREATE TABLE IF NOT EXISTS chapters (
+    chapter_num  INTEGER PRIMARY KEY,
+    title        TEXT NOT NULL DEFAULT '',
+    content      TEXT NOT NULL DEFAULT '',
+    imported_at  INTEGER NOT NULL
+);
+"""
+
 ALL_TABLES = [
     CATEGORIES_TABLE,
     WIKI_MAIN_TABLE, WIKI_INDEX_TABLE,
     PLOT_MAIN_TABLE, PLOT_INDEX_TABLE,
     RULES_MAIN_TABLE, RULES_INDEX_TABLE,
+    CHAPTERS_TABLE,
 ]

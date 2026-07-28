@@ -181,27 +181,20 @@ def _get_category_state_info(workspace: Path) -> dict[str, bool]:
 
 
 def _get_max_chapter(workspace: Path) -> int:
-    """获取 document/ 目录中最大的章节号"""
-    doc_root = workspace / "document"
-    if not doc_root.exists():
-        return 0
-
-    max_num = 0
-    for fp in doc_root.glob("c*.md"):
-        m = re.match(r"c(\d+)\.md", fp.name)
-        if m:
-            num = int(m.group(1))
-            if num > max_num:
-                max_num = num
-    return max_num
+    """获取最大章节号（从 DB）"""
+    from tools.editor import _get_proxy
+    db = _get_proxy(workspace)._db
+    return db.chapter_max_num()
 
 
 def _read_chapter_text(workspace: Path, num: int) -> str:
-    """读取指定章节的正文文本"""
-    fp = workspace / "document" / f"c{num:03d}.md"
-    if not fp.exists():
+    """读取指定章节的正文文本（从 DB）"""
+    from tools.editor import _get_proxy
+    db = _get_proxy(workspace)._db
+    row = db.chapter_get(num)
+    if row is None:
         return ""
-    return fp.read_text(encoding="utf-8")
+    return row["content"]
 
 
 def _compact_chapter_list(nums: list[int]) -> str:
@@ -654,9 +647,23 @@ def auto_fix_short_name_wikilinks(workspace: Path, docs: list[LintDoc]) -> list[
 # ── 入口函数 ─────────────────────────────────────────────────────────
 
 
-def run_lint(workspace: Path, chapters: str | None = None) -> str:
-    """运行全套 lint 检查，写入 debt JSON，返回格式化摘要"""
+def run_lint(workspace: Path, chapters: str | None = None,
+             whitelist: list[tuple[str, str]] | None = None) -> str:
+    """运行全套 lint 检查，写入 debt JSON，返回格式化摘要
+
+    Args:
+        workspace: 工作区路径
+        chapters: 可选，章节范围（未使用）
+        whitelist: 可选，白名单 [(doc_type, name), ...]。
+                   传入时只检查白名单内的文档（任务内 lint）。
+                   为 None 时检查全量（全局 lint）。
+    """
     docs = _gather_all_docs(workspace)
+
+    # 白名单过滤
+    if whitelist is not None:
+        wl_set = set(whitelist)
+        docs = [d for d in docs if (d.doc_type, d.name) in wl_set]
 
     if not docs:
         return "（无文档需要检查）"

@@ -21,6 +21,14 @@ def submit_plan(workspace: Path, plan_json_str: str) -> str:
             "message": f"计划 JSON 解析失败：{e}"
         }, ensure_ascii=False)
 
+    # 验证 mode 字段（缺省 "extract"，可选 "re-extract"）
+    mode = plan.get("mode", "extract")
+    if mode not in ("extract", "re-extract"):
+        return json.dumps({
+            "status": "error",
+            "message": f"无效的 mode 字段：{mode}（仅支持 extract / re-extract）"
+        }, ensure_ascii=False)
+
     # 验证必要字段
     if "scope" not in plan:
         return json.dumps({
@@ -40,22 +48,42 @@ def submit_plan(workspace: Path, plan_json_str: str) -> str:
 
     # 校验每项是否缺少必需字段
     field_warnings = []
-    for key, required in [
-        ("new_wiki", ["category", "name", "chapters", "reason"]),
-        ("edit_wiki", ["category", "name", "chapters", "reason"]),
-        ("new_rule", ["name", "reason"]),
-        ("edit_rule", ["name", "reason"]),
-        ("new_plot", ["name", "chapters", "reason"]),
-        ("edit_plot", ["name", "chapters", "reason"]),
+    field_errors = []
+    # chapters 为硬性必填（数据库 chapter 字段依赖它），缺失则拒绝计划
+    for key, required_hard in [
+        ("new_wiki", ["category", "name", "chapters"]),
+        ("edit_wiki", ["category", "name", "chapters"]),
+        ("new_plot", ["name", "chapters"]),
+        ("edit_plot", ["name", "chapters"]),
     ]:
         for i, item in enumerate(plan.get(key, [])):
-            missing = [f for f in required if f not in item or not str(item.get(f, "")).strip()]
+            missing = [f for f in required_hard if f not in item or not str(item.get(f, "")).strip()]
+            if missing:
+                field_errors.append(f"{key}[{i}]「{item.get('name', '?')}」缺少必填字段：{', '.join(missing)}")
+    # reason 为软性警告
+    for key, required_soft in [
+        ("new_wiki", ["reason"]),
+        ("edit_wiki", ["reason"]),
+        ("new_rule", ["name", "reason"]),
+        ("edit_rule", ["name", "reason"]),
+        ("new_plot", ["reason"]),
+        ("edit_plot", ["reason"]),
+    ]:
+        for i, item in enumerate(plan.get(key, [])):
+            missing = [f for f in required_soft if f not in item or not str(item.get(f, "")).strip()]
             if missing:
                 field_warnings.append(f"{key}[{i}]「{item.get('name', '?')}」缺少字段：{', '.join(missing)}")
+
+    if field_errors:
+        return json.dumps({
+            "status": "error",
+            "message": "计划校验失败，以下条目缺少必填字段（chapters 为必填）：\n" + "\n".join(field_errors)
+        }, ensure_ascii=False)
 
     # 统计概要
     summary = {
         "status": "pending_review",
+        "mode": mode,
         "scope": plan.get("scope", ""),
         "warnings": field_warnings,
         "stats": {

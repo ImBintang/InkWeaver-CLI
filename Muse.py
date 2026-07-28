@@ -309,12 +309,12 @@ class MuseAgent(BaseAgent):
                     },
                 },
             },
-            # 差异工具
+            # 差异工具（已废弃，重定向到 chapter_list）
             {
                 "type": "function",
                 "function": {
                     "name": "doc_diff",
-                    "description": "对比文档哈希，查看新增/修改的章节",
+                    "description": "[DEPRECATED] 已废弃，请使用 chapter_list 替代。查看章节列表（含处理状态）。",
                     "parameters": {"type": "object", "properties": {}},
                 },
             },

@@ -43,18 +43,23 @@ def _plot_file(workspace: Path, name: str) -> Path:
     return _plot_root(workspace) / f"{name}.md"
 
 
-def read_plot(workspace: Path, name: str, yaml_only: bool = True) -> str:
+def read_plot(workspace: Path, name: str, yaml_only: bool = True,
+             version: int = None) -> str:
     """读取指定剧情卡片（v5：调 proxy）
     
     Args:
         name: 剧情卡片名称
         yaml_only: True 只返回 frontmatter，False 返回全文
+        version: 可选，指定版本的 updated_chapter。为空时读取 current_version。
     
     Returns:
         文档内容或错误消息
     """
     from tools.editor import _get_proxy
     proxy = _get_proxy(workspace)
+
+    if version is not None:
+        return proxy.read_doc_version("plot", name, version, yaml_only=yaml_only)
     return proxy.read_doc("plot", name, yaml_only=yaml_only)
 
 

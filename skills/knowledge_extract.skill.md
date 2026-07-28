@@ -8,21 +8,21 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 ## 触发方式
 
 - 指令触发：`/update`
-- 自然语言触发："帮我提取新章节的知识"、"更新一下 wiki"
+- 自然语言触发：“帮我提取新章节的知识”、“更新一下 wiki”
+- 重新提取触发：“重新提取 6-10 章”、“重新更新第 5 章的知识”
 
 ## 完整流程
 
 ### 范围指定
-- 如果用户明确说了提取范围（如"提取第 5-10 章"），直接使用该范围
-- 如果用户只说"提取知识""更新 wiki"但**没指定范围**：
-  1. 调用 get_unprocessed_chapters 获取未处理的章节（至多 10 章）
-  2. 调用 doc_diff 确认章节详情
-  3. 向用户确认计划："检测到未提取的章节 [1-10]，是否按此范围提取？"
-  4. 用户确认后执行
+- 如果用户明确说了提取范围（如“提取第 5-10 章”），直接使用该范围
+- 如果用户只说“提取知识”“更新 wiki”但**没指定范围**：
+  1. 调用 chapter_list 查看章节列表（含 [已处理]/[未处理] 标记）
+  2. 向用户确认计划：“检测到未提取的章节 [1-10]，是否按此范围提取？”
+  3. 用户确认后执行
 
 ### 执行流程
 ```
-1. doc_diff → 获取新增/修改的章节列表
+1. chapter_list → 查看章节列表（含 [已处理]/[未处理] 标记）
 2. **先查 Wiki，再读章节**：
    a. 先对所有涉及的关键词/实体名使用 wiki_list + read_wiki 查询现有词条
    b. **只有 wiki 无法解答时**（现有词条信息不足/未覆盖），才读取章节原文
@@ -35,7 +35,11 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
    → 若被打回，根据理由修改后重新提交
 6. 使用 batch_create_wiki / batch_edit_wiki 批量操作（或 new_wiki / edit_wiki 单个操作）
    - 每个词条需包含 category、name、content（正文含 [[wikilink]] 交叉引用）
-   - 读取类别 index.md 了解写作规范
+   - **必须先调用 read_index(类别名) 获取 writing_guide，按规范结构撰写正文**
+   - 字段质量要求：
+     - description：30-80字，一句话概括词条核心身份（禁止只写名字/职位）
+     - state：20-100字，当前状态快照（境界/位置/关系/动态），state_required 类别必填
+     - content：≥300字，按 writing_guide 分段撰写，使用 [[wikilink]] 交叉引用
 6. **收尾旧剧情卡片**：在创建**新**剧情卡片前，应先调用 `plot_list` 查看已有的未结束卡片，
    对其中章节范围已远落后于最新章节（差值 ≥ 10）的卡片，调用 `end_plot` 结束。
    这样可以避免剧情卡片越积越多永不收尾。
@@ -149,6 +153,8 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 - 设定图鉴类不需要 state 字段
 - 所有 wiki 文档使用统一 frontmatter
 - new_wiki 的 content 参数为必填，必须提供正文内容
+- **new_plot 的 keywords 为必填**，应包含该卡片涉及的核心人物、地点、事件关键词（逗号分隔）
+- **end_plot 的 end_notes 为必填**，简述该剧情线如何完结
 - **新增统一编辑工具**：`edit_doc_text`（正文精确文本替换）/ `edit_doc_wikilink`（wikilink 定向替换）
   - 只需要改正文中一句话时，用 `edit_doc_text` 比 `edit_doc(content=新全文)` 省大量 token
   - Lint 债务修复时优先使用 `edit_doc_wikilink` 修复断链
@@ -158,6 +164,49 @@ description: 知识提取技能 — 从小说章节中提取知识，构建结�
 - **知识提取完成后必须调用 review_workflow 进行审核**，审核通过后调用 finish_task 结束
 - 审核时 lint 已自动运行并注入上下文，无需手动调用 lint 工具
 - 审核阶段只读白名单内的章节/wiki/plot，使用 wiki_list / plot_list 可查看存在性但不可读内容
+
+## 重新提取模式（re-extract）
+
+当用户要求「重新提取 X-Y 章」「重新更新某几个章节的知识」时，使用重新提取模式。
+
+### 与正常提取的差异
+
+| 环节 | 正常提取 | 重新提取 |
+|------|---------|----------|
+| 规划阶段 | 只读 current_version | 自由读取所有历史版本（read_wiki(version=N)） |
+| submit_plan | mode 缺省 "extract" | mode: "re-extract" + scope |
+| 执行阶段 | 加载 current_version | 系统自动加载基础版本（≤ scope 最大章节的最近版本） |
+| flush | 正常插入新版本 | 同章节覆盖 / 不同章节插入新版本 |
+
+### 重新提取流程
+
+```
+1. 用户说“重新提取 6-10 章”
+2. 规划阶段：
+   a. 调用 read_wiki / read_plot 查看当前版本
+   b. 可选：调用 read_wiki(version=N) 查看历史版本，了解变迁
+   c. 读取章节原文（read_chapters 6-10）
+   d. 制定计划（edit_wiki / edit_plot 为主）
+3. submit_plan 时传 mode: "re-extract"，scope: "6-10"
+4. 用户确认后，系统自动加载基础版本到缓存
+5. 执行阶段：基于基础版本内容修改（而非 current_version）
+6. review_workflow → finish_task（flush 时自动处理版本分叉）
+```
+
+### 计划 JSON 示例（重新提取）
+
+```json
+{
+  "mode": "re-extract",
+  "scope": "6-10",
+  "edit_wiki": [
+    {"category": "人物", "name": "叶匀", "chapters": "6-10", "reason": "重新提取后更新境界变化"}
+  ],
+  "edit_plot": [
+    {"name": "天才陨落", "chapters": "6-10", "reason": "补充重新提取的剧情细节"}
+  ]
+}
+```
 
 ## 词条命名约定
 

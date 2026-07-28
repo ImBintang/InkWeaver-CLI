@@ -1,5 +1,6 @@
-"""章节工具：读取、统计、列表"""
+"""章节工具：读取、统计、列表（v5.1：数据源从文件迁移至 DB）"""
 
+import json
 import re
 from pathlib import Path
 
@@ -37,12 +38,46 @@ def parse_chapter_spec(spec: str) -> list[int]:
     return sorted(set(result))
 
 
+def _get_db(workspace_path: Path):
+    """获取 SQLiteService 实例"""
+    from tools.editor import _get_proxy
+    return _get_proxy(workspace_path)._db
+
+
+def _load_processed_ranges(workspace_path: Path) -> list:
+    """从 log.json 加载已处理的章节范围"""
+    log_fp = workspace_path / "log.json"
+    if not log_fp.exists():
+        return []
+    try:
+        with open(log_fp, "r", encoding="utf-8") as f:
+            log = json.load(f)
+        return log.get("processed", {}).get("chapter_ranges", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def _is_processed(num: int, ranges: list) -> bool:
+    """判断章节号是否已被处理（覆盖于某个 range 内）"""
+    for r in ranges:
+        if isinstance(r, list) and len(r) == 2:
+            if r[0] <= num <= r[1]:
+                return True
+        elif isinstance(r, str):
+            nums = parse_chapter_spec(r)
+            if num in nums:
+                return True
+    return False
+
+
+# ---- Deprecated: 文件系统读取（保留兼容，后续版本移除）----
+
 def _chapter_file(doc_dir: Path, num: int) -> Path:
     return doc_dir / f"c{num:03d}.md"
 
 
 def _read_chapter_file(doc_dir: Path, num: int) -> tuple[str | None, str | None]:
-    """读取章节文件，返回 (title, body) 或 (None, None) 文件不存在"""
+    """[Deprecated] 读取章节文件，返回 (title, body) 或 (None, None)"""
     fp = _chapter_file(doc_dir, num)
     if not fp.exists():
         return None, None
@@ -54,30 +89,29 @@ def _read_chapter_file(doc_dir: Path, num: int) -> tuple[str | None, str | None]
 
 
 def chapter_list(workspace_path: Path) -> str:
-    """获取章节列表
+    """获取章节列表（附带处理状态标记）
 
     Returns:
-        "第1章 楔子\n第2章 xxx\n..."
+        "第1章 楔子 [已处理]\n第2章 xxx [未处理]\n..."
     """
-    doc_dir = workspace_path / "document"
-    if not doc_dir.exists():
+    db = _get_db(workspace_path)
+    rows = db.chapter_list_all()
+    if not rows:
         return "（尚无章节）"
 
-    files = sorted(doc_dir.glob("c*.md"))
-    if not files:
-        return "（尚无章节）"
-
+    processed_ranges = _load_processed_ranges(workspace_path)
     entries = []
-    for fp in files:
-        text = fp.read_text(encoding="utf-8").strip()
-        title = text.splitlines()[0] if text else fp.stem
-        entries.append(title)
+    for row in rows:
+        num = row["chapter_num"]
+        title = row["title"] or f"第{num}章"
+        status = "[已处理]" if _is_processed(num, processed_ranges) else "[未处理]"
+        entries.append(f"{title} {status}")
 
     return "\n".join(entries)
 
 
 def read_chapters(workspace_path: Path, chapters: str) -> str:
-    """读取指定章节正文
+    """读取指定章节正文（从 DB）
 
     Args:
         chapters: 范围表达式，如 "1-3,5,7-9"
@@ -85,24 +119,28 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
     Returns:
         "## 第1章 楔子\n\n(正文)\n\n## 第2章 xxx\n\n(正文)"
     """
-    doc_dir = workspace_path / "document"
     nums = parse_chapter_spec(chapters)
     if not nums:
         return "错误：章节号格式无效"
 
+    db = _get_db(workspace_path)
+    rows = db.chapter_get_range(nums)
+    found = {r["chapter_num"]: r for r in rows}
+
     parts = []
     for num in nums:
-        title, body = _read_chapter_file(doc_dir, num)
-        if title is None:
+        row = found.get(num)
+        if row is None:
             parts.append(f"## 第{num}章（不存在）")
         else:
-            parts.append(f"## {title}\n\n{body}")
+            title = row["title"] or f"第{num}章"
+            parts.append(f"## {title}\n\n{row['content']}")
 
     return "\n\n".join(parts)
 
 
 def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> str:
-    """分章节统计关键词词频
+    """分章节统计关键词词频（从 DB）
 
     Args:
         chapters: 范围表达式
@@ -111,21 +149,25 @@ def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> s
     Returns:
         "第1章 楔子:\n  \"主角\": 5\n  \"系统\": 3\n..."
     """
-    doc_dir = workspace_path / "document"
     nums = parse_chapter_spec(chapters)
     if not nums:
         return "错误：章节号格式无效"
+
+    db = _get_db(workspace_path)
+    rows = db.chapter_get_range(nums)
+    found = {r["chapter_num"]: r for r in rows}
 
     patterns = {kw: re.compile(re.escape(kw), re.IGNORECASE) for kw in keywords}
 
     result_lines = []
     for num in nums:
-        title, body = _read_chapter_file(doc_dir, num)
-        if title is None:
+        row = found.get(num)
+        if row is None:
             result_lines.append(f"第{num}章: （不存在）")
             continue
 
-        label = title
+        label = row["title"] or f"第{num}章"
+        body = row["content"]
         counts = []
         for kw in keywords:
             count = len(patterns[kw].findall(body))
@@ -136,7 +178,7 @@ def keywords_stat(workspace_path: Path, chapters: str, keywords: list[str]) -> s
 
 
 def show_chapter(workspace_path: Path, num: int) -> str:
-    """展示单个章节（show 指令使用）
+    """展示单个章节（show 指令使用，从 DB）
 
     Returns:
         "第1章 楔子\n\n(正文)"
@@ -144,12 +186,13 @@ def show_chapter(workspace_path: Path, num: int) -> str:
     if num < 1:
         return "错误：章节号必须为正整数"
 
-    doc_dir = workspace_path / "document"
-    title, body = _read_chapter_file(doc_dir, num)
-    if title is None:
+    db = _get_db(workspace_path)
+    row = db.chapter_get(num)
+    if row is None:
         return f"错误：第{num}章不存在"
 
-    return f"{title}\n\n{body}"
+    title = row["title"] or f"第{num}章"
+    return f"{title}\n\n{row['content']}"
 
 
 # ---- 中文数字映射 ----
@@ -205,20 +248,23 @@ def parse_chapter_title(line: str) -> tuple[int | None, str | None]:
 
 
 def write_chapter(workspace_path: Path, num: int, content: str) -> str:
-    """写入单个章节文件
+    """写入单个章节到 DB
 
     Args:
         num: 章节号
-        content: 全文内容（含标题行）
+        content: 全文内容（含标题行，自动拆分 title/body）
 
     Returns:
         操作结果消息
     """
     if num < 1:
         return "错误：章节号必须为正整数"
-    doc_dir = workspace_path / "document"
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    fp = _chapter_file(doc_dir, num)
-    content = content.strip() + "\n"
-    fp.write_text(content, encoding="utf-8")
+
+    content = content.strip()
+    lines = content.splitlines()
+    title = lines[0].strip() if lines else f"第{num}章"
+    body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+
+    db = _get_db(workspace_path)
+    db.chapter_upsert(num, title, body)
     return f"已写入第{num}章"
