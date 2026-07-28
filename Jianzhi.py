@@ -1100,7 +1100,12 @@ class JianzhiAgent(BaseAgent):
                     return json.dumps({
                         "status": "rejected",
                         "reason": reason,
-                        "message": f"计划被打回，理由：{reason}。请根据理由修改后重新提交。"
+                        "message": f"计划被打回，理由：{reason}。请根据理由修改后重新提交。",
+                        "memory_hint": (
+                            "重要：用户的打回理由可能包含跨会话有价值的纠正信息。"
+                            "请判断是否值得调用 memory_write(category='correction', content=...) "
+                            "将用户的纠正意见记录为记忆，以便后续会话不再犯同样的错误。"
+                        )
                     }, ensure_ascii=False)
 
             return result
