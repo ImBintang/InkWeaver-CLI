@@ -509,26 +509,55 @@ class MuseWorkflow:
     ④ 写作审阅（可循环③④直至通过）
     """
 
-    def __init__(self, config: dict, workspace: Path, skills_dir: Path, workspaces_dir: Optional[Path] = None):
+    def __init__(self, config: dict, workspace: Path, skills_dir: Path, workspaces_dir: Optional[Path] = None,
+                 io=None, outline_text: str = "", auto_approve: bool = False):
         self.workspace = workspace
         self.skills_dir = skills_dir
         self.workspaces_dir = workspaces_dir
         self.llm_config = config["api"]
         self.io = MuseIO(workspace)
-        self.outline: str = ""
+        self.outline: str = outline_text
         self.prior_knowledge: str = ""
         self.plot_summary: str = ""
         self.current_draft: str = ""
         self.issues: list = []  # 携带到下一轮的 issue 列表
         self._token_stats = {}  # step_name -> {input, output, total}
         self._token_total = {"input": 0, "output": 0, "total": 0}
+        self._io_channel = io  # v5.2: IOChannel 实例
+        self._auto_approve = auto_approve  # v5.2: 自动确认模式
 
     def run(self):
         """运行妙笔工作流"""
-        self._step_input_outline()
+        if not self.outline:
+            self._step_input_outline()
+        else:
+            self.io.save_outline(self.outline)
         self._step_knowledge_prep()
         self._step_writing_loop()
         self._finish()
+
+    # ---- v5.2 I/O 辅助 ----
+
+    def _confirm(self, prompt: str) -> bool:
+        """y/n 确认，尊重 _auto_approve"""
+        if self._auto_approve:
+            return True
+        print(prompt)
+        try:
+            return input().strip().lower() == "y"
+        except (EOFError, KeyboardInterrupt):
+            return True
+
+    def _input(self, prompt: str = "") -> str:
+        """读取输入，_auto_approve 时返回空"""
+        if self._auto_approve:
+            return ""
+        if prompt:
+            print(prompt)
+        try:
+            return input().strip()
+        except (EOFError, KeyboardInterrupt):
+            return ""
 
     # ---- 工作区切换 ----
 
@@ -660,18 +689,10 @@ class MuseWorkflow:
             print("先验知识：")
             print(self.prior_knowledge)
             print("\n确认知识准备通过？[y/n]")
-            try:
-                choice = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                choice = "y"
-            if choice == "y":
+            if self._confirm(""):
                 break
-            elif choice == "n":
-                print("请输入打回理由：")
-                try:
-                    reason = input().strip()
-                except (EOFError, KeyboardInterrupt):
-                    reason = ""
+            else:
+                reason = self._input("请输入打回理由：")
                 print("正在根据反馈增量修正...")
                 self._revise_knowledge(reason)
 
@@ -685,18 +706,10 @@ class MuseWorkflow:
             self.plot_summary = textwrap.dedent(self.plot_summary)
             print(self.plot_summary)
             print("\n确认前情提要通过？[y/n]")
-            try:
-                choice = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                choice = "y"
-            if choice == "y":
+            if self._confirm(""):
                 break
-            elif choice == "n":
-                print("请输入打回理由：")
-                try:
-                    reason = input().strip()
-                except (EOFError, KeyboardInterrupt):
-                    reason = ""
+            else:
+                reason = self._input("请输入打回理由：")
                 print("正在根据反馈增量修正...")
                 self._revise_knowledge(reason)
 
@@ -875,19 +888,11 @@ class MuseWorkflow:
                 print(polished)
                 print("\n审阅意见已保存至 muse/ 目录。")
                 print("\n确认通过？[y/n]（输入 n 可写自定义意见打回重写）")
-                try:
-                    choice = input().strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    choice = "y"
-                if choice == "y":
+                if self._confirm(""):
                     self.io.save_final(polished)
                     break
-                elif choice == "n":
-                    print("请输入修改意见（可选，直接回车跳过）：")
-                    try:
-                        user_feedback = input().strip()
-                    except (EOFError, KeyboardInterrupt):
-                        user_feedback = ""
+                else:
+                    user_feedback = self._input("请输入修改意见（可选，直接回车跳过）：")
                     self.issues = review_result["issues"]
                     if user_feedback:
                         self.issues.append({
@@ -1002,8 +1007,9 @@ class MuseWorkflow:
 
     def _create_agent(self, skill_names: list[str]) -> MuseAgent:
         """创建妙笔 Agent 实例，将 skill 文件内容注入 system prompt"""
-        from cli import CLI
-        cli = CLI()
+        from core.io import IOChannel
+        from core.output import OutputFormatter
+        cli = IOChannel(formatter=OutputFormatter(json_mode=False))
         agent = MuseAgent(
             config={"api": self.llm_config},
             workspace=self.workspace,

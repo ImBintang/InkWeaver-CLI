@@ -1000,9 +1000,8 @@ class JianzhiAgent(BaseAgent):
 
             if result_data.get("status") == "pending_review":
                 self.cli.print_plan(result_data)
-                self.cli.print_info("请确认是否执行此计划 (y/n)：")
-                confirm = input().strip().lower()
-                if confirm == "y":
+                confirmed = self.cli.confirm("是否执行此计划？(y/n)")
+                if confirmed:
                     plan = result_data.get("plan", {})
                     if self.permission.mode == "review":
                         # 审核阶段：合并到现有白名单，不重置
@@ -1035,7 +1034,7 @@ class JianzhiAgent(BaseAgent):
                         }, ensure_ascii=False)
                 else:
                     self.cli.print_info("请输入打回理由：")
-                    reason = input().strip()
+                    reason = self.cli.read_line() or ""
                     return json.dumps({
                         "status": "rejected",
                         "reason": reason,
