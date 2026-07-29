@@ -36,9 +36,9 @@ class SQLiteService:
 
     def __init__(self, db_path: Path):
         if isinstance(db_path, str) and db_path == ":memory:":
-            self.conn = sqlite3.connect(":memory:")
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
-            self.conn = sqlite3.connect(str(db_path))
+            self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -655,3 +655,43 @@ class SQLiteService:
     def memory_list_active(self, category: str = None) -> list[dict]:
         """列出所有活跃记忆"""
         return self.memory_query(category=category, limit=999)
+
+    # ── Drafts CRUD（v6.0 草稿系统）──
+
+    def draft_create(self, chapter_num: int, content: str,
+                     source: str = "user", title: str = "") -> int:
+        from datetime import datetime
+        now = datetime.now().isoformat()
+        word_count = len(content.replace(" ", "").replace("\n", ""))
+        cur = self.conn.execute(
+            "INSERT INTO drafts (chapter_num, title, content, source, "
+            "created_at, updated_at, word_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (chapter_num, title, content, source, now, now, word_count),
+        )
+        self._commit()
+        return cur.lastrowid
+
+    def draft_get(self, draft_id: int) -> dict | None:
+        cur = self.conn.execute(
+            "SELECT * FROM drafts WHERE id = ?", (draft_id,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def draft_list(self, chapter_num: int = None) -> list[dict]:
+        if chapter_num is not None:
+            cur = self.conn.execute(
+                "SELECT * FROM drafts WHERE chapter_num = ? ORDER BY created_at DESC",
+                (chapter_num,))
+        else:
+            cur = self.conn.execute(
+                "SELECT * FROM drafts ORDER BY created_at DESC")
+        return [dict(row) for row in cur.fetchall()]
+
+    def draft_delete(self, draft_id: int) -> bool:
+        cur = self.conn.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
+        self._commit()
+        return cur.rowcount > 0
+
+    def draft_count(self) -> int:
+        cur = self.conn.execute("SELECT COUNT(*) FROM drafts")
+        return cur.fetchone()[0]

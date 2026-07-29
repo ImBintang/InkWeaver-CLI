@@ -22,13 +22,13 @@ class KnowledgeAgent(JianzhiAgent):
     - 注入 Knowledge 模式 system prompt
     """
 
-    def __init__(self, config: dict, workspace: Path, skills_dir: Path, cli,
+    def __init__(self, config: dict, workspace: Path, skills_dir: Path, bus,
                  messages: list = None):
         """
         Args:
             messages: 从父 Agent 传入的对话历史（模式切换时保留上下文）
         """
-        super().__init__(config, workspace, skills_dir, cli)
+        super().__init__(config, workspace, skills_dir, bus)
         if messages is not None:
             self.messages = messages
         # 权限管家由父类 JianzhiAgent 初始化
@@ -462,8 +462,6 @@ class KnowledgeAgent(JianzhiAgent):
         if name == "confirm_plan":
             self.permission.confirm_plan()
             msg = "✅ 已切换至「执行阶段」，写操作已放行。"
-            if self.cli and self.cli.logger:
-                self.cli.logger.write("PERMISSION", msg)
             return msg
 
         # Knowledge 专家模式专属工具（通用工具由父类 JianzhiAgent 处理）
@@ -478,13 +476,13 @@ class KnowledgeAgent(JianzhiAgent):
             "edit_rule": lambda **kw: rules_tools.edit_rule(self.workspace, **kw),
             "delete_rule": lambda **kw: rules_tools.delete_rule(self.workspace, **kw),
             "knowledge_task": lambda **kw: run_knowledge_task(
-                self.llm, self.workspace, cli=self.cli,
+                self.llm, self.workspace, cli=None,
                 token_callback=lambda i, o: self._accumulate_tokens(
                     {"input_tokens": i, "output_tokens": o}
                 ), **kw
             ),
             "plot_task": lambda **kw: run_plot_task(
-                self.llm, self.workspace, cli=self.cli,
+                self.llm, self.workspace, cli=None,
                 token_callback=lambda i, o: self._accumulate_tokens(
                     {"input_tokens": i, "output_tokens": o}
                 ), **kw
@@ -498,7 +496,7 @@ class KnowledgeAgent(JianzhiAgent):
             "edit_index": lambda **kw: category_tools.edit_index(self.workspace, **kw),
             "read_index": lambda **kw: category_tools.read_index(self.workspace, **kw),
             "review_knowledge": lambda **kw: _run_review(
-                self.llm, self.workspace, cli=self.cli,
+                self.llm, self.workspace, cli=None,
                 token_callback=lambda i, o: self._accumulate_tokens(
                     {"input_tokens": i, "output_tokens": o}
                 ), **kw

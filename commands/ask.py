@@ -1,10 +1,12 @@
 """ask 命令 — 单轮提问"""
 
 import time
+import threading
 import typer
 
 from commands.common import load_config, resolve_workspace, make_io, SKILLS_DIR
 from core.output import OutputFormatter
+from core.events import EventBus, EventType
 
 
 def ask(
@@ -24,13 +26,33 @@ def ask(
     # 创建 I/O 通道（单轮模式）
     io = make_io(json_mode=json_mode, workspace=ws, mode="single-turn", cmd="ask")
 
-    # 初始化 Agent
+    # 初始化 Agent（事件总线模式）
     from Jianzhi import JianzhiAgent
-    jianzhi = JianzhiAgent(config, ws, SKILLS_DIR, io)
+    from commands.chat import _CLIConsumer
+    bus = EventBus()
+    jianzhi = JianzhiAgent(config, ws, SKILLS_DIR, bus)
+
+    # 启动事件消费线程
+    consumer = _CLIConsumer(io, bus)
+    consumer_thread = threading.Thread(target=consumer.run, daemon=True)
+    consumer_thread.start()
 
     # 执行单轮提问
     start = time.time()
-    jianzhi.chat(question)
+    agent_done = threading.Event()
+
+    def _run():
+        try:
+            jianzhi.chat(question)
+        except Exception as e:
+            bus.emit(EventType.ERROR, {"text": f"Agent 异常：{e}"}, source="jianzhi")
+        finally:
+            bus.emit(EventType.TASK_DONE, {}, source="jianzhi")
+            agent_done.set()
+
+    agent_thread = threading.Thread(target=_run, daemon=True)
+    agent_thread.start()
+    consumer.wait_for_done(agent_done)
     elapsed = time.time() - start
 
     # 收集统计
@@ -52,6 +74,7 @@ def ask(
             elapsed=elapsed,
         )
 
+    consumer.stop()
     io.close_logger()
 
 

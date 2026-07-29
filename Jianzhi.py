@@ -10,6 +10,7 @@ from agent.compact import ContextManager, PersistCache
 from agent.skill import SkillRegistry
 from agent.loop import agent_loop
 from agent.permission import PermissionManager
+from core.events import EventType
 from tools import chapter as chapter_tools
 from tools import wiki as wiki_tools
 from tools import rules as rules_tools
@@ -74,8 +75,10 @@ def _read_lint_report(workspace: Path) -> str:
 class JianzhiAgent(BaseAgent):
     """写作智能体 — 组装各模块并提供统一入口"""
 
-    def __init__(self, config: dict, workspace: Path, skills_dir: Path, cli):
-        super().__init__(config, workspace, cli)
+    _agent_name = "jianzhi"
+
+    def __init__(self, config: dict, workspace: Path, skills_dir: Path, bus):
+        super().__init__(config, workspace, bus)
         self.todo = TodoManager()
         self.context = ContextManager()
         self.skills = SkillRegistry(skills_dir)
@@ -1074,8 +1077,9 @@ class JianzhiAgent(BaseAgent):
                 return result
 
             if result_data.get("status") == "pending_review":
-                self.cli.print_plan(result_data)
-                confirmed = self.cli.confirm("是否执行此计划？(y/n)")
+                # 通过事件总线请求用户确认
+                confirm_resp = self.bus.request_confirm("plan", result_data, source="jianzhi")
+                confirmed = confirm_resp.get("action") == "approve"
                 if confirmed:
                     plan = result_data.get("plan", {})
                     if self.permission.mode == "review":
@@ -1089,9 +1093,7 @@ class JianzhiAgent(BaseAgent):
                                 self._proxy.load_whitelist(plan)
                         except Exception as e:
                             err_msg = f"计划批准流程异常：{e}。请重试或联系管理员。"
-                            self.cli.print_info(err_msg)
-                            if self.cli.logger:
-                                self.cli.logger.write("ERROR", f"submit_plan 异常：{e}")
+                            self.bus.emit(EventType.ERROR, {"text": err_msg}, source="jianzhi")
                             return json.dumps({
                                 "status": "error",
                                 "message": err_msg,
@@ -1108,8 +1110,7 @@ class JianzhiAgent(BaseAgent):
                             )
                         }, ensure_ascii=False)
                 else:
-                    self.cli.print_info("请输入打回理由：")
-                    reason = self.cli.read_line() or ""
+                    reason = confirm_resp.get("reason", "")
                     return json.dumps({
                         "status": "rejected",
                         "reason": reason,
@@ -1206,7 +1207,7 @@ class JianzhiAgent(BaseAgent):
                     try:
                         self._proxy.flush(scope_chapter=scope_chapter)
                     except Exception as e:
-                        self.cli.print_info(f"DB flush 失败：{e}")
+                        self.bus.emit(EventType.ERROR, {"text": f"DB flush 失败：{e}"}, source="jianzhi")
                         return json.dumps({
                             "status": "error",
                             "message": f"DB 写入失败：{e}。缓存已保留，可重试。"
@@ -1413,7 +1414,7 @@ class JianzhiAgent(BaseAgent):
             if msg.get("role") == "assistant" and msg.get("content"):
                 text = msg["content"].strip()
                 if text:
-                    self.cli.print_output(text)
+                    self.bus.emit(EventType.OUTPUT, {"text": text}, source="jianzhi")
                 break
 
         return False
@@ -1429,7 +1430,7 @@ class JianzhiAgent(BaseAgent):
             "role": "user",
             "content": "（上下文已压缩，继续当前工作）"
         }]
-        self.cli.print_info("上下文已压缩。")
+        self.bus.emit(EventType.INFO, {"text": "上下文已压缩。"}, source="jianzhi")
 
     # ---- v4 工作流辅助方法 ----
 
@@ -1443,7 +1444,7 @@ class JianzhiAgent(BaseAgent):
         with open(path, "w", encoding="utf-8") as f:
             for msg in self.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        self.cli.print_info(f"上下文已存档至：{path}")
+        self.bus.emit(EventType.INFO, {"text": f"上下文已存档至：{path}"}, source="jianzhi")
 
     # ---- v5.4.2 断链重要性审核 ----
 
@@ -1466,43 +1467,26 @@ class JianzhiAgent(BaseAgent):
             return []
 
     def _audit_forced_debts(self, forced: list[dict]) -> tuple[list[dict], list[dict]]:
-        """阻塞式用户审核：返回 (approved, rejected)"""
-        self.cli.print_info("")
-        self.cli.print_info("⚠️ 以下断链实体重要性等级≥2，进入强制债务审核：")
-        for i, item in enumerate(forced, 1):
-            self.cli.print_info(
-                f"  [{i}] {item['target']}"
-                f"（等级{item.get('level', '?')} / "
-                f"{item['mention_count']}条目提及 / "
-                f"词频{item['frequency']} / "
-                f"覆盖{item['chapter_count']}章）"
-            )
-        self.cli.print_info("")
-        self.cli.print_info('回车=全部通过，输入拒绝编号（如 "2" 或 "1,2"）：')
+        """通过事件总线请求用户审核：返回 (approved, rejected)"""
+        # 发射确认请求，阻塞等待用户响应
+        response = self.bus.request_confirm("forced_debt", {"items": forced}, source="jianzhi")
 
-        response = self.cli.read_line()
-        # None (Ctrl+C) 或空字符串（回车）→ 全部通过
-        if response is None or response.strip() == "":
+        # 解析响应：{"approved": [...], "rejected": [...]}  或默认全部通过
+        if not response or response.get("action") == "approve_all":
             return forced, []
 
-        # 解析拒绝编号
-        try:
-            reject_ids = {int(x.strip()) for x in response.split(",") if x.strip()}
-        except ValueError:
-            # 无法解析→全部通过
-            return forced, []
-
+        rejected_indices = set(response.get("rejected_indices", []))
         approved = []
         rejected = []
-        for i, item in enumerate(forced, 1):
-            if i in reject_ids:
+        for i, item in enumerate(forced):
+            if i in rejected_indices:
                 rejected.append(item)
             else:
                 approved.append(item)
 
         if rejected:
             names = ", ".join(item["target"] for item in rejected)
-            self.cli.print_info(f"已拒绝：{names}，将自动取消链接。")
+            self.bus.emit(EventType.INFO, {"text": f"已拒绝：{names}，将自动取消链接。"}, source="jianzhi")
 
         return approved, rejected
 

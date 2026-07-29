@@ -4,15 +4,19 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from api import LLMClient
+from core.events import EventBus, EventType
 
 
 class BaseAgent(ABC):
-    """Agent 抽象基类 — 所有 Agent 继承此类"""
+    """Agent 抽象基类 — 所有 Agent 继承此类
 
-    def __init__(self, config: dict, workspace: Path, cli):
+    v6.0: I/O 交互通过 EventBus 解耦，不再直接引用 cli 对象。
+    """
+
+    def __init__(self, config: dict, workspace: Path, bus: EventBus):
         self.config = config
         self.workspace = workspace
-        self.cli = cli
+        self.bus = bus
         self.llm = LLMClient(config["api"])
         self.messages: list = []
         self._last_usage = {}
@@ -83,12 +87,13 @@ class BaseAgent(ABC):
         self._token_accum["output"] += output_tokens
         self._token_accum["total"] += total
 
-        if self.cli.logger:
-            self.cli.logger.write(
-                "TOKEN",
-                f"本次: input={input_tokens}, output={output_tokens}, total={total} | "
-                f"累计: input={self._token_accum['input']}, output={self._token_accum['output']}, total={self._token_accum['total']}"
-            )
+        # 通过事件总线广播 token 统计
+        self.bus.emit(EventType.TOKEN_STATS, {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total": total,
+            "accum": dict(self._token_accum),
+        }, source=getattr(self, "_agent_name", "system"))
 
     def token_report(self) -> str:
         """返回累计 token 统计"""
@@ -105,4 +110,4 @@ class BaseAgent(ABC):
     def clear_context(self):
         """清空上下文"""
         self.messages = []
-        self.cli.print_info("上下文已清空。")
+        self.bus.emit(EventType.INFO, {"text": "上下文已清空。"}, source="system")

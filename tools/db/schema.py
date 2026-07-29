@@ -133,6 +133,21 @@ CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_active ON memories(is_active);
 """
 
+# ── Drafts 表（v6.0 草稿系统）──
+DRAFTS_TABLE = """
+CREATE TABLE IF NOT EXISTS drafts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    chapter_num INTEGER NOT NULL,
+    title       TEXT DEFAULT '',
+    content     TEXT NOT NULL,
+    source      TEXT NOT NULL DEFAULT 'user',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    word_count  INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_drafts_chapter ON drafts(chapter_num);
+"""
+
 ALL_TABLES = [
     CATEGORIES_TABLE,
     WIKI_MAIN_TABLE, WIKI_INDEX_TABLE,
@@ -140,4 +155,23 @@ ALL_TABLES = [
     RULES_MAIN_TABLE, RULES_INDEX_TABLE,
     CHAPTERS_TABLE,
     MEMORIES_TABLE,
+    DRAFTS_TABLE,
 ]
+
+# ── Token 统计表（全局独立库 .env/token_stats.db）──
+TOKEN_STATS_TABLE = """
+CREATE TABLE IF NOT EXISTS token_traces (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    book          TEXT NOT NULL,
+    agent         TEXT NOT NULL,
+    model_id      TEXT,
+    model_name    TEXT,
+    input_tokens  INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    total_tokens  INTEGER DEFAULT 0,
+    purpose       TEXT DEFAULT '',
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_traces_book ON token_traces(book);
+CREATE INDEX IF NOT EXISTS idx_traces_time ON token_traces(created_at);
+"""

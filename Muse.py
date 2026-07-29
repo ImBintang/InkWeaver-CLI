@@ -16,6 +16,7 @@ from agent.base import BaseAgent
 from agent.skill import SkillRegistry
 from agent.todo import TodoManager
 from agent.loop import agent_loop
+from core.events import EventType
 from tools.muse_io import MuseIO
 from tools import workspace as workspace_tools
 from tools.polish import polish_draft
@@ -82,9 +83,11 @@ class MuseAgent(BaseAgent):
     v5.3: 支持 chapter_ceiling 版本硬切。
     """
 
-    def __init__(self, config: dict, workspace: Path, skills_dir: Path, cli,
+    _agent_name = "muse"
+
+    def __init__(self, config: dict, workspace: Path, skills_dir: Path, bus,
                  chapter_ceiling: int | None = None):
-        super().__init__(config, workspace, cli)
+        super().__init__(config, workspace, bus)
         self.skills = SkillRegistry(skills_dir)
         self.todo = TodoManager()
         self.review_session = None
@@ -442,24 +445,24 @@ class MuseAgent(BaseAgent):
         # Workflow 调用 — 输出存入 _last_subagent_output，供 Workflow 取用
         if name == "call_knowledge_workflow":
             from tools.knowledge_workflow import KnowledgeWorkflow
-            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace, cli=self.cli)
+            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 # 校验失败，返回错误信息让 LLM 修正后重试，不终止循环
                 return result
             self._last_subagent_output = result
-            self.cli.print_output(result)
+            self.bus.emit(EventType.OUTPUT, {"text": result}, source="muse")
             self._stop_agent_loop = True
             return "(先验知识已生成)"
 
         if name == "call_plot_workflow":
             from tools.plot_workflow import PlotWorkflow
-            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace, cli=self.cli)
+            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 return result
             self._last_subagent_output = result
-            self.cli.print_output(result)
+            self.bus.emit(EventType.OUTPUT, {"text": result}, source="muse")
             self._stop_agent_loop = True
             return "(前情提要已生成)"
 
@@ -1320,14 +1323,29 @@ class MuseWorkflow:
 
     def _create_agent(self, skill_names: list[str]) -> MuseAgent:
         """创建妙笔 Agent 实例，将 skill 文件内容注入 system prompt"""
-        from core.io import IOChannel
-        from core.output import OutputFormatter
-        cli = IOChannel(formatter=OutputFormatter(json_mode=False))
+        from core.events import EventBus
+        import threading
+        bus = EventBus()
+
+        # 轻量级消费线程：排干队列，避免事件累积；确认类事件自动放行
+        def _drain():
+            while True:
+                evt = bus.get(timeout=0.2)
+                if evt is None:
+                    continue
+                if evt.type == EventType.CONFIRM_REQUEST:
+                    cid = evt.data.get("confirm_id", "")
+                    if cid:
+                        bus.resolve_confirm(cid, {"action": "approve"})
+
+        drain_thread = threading.Thread(target=_drain, daemon=True)
+        drain_thread.start()
+
         agent = MuseAgent(
             config={"api": self.llm_config},
             workspace=self.workspace,
             skills_dir=self.skills_dir,
-            cli=cli,
+            bus=bus,
             chapter_ceiling=self.chapter_ceiling,
         )
         # 将 skill 全文注入 system prompt（LLM 才能看到工作流指引）

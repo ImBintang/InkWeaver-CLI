@@ -1,5 +1,6 @@
 """chat 命令 — 鉴知对话 REPL"""
 
+import threading
 import typer
 
 from commands.common import (
@@ -7,6 +8,7 @@ from commands.common import (
     require_workspace, make_io, SKILLS_DIR
 )
 from core.output import OutputFormatter
+from core.events import EventBus, EventType
 
 
 _HELP_TEXT = """可用指令：
@@ -57,9 +59,15 @@ def chat(
     io.print_info(f"进入工作区：{ws.name}")
     io.print_info("输入 /help 查看可用指令。")
 
-    # 初始化 Agent
+    # 初始化 Agent（使用事件总线）
     from Jianzhi import JianzhiAgent
-    jianzhi = JianzhiAgent(config, ws, SKILLS_DIR, io)
+    bus = EventBus()
+    jianzhi = JianzhiAgent(config, ws, SKILLS_DIR, bus)
+
+    # 启动事件消费线程（将事件翻译为 CLI 输出）
+    consumer = _CLIConsumer(io, bus)
+    consumer_thread = threading.Thread(target=consumer.run, daemon=True)
+    consumer_thread.start()
 
     # REPL 主循环
     while True:
@@ -78,11 +86,149 @@ def chat(
             if not _handle_slash(cmd_text, io, jianzhi, config, ws):
                 break
         else:
-            # 普通对话
-            jianzhi.chat(text)
+            # 普通对话 — 在独立线程中运行 Agent
+            agent_done = threading.Event()
 
+            def _run_agent():
+                try:
+                    jianzhi.chat(text)
+                except Exception as e:
+                    bus.emit(EventType.ERROR, {"text": f"Agent 异常：{e}"}, source="jianzhi")
+                finally:
+                    bus.emit(EventType.TASK_DONE, {}, source="jianzhi")
+                    agent_done.set()
+
+            agent_thread = threading.Thread(target=_run_agent, daemon=True)
+            agent_thread.start()
+
+            # 主线程等待 Agent 完成（事件由后台消费线程统一处理）
+            consumer.wait_for_done(agent_done)
+
+    consumer.stop()
     io.close_logger()
     io.print_info("再见！")
+
+
+class _CLIConsumer:
+    """事件消费者 — 将 EventBus 事件翻译为 CLI 输出（CLIAdapter 雏形）
+
+    单消费者模型：所有事件（含确认交互）均由后台 run() 线程处理，
+    主线程仅通过 wait_for_done() 等待 Agent 完成，避免双线程竞争队列。
+    """
+
+    def __init__(self, io, bus: EventBus):
+        self.io = io
+        self.bus = bus
+        self._running = True
+
+    def run(self):
+        """消费循环 — 在独立线程中运行，统一处理所有事件"""
+        while self._running:
+            event = self.bus.get(timeout=0.05)
+            if event is None:
+                continue
+            try:
+                self._handle(event)
+            except Exception as e:
+                # 兜底：确认类事件异常时自动放行，避免 Agent 线程永久阻塞
+                if event.type == EventType.CONFIRM_REQUEST:
+                    cid = event.data.get("confirm_id", "")
+                    if cid:
+                        self.bus.resolve_confirm(cid, {"action": "approve"})
+                try:
+                    self.io.print_info(f"事件处理异常：{e}")
+                except Exception:
+                    pass
+
+    def stop(self):
+        self._running = False
+
+    def wait_for_done(self, agent_done: 'threading.Event'):
+        """主线程等待 Agent 完成（事件由 run() 线程统一消费）"""
+        while not agent_done.is_set():
+            agent_done.wait(timeout=0.1)
+        # 等待消费线程处理完剩余事件
+        import time
+        time.sleep(0.2)
+
+    def _handle(self, event):
+        """处理单个事件"""
+        match event.type:
+            case EventType.TOKEN:
+                pass  # CLI 不逐 token 输出，等 OUTPUT 事件
+            case EventType.OUTPUT:
+                self.io.print_output(event.data["text"])
+            case EventType.THINKING:
+                self.io.print_thinking("思考中...")
+            case EventType.THINKING_DONE:
+                self.io.print_thinking_done(event.data.get("elapsed", 0))
+            case EventType.REASONING:
+                self.io.print_reasoning(event.data["text"])
+            case EventType.TOOL_CALL:
+                self.io.print_tool_call(event.data["name"], event.data.get("brief", ""))
+            case EventType.TOOL_RESULT:
+                self.io.print_tool_result(event.data["msg"])
+            case EventType.INFO:
+                self.io.print_info(event.data["text"])
+            case EventType.ERROR:
+                self.io.print_info(f"错误：{event.data['text']}")
+            case EventType.TOKEN_STATS:
+                # 写入日志
+                if self.io.logger:
+                    accum = event.data.get("accum", {})
+                    self.io.logger.write(
+                        "TOKEN",
+                        f"本次: input={event.data['input']}, output={event.data['output']} | "
+                        f"累计: input={accum.get('input',0)}, output={accum.get('output',0)}, total={accum.get('total',0)}"
+                    )
+            case EventType.CONFIRM_REQUEST:
+                self._handle_confirm(event)
+            case _:
+                pass
+
+    def _handle_confirm(self, event):
+        """处理确认请求 — 复用现有 IOChannel 的阻塞式交互"""
+        confirm_id = event.data["confirm_id"]
+        confirm_type = event.data["confirm_type"]
+        payload = event.data["payload"]
+
+        if confirm_type == "plan":
+            self.io.print_plan(payload)
+            confirmed = self.io.confirm("是否执行此计划？(y/n)")
+            if confirmed:
+                self.bus.resolve_confirm(confirm_id, {"action": "approve"})
+            else:
+                self.io.print_info("请输入打回理由：")
+                reason = self.io.read_line() or ""
+                self.bus.resolve_confirm(confirm_id, {"action": "reject", "reason": reason})
+
+        elif confirm_type == "forced_debt":
+            items = payload.get("items", [])
+            self.io.print_info("")
+            self.io.print_info("⚠️ 以下断链实体重要性等级≥2，进入强制债务审核：")
+            for i, item in enumerate(items, 1):
+                self.io.print_info(
+                    f"  [{i}] {item['target']}"
+                    f"（等级{item.get('level', '?')} / "
+                    f"{item.get('mention_count', 0)}条目提及 / "
+                    f"词频{item.get('frequency', 0)} / "
+                    f"覆盖{item.get('chapter_count', 0)}章）"
+                )
+            self.io.print_info("")
+            self.io.print_info('回车=全部通过，输入拒绝编号（如 "2" 或 "1,2"）：')
+            response = self.io.read_line()
+            if response is None or response.strip() == "":
+                self.bus.resolve_confirm(confirm_id, {"action": "approve_all"})
+            else:
+                try:
+                    reject_ids = {int(x.strip()) - 1 for x in response.split(",") if x.strip()}
+                except ValueError:
+                    reject_ids = set()
+                self.bus.resolve_confirm(confirm_id, {"rejected_indices": list(reject_ids)})
+
+        else:
+            # 未知确认类型，默认通过
+            self.bus.resolve_confirm(confirm_id, {"action": "approve"})
 
 
 def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
@@ -206,7 +352,24 @@ def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
 
     elif command == "extract":
         io.print_info("触发知识提取...")
-        jianzhi.chat("请执行知识提取流程")
+        _bus = jianzhi.bus
+        agent_done = threading.Event()
+
+        def _run_extract():
+            try:
+                jianzhi.chat("请执行知识提取流程")
+            except Exception as e:
+                _bus.emit(EventType.ERROR, {"text": f"Agent 异常：{e}"}, source="jianzhi")
+            finally:
+                _bus.emit(EventType.TASK_DONE, {}, source="jianzhi")
+                agent_done.set()
+
+        threading.Thread(target=_run_extract, daemon=True).start()
+        # 等待 Agent 完成（事件由后台消费线程统一处理）
+        import time as _time
+        while not agent_done.is_set():
+            agent_done.wait(timeout=0.1)
+        _time.sleep(0.2)  # 等待消费线程处理完剩余事件
 
     else:
         io.print_info(f"未知指令：/{command}，输入 /help 查看可用指令")

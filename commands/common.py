@@ -13,18 +13,54 @@ SKILLS_DIR = Path(__file__).parent.parent / "skills"
 
 
 def load_config() -> dict:
-    """加载配置文件"""
+    """加载配置文件，并解析多模型格式为兼容的 config["api"]"""
     if not CONFIG_PATH.exists():
         print(f"错误：配置文件不存在 - {CONFIG_PATH}", file=sys.stderr)
         raise SystemExit(1)
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    # 新格式兼容：从 models + assignments 解析出 config["api"]
+    if "models" in config and "api" not in config:
+        config["api"] = resolve_api_config(config)
+    return config
+
+
+def resolve_api_config(config: dict, role: str = "chat") -> dict:
+    """从新格式（models + assignments）解析出 LLMClient 所需的 api config
+
+    Args:
+        config: 完整配置字典
+        role: 角色名（chat/extract/write/review）
+
+    Returns:
+        {"url": ..., "key": ..., "model": ..., "output_max_tokens": ...}
+    """
+    assignments = config.get("assignments", {})
+    model_id = assignments.get(role, "")
+    models = config.get("models", [])
+
+    model = next((m for m in models if m["id"] == model_id), None)
+    if model is None and models:
+        model = models[0]  # 回退到第一个模型
+    if model is None:
+        print("错误：配置文件中无可用模型", file=sys.stderr)
+        raise SystemExit(1)
+
+    return {
+        "url": model.get("base_url", ""),
+        "key": model.get("api_key", ""),
+        "model": model.get("model", ""),
+        "output_max_tokens": model.get("output_max_tokens", 128000),
+    }
 
 
 def save_config(config: dict):
-    """保存配置"""
+    """保存配置（自动剔除 load_config 派生的 api 字段，避免覆盖 models 配置）"""
+    persist = dict(config)
+    if "models" in persist:
+        persist.pop("api", None)  # api 是 load_config 的派生值，不落盘
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        yaml.dump(persist, f, allow_unicode=True, default_flow_style=False)
 
 
 def get_workspaces_dir(config: dict) -> Path:
