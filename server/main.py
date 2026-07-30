@@ -9,6 +9,7 @@ from server.router.books import router as books_router
 from server.router.chat import router as chat_router
 from server.router.muse import router as muse_router
 from server.router.knowledge import router as knowledge_router
+from server.router.sessions import router as sessions_router
 from server.router.settings import router as settings_router
 from server.router.stats import router as stats_router
 from server.sse import router as sse_router
@@ -34,6 +35,7 @@ app.include_router(books_router)
 app.include_router(chat_router)
 app.include_router(muse_router)
 app.include_router(knowledge_router)
+app.include_router(sessions_router)
 app.include_router(settings_router)
 app.include_router(stats_router)
 app.include_router(sse_router)
