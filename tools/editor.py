@@ -130,14 +130,29 @@ def resolve_path(workspace: Path, doc_type: str, name: str,
     if not subdir:
         raise ValueError(f"不支持的文档类型：{doc_type}（支持：wiki / plot / rule）")
 
+    # 路径安全校验：name 和 category 不得包含路径分隔符或上级目录引用
+    for param, param_name in [(name, "name"), (category, "category")]:
+        if param and ("/" in param or "\\" in param or ".." in param):
+            raise ValueError(f"非法{param_name}「{param}」：不得包含路径分隔符或上级目录引用")
+
     if doc_type == "wiki":
         if not category:
             raise ValueError("wiki 类型需要提供 category 参数")
-        return workspace / subdir / category / f"{name}.md"
+        resolved = (workspace / subdir / category / f"{name}.md").resolve()
+        # 确保解析后的路径仍在 workspace 内
+        if not str(resolved).startswith(str(workspace.resolve())):
+            raise ValueError(f"非法路径：超出工作区范围")
+        return resolved
     elif doc_type == "plot":
-        return workspace / subdir / f"{name}.md"
+        resolved = (workspace / subdir / f"{name}.md").resolve()
+        if not str(resolved).startswith(str(workspace.resolve())):
+            raise ValueError(f"非法路径：超出工作区范围")
+        return resolved
     elif doc_type == "rule":
-        return workspace / subdir / f"{name}.md"
+        resolved = (workspace / subdir / f"{name}.md").resolve()
+        if not str(resolved).startswith(str(workspace.resolve())):
+            raise ValueError(f"非法路径：超出工作区范围")
+        return resolved
     else:
         raise ValueError(f"不支持的文档类型：{doc_type}")
 
@@ -274,8 +289,8 @@ def _load_unlink_blacklist(workspace: Path) -> set[str]:
         data = json.loads(fp.read_text(encoding="utf-8"))
         if isinstance(data, list):
             return set(data)
-    except (json.JSONDecodeError, Exception):
-        pass
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"[DEBUG] 加载 unlink 黑名单失败: {e}")
     return set()
 
 
@@ -507,8 +522,8 @@ def _record_extraction_log(workspace: Path, doc_type: str, name: str,
             record_extraction(workspace, [], [], [name])
         elif doc_type == "rule":
             record_extraction(workspace, [], [], [])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[DEBUG] 记录操作日志失败: {e}")
 
 
 # ── 向后兼容别名（供原有模块引用） ──────────────────────────────────────────

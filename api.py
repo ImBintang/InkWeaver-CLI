@@ -1,10 +1,84 @@
 """LLM API 封装 — OpenAI SDK 单次调用 + 流式调用"""
 
+import os
+import socket
+from urllib.parse import urlparse
+
+import httpx
 from openai import OpenAI
 
 
+def _is_proxy_available(proxy: str) -> bool:
+    """测试代理服务是否可用"""
+    try:
+        # 解析代理地址
+        if "://" not in proxy:
+            proxy = f"http://{proxy}"
+        parsed = urlparse(proxy)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        
+        # 尝试连接
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+def _get_system_proxy() -> str | None:
+    """获取系统代理设置"""
+    # 检查环境变量
+    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or \
+            os.environ.get("http_proxy") or os.environ.get("https_proxy")
+    
+    if proxy:
+        return proxy
+    
+    # 检查 Windows 注册表代理
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        )
+        proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+        if proxy_enable:
+            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            return proxy_server
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+    
+    return None
+
+
+def _create_http_client() -> httpx.Client:
+    """创建 HTTP 客户端，自动处理代理问题
+    
+    当系统代理（如 Clash/V2Ray）配置了但服务未运行时，
+    OpenAI SDK 会尝试通过代理连接导致 WinError 10061 错误。
+    此时应禁用代理直接连接。
+    """
+    proxy = _get_system_proxy()
+    
+    # 如果存在代理，测试代理是否可用
+    if proxy:
+        if not _is_proxy_available(proxy):
+            # 代理不可用，禁用代理
+            print(f"[LLMClient] 代理 {proxy} 不可用，已禁用代理直接连接")
+            return httpx.Client(trust_env=False, timeout=httpx.Timeout(30, read=300))
+    
+    return httpx.Client(timeout=httpx.Timeout(30, read=300))
+
+
 class LLMClient:
-    """封装 OpenAI 兼容接口的 chat 调用"""
+    """封装 OpenAI 兼容接口 调用"""
+
+    # 超时设置（DeepSeek thinking 模式可能需要更长时间）
+    MAX_RETRIES = 2  # 网络错误时的最大重试次数
 
     def __init__(self, config: dict):
         """
@@ -16,9 +90,20 @@ class LLMClient:
             "output_max_tokens": 128000,
         }
         """
+        # 校验必填配置
+        required_keys = ["key", "url", "model"]
+        missing = [k for k in required_keys if k not in config or not config[k]]
+        if missing:
+            raise ValueError(f"LLMClient 配置缺少必填字段：{', '.join(missing)}")
+
+        # 检测是否需要禁用代理（当代理不可用时）
+        http_client = _create_http_client()
+        
         self.client = OpenAI(
             api_key=config["key"],
             base_url=config["url"],
+            http_client=http_client,
+            max_retries=0,  # 我们自己处理重试逻辑
         )
         self.model = config["model"]
         self.max_tokens = config.get("output_max_tokens", 128000)
@@ -52,7 +137,25 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
 
-        response = self.client.chat.completions.create(**kwargs)
+        last_error = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                break
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                # 认证错误、参数错误等不需要重试
+                if "api_key" in error_msg.lower() or "unauthorized" in error_msg.lower():
+                    raise ValueError(f"API 认证失败，请检查 config.yaml 中的 key：{e}") from e
+                if "invalid" in error_msg.lower() or "bad request" in error_msg.lower():
+                    raise ValueError(f"API 请求参数错误：{e}") from e
+                if attempt < self.MAX_RETRIES:
+                    import time
+                    time.sleep(1)
+        else:
+            raise ConnectionError(f"API 调用失败（已重试 {self.MAX_RETRIES} 次）：{last_error}") from last_error
+
         msg = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
 

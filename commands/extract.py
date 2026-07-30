@@ -158,7 +158,8 @@ def _get_processed_max(ws: Path) -> int:
             elif isinstance(item, int):
                 max_ch = max(max_ch, item)
         return max_ch
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] 获取已处理最大章节号失败: {e}")
         return 0
 
 
@@ -168,5 +169,6 @@ def _get_total_chapters(ws: Path) -> int:
         from tools.editor import _get_proxy
         proxy = _get_proxy(ws)
         return proxy._db.chapter_count()
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] 获取总章节数失败: {e}")
         return 0

@@ -33,8 +33,8 @@ class IOChannel:
             raw = input()
         except (EOFError, KeyboardInterrupt):
             return None
-        # 解析 \n 转义为实际换行（GUI 兼容）
-        text = raw.replace("\\n", "\n")
+        # 解析 \n 转义为实际换行（GUI 兼容）— 仅转换显式的 \n 转义序列
+        text = raw.replace("\\n", "\n").replace("\\t", "\t")
         self._log("USER", text)
         return text
 
@@ -104,10 +104,73 @@ class IOChannel:
         if self.fmt.json_mode:
             self._log("PLAN", str(plan_summary)[:2000])
             return
-        from cli import CLI
-        old_cli = CLI()
-        old_cli.logger = self.session
-        old_cli.print_plan(plan_summary)
+
+        stats = plan_summary.get("stats", {})
+        plan = plan_summary.get("plan", {})
+
+        # 显示缺失字段警告
+        warnings = plan_summary.get("warnings", [])
+        if warnings:
+            lines = ["⚠️  计划字段缺失警告："]
+            for w in warnings:
+                lines.append(f"  • {w}")
+            lines.append("")
+        else:
+            lines = []
+
+        lines += [
+            "=" * 50,
+            f"📋 知识提取计划 — 范围：第 {plan_summary.get('scope', '?')} 章",
+            "=" * 50,
+        ]
+
+        if plan.get("new_category"):
+            lines.append(f"\n📁 新增类别 ({len(plan['new_category'])} 个)：")
+            for item in plan["new_category"]:
+                lines.append(f"  • {item['name']} — {item.get('reason', '')}")
+
+        if plan.get("new_wiki"):
+            lines.append(f"\n📝 新增 Wiki ({len(plan['new_wiki'])} 个)：")
+            for item in plan["new_wiki"]:
+                lines.append(f"  • [{item['category']}] {item['name']}")
+                lines.append(f"    章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
+
+        if plan.get("edit_wiki"):
+            lines.append(f"\n✏️  修改 Wiki ({len(plan['edit_wiki'])} 个)：")
+            for item in plan["edit_wiki"]:
+                lines.append(f"  • [{item['category']}] {item['name']}")
+                lines.append(f"    章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
+
+        if plan.get("new_rule"):
+            lines.append(f"\n📄 新增规则 ({len(plan['new_rule'])} 个)：")
+            for item in plan["new_rule"]:
+                lines.append(f"  • {item['name']} — {item.get('reason', '')}")
+
+        if plan.get("edit_rule"):
+            lines.append(f"\n📄 修改规则 ({len(plan['edit_rule'])} 个)：")
+            for item in plan["edit_rule"]:
+                lines.append(f"  • {item['name']} — {item.get('reason', '')}")
+
+        if plan.get("new_plot"):
+            lines.append(f"\n🎬 新增剧情卡片 ({len(plan['new_plot'])} 个)：")
+            for item in plan["new_plot"]:
+                lines.append(f"  • {item['name']} — 章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
+
+        if plan.get("edit_plot"):
+            lines.append(f"\n🎬 修改剧情卡片 ({len(plan['edit_plot'])} 个)：")
+            for item in plan["edit_plot"]:
+                lines.append(f"  • {item['name']} — 章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
+
+        lines.extend([
+            "",
+            "-" * 50,
+            "是否执行此计划？(y/n)",
+            "  y  — 确认执行",
+            "  n  — 打回，输入理由",
+        ])
+
+        for line in lines:
+            self.print_info(line)
 
     # ---- 确认 ----
 

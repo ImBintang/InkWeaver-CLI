@@ -2,7 +2,7 @@
 
 **墨笔（InkWeaver）** — 终端里的写作智能体。基于 LLM Agent 架构，为网文作者提供章节管理、知识提取（Wiki + 剧情卡片 + 规则）、关系图构建与智能写作辅助的一站式 CLI 工具。
 
-当前版本：**v6.0.1**
+当前版本：**v6.3.0**
 
 ---
 
@@ -70,6 +70,7 @@ inkweaver
 ├── ask <question>              # 单轮提问（完整 Agent loop）
 ├── extract                     # 单轮知识提取
 ├── muse                        # 单轮妙笔写作
+├── serve                       # 启动 FastAPI HTTP 后端
 │
 ├── workspace                   # 工作区管理
 │   ├── list                    # 列出所有工作区
@@ -316,8 +317,20 @@ InkWeaver-CLI/
 ├── auto/                   # 自动化（关系提取）
 ├── api.py                  # LLMClient（含 chat_stream 流式）
 ├── Jianzhi.py              # 鉴知 Agent
-├── Muse.py                 # 妙笔工作流
-├── cli.py                  # Legacy CLI（仅 print_plan 复用）
+├── Muse.py                 # 向后兼容入口（re-export muse/ 包）
+├── cli.py                  # 向后兼容入口（re-export core/ SessionLogger）
+├── muse/                   # 妙笔子包
+│   ├── __init__.py         # 导出 ReviewSession / MuseAgent / MuseWorkflow
+│   ├── review_session.py   # 审阅状态管理
+│   ├── agent.py            # MuseAgent 工具分发 + 版本硬切
+│   └── workflow.py         # 四步写作状态机
+├── server/                 # FastAPI HTTP 服务
+│   ├── state.py            # 服务器全局状态
+│   └── router/             # API 路由
+│       ├── books.py        # 工作区/章节/草稿
+│       ├── chat.py         # 鉴知对话
+│       ├── muse.py         # 妙笔写作
+│       └── knowledge.py    # 知识库查询
 └── pyproject.toml          # 包定义 + entry_points
 ```
 
@@ -383,3 +396,5 @@ META 首行标注调用模式：`chat` / `single-turn cmd=ask|extract|muse`。
 | v5.4 | 妙笔稳定性重构：手术刀编辑 + 增量审阅 + 断链重要性评分与分级处理 |
 | v6.0 | 事件总线架构改造 + GUI 桌面端（PyWebView + Vue 3，独立仓库） |
 | v6.0.1 | 代码审查缺陷修复（线程安全、事件总线健壮性、配置持久化） |
+| v6.2 | FastAPI 后端迁移（server/ 包、HTTP API、SSE 流式） |
+| v6.3 | Code Review 全量修复 + Muse.py 拆分基建 + cli/core 统一 + 安全加固 |

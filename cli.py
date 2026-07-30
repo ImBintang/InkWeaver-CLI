@@ -1,29 +1,27 @@
-"""终端 I/O：多行输入、指令识别、输出格式化、Session 日志归档"""
+"""终端 I/O — 向后兼容入口
+
+核心实现在 core/ 包中：
+- core.io.IOChannel：统一 I/O 通道
+- core.session.SessionLogger：会话日志
+- core.output.OutputFormatter：输出格式化
+
+本模块保留 CLI 类与 SessionLogger 符号，供旧代码兼容引用。
+新代码请直接从 core 包导入。
+"""
 
 import datetime
 import sys
 from pathlib import Path
 
-
-class SessionLogger:
-    """Session 日志归档 — 每次启动写入新文件"""
-
-    def __init__(self, session_dir: Path):
-        session_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = session_dir / f"session_{timestamp}.log"
-        self._file = self.path.open("w", encoding="utf-8")
-
-    def write(self, tag: str, text: str):
-        self._file.write(f"[{tag}] {text}\n")
-        self._file.flush()
-
-    def close(self):
-        self._file.close()
+# 向后兼容：SessionLogger 即 core.session.SessionLogger
+from core.session import SessionLogger  # noqa: F401
 
 
 class CLI:
-    """终端输入输出处理"""
+    """终端输入输出处理 — 向后兼容包装
+
+    功能已迁移至 core.io.IOChannel，本类保留以兼容旧接口。
+    """
 
     def __init__(self):
         self.logger: SessionLogger | None = None

@@ -9,7 +9,7 @@ class OutputFormatter:
 
     def __init__(self, json_mode: bool = False, color: bool = True):
         self.json_mode = json_mode
-        self.color = color and sys.stdout.isatty()
+        # color 参数保留接口兼容性，当前未启用
 
     def result(self, text: str):
         """最终结果输出"""

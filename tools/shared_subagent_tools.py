@@ -1,5 +1,9 @@
 """共享 subagent 工具定义 — knowledge_task / plot_task / review 三方复用"""
 
+import json
+from pathlib import Path
+from typing import Callable, Optional
+
 
 def build_shared_subagent_tools() -> list:
     """构建 subagent 共享的工具定义
@@ -227,3 +231,81 @@ def build_shared_subagent_tools() -> list:
             },
         },
     ]
+
+
+def run_subagent_loop(
+    agent,
+    messages: list,
+    max_turns: int = 15,
+    on_token: Optional[Callable] = None,
+) -> tuple[list, Optional[str]]:
+    """运行标准的 subagent 循环，返回 (messages, error)
+
+    封装了 knowledge_task / plot_task / review 三处重复的：
+    for _turn in range(max_turns):
+        llm_response = agent.llm.chat(...)
+        ...
+        agent.dispatch_tool(...)
+
+    Args:
+        agent: Agent 实例（需有 llm、dispatch_tool、system_prompt、tool_defs 属性）
+        messages: 初始消息列表
+        max_turns: 最大轮次
+        on_token: 可选的 token 回调 (input_tokens, output_tokens) -> None
+
+    Returns:
+        (messages, None) 或 (messages, error_message)
+    """
+    for _turn in range(max_turns):
+        try:
+            response = agent.llm.chat(
+                messages=messages,
+                system_prompt=agent.system_prompt,
+                tools=agent.tool_defs,
+            )
+        except Exception as e:
+            return messages, f"LLM 调用失败：{e}"
+
+        # 累积 token
+        usage = response.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0) or usage.get("input_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0) or usage.get("output_tokens", 0)
+        if on_token:
+            on_token(input_tokens, output_tokens)
+
+        # 将 assistant 消息加入历史
+        assistant_msg = {"role": "assistant", "content": response.get("content")}
+        tool_calls = response.get("tool_calls")
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        messages.append(assistant_msg)
+
+        # 无工具调用 → 结束循环
+        if response.get("stop_reason") != "tool_use" or not tool_calls:
+            return messages, None
+
+        # 执行工具调用
+        for tc in tool_calls:
+            tool_name = tc["function"]["name"]
+            try:
+                tool_input = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, TypeError) as e:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": f"错误：参数解析失败 {e}",
+                })
+                continue
+
+            try:
+                result = agent.dispatch_tool(tool_name, tool_input)
+            except Exception as e:
+                result = f"错误：工具执行异常 {e}"
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.get("id", ""),
+                "content": str(result),
+            })
+
+    return messages, f"达到最大轮次限制（{max_turns}）"

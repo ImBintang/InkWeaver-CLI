@@ -100,7 +100,8 @@ def agent_loop(agent, messages: list) -> list:
             # 解析 JSON 参数
             try:
                 tool_input = json.loads(func["arguments"])
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                print(f"[WARN] 工具调用参数解析失败 (tool={tool_name}): {e}")
                 tool_input = {}
 
             # 特殊处理 agent_output
@@ -114,7 +115,11 @@ def agent_loop(agent, messages: list) -> list:
                 bus.emit(EventType.TOOL_CALL, {"name": tool_name, "brief": brief}, source=source)
 
                 # 调度执行
-                result = agent.dispatch_tool(tool_name, tool_input)
+                try:
+                    result = agent.dispatch_tool(tool_name, tool_input)
+                except Exception as e:
+                    print(f"[WARN] 工具调度异常 (tool={tool_name}): {e}")
+                    result = f"错误：工具调度异常 {e}"
 
                 # 发射工具结果事件
                 bus.emit(EventType.TOOL_RESULT, {"name": tool_name, "msg": result[:60]}, source=source)

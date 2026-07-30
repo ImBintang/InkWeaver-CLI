@@ -99,6 +99,7 @@ class EventBus:
         resolved = event.wait(timeout=timeout)
         if not resolved:
             # 超时自动放行，避免死锁
+            print(f"[WARN] 确认请求超时（{timeout}s），自动放行 (confirm_type={confirm_type})")
             with self._lock:
                 self._pending_confirms.pop(confirm_id, None)
             return {"action": "approve", "_timeout": True}

@@ -285,9 +285,11 @@ class PersistCache:
             return False
         # 错误结果不缓存 — 让 LLM 看到失败信息
         if result.startswith("错误：") or result.startswith("错误:"):
+            print(f"[DEBUG] should_persist: 工具返回错误结果，不缓存 (tool={tool_name})")
             return False
         # 批量操作空结果不缓存（如 {"success": 0, "failed": 0, "items": []}）
         if '"success": 0' in result and '"failed": 0' in result:
+            print(f"[DEBUG] should_persist: 批量操作空结果，不缓存 (tool={tool_name})")
             return False
         if tool_name in PERSIST_ALWAYS:
             return True

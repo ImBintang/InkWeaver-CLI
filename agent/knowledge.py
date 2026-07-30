@@ -516,6 +516,7 @@ class KnowledgeAgent(JianzhiAgent):
             try:
                 return handler(**args)
             except Exception as e:
+                print(f"[WARN] Knowledge 工具执行失败 ({name}): {e}")
                 return f"错误：{e}"
 
         # 交给父类处理通用工具
