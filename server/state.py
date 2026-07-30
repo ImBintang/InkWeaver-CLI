@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from core.events import EventBus
+from tools.session_manager import SessionManager
 
 
 class ServerState:
@@ -20,6 +21,32 @@ class ServerState:
         self.agent_thread: threading.Thread | None = None
         self.agent_lock = threading.Lock()
         self.jianzhi = None  # 持久化鉴知 Agent 实例（多轮上下文）
+        # ─── Session management (v6.2) ───
+        self.current_session_id: str | None = None
+        self.session_manager: SessionManager | None = None
+
+
+    def bind_session_manager(self) -> SessionManager:
+        if not self.workspace_path:
+            raise RuntimeError("workspace_path not set")
+        self.session_manager = SessionManager(self.workspace_path, self.workspace_path / "chat_sessions")
+        return self.session_manager
+
+    def load_or_create_session(self) -> dict:
+        mgr = self.session_manager or self.bind_session_manager()
+        idx = mgr.load_index()
+        cur = idx.get("current_session_id")
+        if cur and not any(s["id"] == cur for s in idx["sessions"]):
+            cur = None
+        if cur is None:
+            active = [s for s in idx["sessions"] if not s.get("archived")]
+            if active:
+                cur = active[0]["id"]
+                idx["current_session_id"] = cur
+                mgr._save_index(idx)
+            else:
+                cur = mgr.create_session("新会话")
+        return mgr.activate(cur, clear_pending_confirm=True)
 
 
 state = ServerState()
