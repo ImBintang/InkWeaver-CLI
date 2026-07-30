@@ -31,6 +31,11 @@ def _parse_json(value: str) -> Any:
         return value
 
 
+def _count_words(text: str) -> int:
+    """统计中文字符数（不含标点/空白），用于字数统计"""
+    return sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+
+
 class SQLiteService:
     """SQLite 数据库服务"""
 
@@ -525,6 +530,30 @@ class SQLiteService:
             "SELECT chapter_num, title FROM chapters ORDER BY chapter_num")
         return [dict(r) for r in cur.fetchall()]
 
+    def chapter_list_all_with_count(self) -> list[dict]:
+        """列出所有章节（num + title + word_count + imported_at + draft_count），供 GUI 章节管理展示
+
+        word_count 按中文字符计数（去除空白和标点），与 Muse/Editor 保持一致。
+        imported_at 为该章节导入时间戳（Unix epoch）。
+        draft_count 为该章节拥有的草稿数量。
+        """
+        cur = self.conn.execute(
+            "SELECT chapter_num, title, content, imported_at FROM chapters ORDER BY chapter_num")
+        rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            content = d.pop("content", "") or ""
+            d["word_count"] = _count_words(content)
+            d["draft_count"] = self._count_drafts_for_chapter(d["chapter_num"])
+            rows.append(d)
+        return rows
+
+    def _count_drafts_for_chapter(self, chapter_num: int) -> int:
+        """返回某章节的草稿数量"""
+        cur = self.conn.execute(
+            "SELECT COUNT(*) FROM drafts WHERE chapter_num = ?", (chapter_num,))
+        return cur.fetchone()[0]
+
     def chapter_max_num(self) -> int:
         """返回最大章节号，无章节时返回 0"""
         cur = self.conn.execute("SELECT MAX(chapter_num) FROM chapters")
@@ -662,7 +691,7 @@ class SQLiteService:
                      source: str = "user", title: str = "") -> int:
         from datetime import datetime
         now = datetime.now().isoformat()
-        word_count = len(content.replace(" ", "").replace("\n", ""))
+        word_count = _count_words(content)
         cur = self.conn.execute(
             "INSERT INTO drafts (chapter_num, title, content, source, "
             "created_at, updated_at, word_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -676,6 +705,24 @@ class SQLiteService:
             "SELECT * FROM drafts WHERE id = ?", (draft_id,))
         row = cur.fetchone()
         return dict(row) if row else None
+
+    def draft_update(self, draft_id: int, content: str = None, title: str = None) -> bool:
+        """更新草稿内容/标题（部分更新）"""
+        from datetime import datetime
+        now = datetime.now().isoformat()
+        draft = self.draft_get(draft_id)
+        if not draft:
+            return False
+        new_content = content if content is not None else draft.get("content", "")
+        new_title = title if title is not None else draft.get("title", "")
+        word_count = _count_words(new_content)
+        self.conn.execute(
+            "UPDATE drafts SET content = ?, title = ?, word_count = ?, "
+            "updated_at = ? WHERE id = ?",
+            (new_content, new_title, word_count, now, draft_id),
+        )
+        self._commit()
+        return True
 
     def draft_list(self, chapter_num: int = None) -> list[dict]:
         if chapter_num is not None:

@@ -95,6 +95,33 @@ class BaseAgent(ABC):
             "accum": dict(self._token_accum),
         }, source=getattr(self, "_agent_name", "system"))
 
+        # 持久化到全局 token_stats.db
+        self._persist_token_record(input_tokens, output_tokens)
+
+    def _persist_token_record(self, input_tokens: int, output_tokens: int):
+        """将单次 token 消耗写入全局 token_stats.db（静默失败）"""
+        try:
+            from tools.db.token_stats import TokenStatsService
+            agent_name = getattr(self, "_agent_name", "system")
+            model_id = getattr(self.llm, "model", "")
+            model_name = getattr(self.llm, "model_name", "") or model_id
+            book = getattr(self, "_book_name", "")
+            purpose = getattr(self, "_purpose", "") or agent_name
+
+            ts = TokenStatsService()
+            ts.record(
+                book=book,
+                agent=agent_name,
+                model_id=model_id,
+                model_name=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                purpose=purpose,
+            )
+            ts.close()
+        except Exception:
+            pass  # Token 统计是辅助功能，失败不影响主流程
+
     def token_report(self) -> str:
         """返回累计 token 统计"""
         lines = [
