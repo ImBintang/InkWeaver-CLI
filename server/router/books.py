@@ -98,7 +98,15 @@ async def open_book(req: BookOpenReq) -> dict:
     state.current_book = req.name
     state.workspace_path = target
     _rebuild_jianzhi()
-    return {"ok": True, "name": req.name}
+    try:
+        state.bind_session_manager()
+        session_data = state.load_or_create_session()
+        state.current_session_id = session_data["id"]
+    except Exception as e:
+        print(f"[books] ⚠ session bind failed: {e}")
+        state.current_session_id = None
+        session_data = None
+    return {"ok": True, "name": req.name, "session": session_data}
 
 
 @router.post("/api/books")
