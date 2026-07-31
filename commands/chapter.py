@@ -25,6 +25,17 @@ def ch_import(
     fmt = OutputFormatter(json_mode=json_mode)
     ws = require_workspace(config, workspace, json_mode)
 
+    # P1-01：先预校验文件可解析（存在性+编码+章节标题），再动旧数据，
+    # 避免"先删后导"在文件损坏/无法解析时旧章节已清空不可恢复
+    err = workspace_tools.check_novel_file(path)
+    if err:
+        msg = f"无法导入：{path}（{err}）"
+        if json_mode:
+            print(json.dumps({"status": "error", "message": msg}, ensure_ascii=False))
+        else:
+            fmt.error(msg)
+        raise typer.Exit(1)
+
     # 检查是否已有章节
     from tools.editor import _get_proxy
     proxy = _get_proxy(ws)
@@ -37,10 +48,23 @@ def ch_import(
             if not confirm:
                 fmt.info("已取消导入。")
                 return
-        db.chapter_delete_all()
+        # P1-01：删除旧章节与导入在同一事务内，任一步失败自动回滚
+        with db.transaction():
+            db.chapter_delete_all()
+            result = workspace_tools.import_novel(ws, path)
+    else:
+        result = workspace_tools.import_novel(ws, path)
 
-    result = workspace_tools.import_novel(ws, path)
-    fmt.result(result)
+    if result.startswith("错误"):
+        if json_mode:
+            print(json.dumps({"status": "error", "message": result}, ensure_ascii=False))
+        else:
+            fmt.error(result)
+        raise typer.Exit(1)
+    if json_mode:
+        print(json.dumps({"status": "success", "message": result}, ensure_ascii=False))
+    else:
+        fmt.result(result)
 
 
 @app.command("list")
@@ -57,11 +81,9 @@ def ch_list(
     result = workspace_tools.list_latest_chapters(ws, n)
 
     if json_mode:
-        # 解析为结构化数据
+        # 首行为表头（"最新 N 章（共 M 章）："），不计入章节数
         lines = [l for l in result.strip().splitlines() if l.strip()]
-        chapters = []
-        for line in lines:
-            chapters.append(line.strip())
+        chapters = [l.strip() for l in lines[1:]]
         print(json.dumps({"status": "success", "answer": result, "count": len(chapters)},
                          ensure_ascii=False, indent=2))
     else:
@@ -82,6 +104,10 @@ def ch_show(
     result = show_chapter(ws, num)
 
     if json_mode:
+        if result.startswith("错误"):
+            print(json.dumps({"status": "error", "message": result},
+                             ensure_ascii=False, indent=2))
+            raise typer.Exit(1)
         print(json.dumps({"status": "success", "answer": result},
                          ensure_ascii=False, indent=2))
     else:
@@ -107,7 +133,16 @@ def ch_export(
             return
 
     result = workspace_tools.export_novel(ws)
-    fmt.result(result)
+    if result.startswith("错误"):
+        if json_mode:
+            print(json.dumps({"status": "error", "message": result}, ensure_ascii=False))
+        else:
+            fmt.error(result)
+        raise typer.Exit(1)
+    if json_mode:
+        print(json.dumps({"status": "success", "message": result}, ensure_ascii=False))
+    else:
+        fmt.result(result)
 
 
 @app.command("status")

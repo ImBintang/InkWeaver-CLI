@@ -9,7 +9,12 @@ from openai import OpenAI
 
 
 def _is_proxy_available(proxy: str) -> bool:
-    """测试代理服务是否可用"""
+    """测试代理服务是否可用
+
+    返回 False 是接口语义（探测失败=不可用），调用方按"直连"降级；
+    但 socket 必须关闭，避免句柄泄漏。
+    """
+    sock = None
     try:
         # 解析代理地址
         if "://" not in proxy:
@@ -17,15 +22,17 @@ def _is_proxy_available(proxy: str) -> bool:
         parsed = urlparse(proxy)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or 80
-        
+
         # 尝试连接
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
         result = sock.connect_ex((host, port))
-        sock.close()
         return result == 0
     except Exception:
         return False
+    finally:
+        if sock is not None:
+            sock.close()
 
 
 def _get_system_proxy() -> str | None:
@@ -44,14 +51,19 @@ def _get_system_proxy() -> str | None:
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
         )
-        proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-        if proxy_enable:
-            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-            return proxy_server
-        winreg.CloseKey(key)
+        try:
+            proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if proxy_enable:
+                proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                return proxy_server
+        finally:
+            winreg.CloseKey(key)
     except Exception:
+        # 读取 Windows 注册表代理失败（无权限/平台差异）：按"无系统代理"
+        # 处理并继续直连——这是可探测的降级路径，非静默错误；
+        # 若此处是权限问题，HTTP 请求会给出明确的连接错误
         pass
-    
+
     return None
 
 

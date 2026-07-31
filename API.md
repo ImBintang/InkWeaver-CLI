@@ -666,7 +666,18 @@ Content-Type: application/json
 ```json
 {
   "session_id": "sess_20260730_150000_c3d4",
-  "session": { ... }
+  "session": {
+    "id": "sess_20260730_150000_c3d4",
+    "name": "新会话",
+    "created_at": "2026-07-30T15:00:00",
+    "updated_at": "2026-07-30T15:00:00",
+    "archived": false,
+    "message_count": 0,
+    "cap": 500,
+    "compact_summary": "",
+    "pending_confirm": null,
+    "first_user_message": ""
+  }
 }
 ```
 
@@ -1057,12 +1068,12 @@ GET /api/stats/tokens/history?limit=50&offset=0
 [
   {
     "id": 1,
-    "timestamp": "2026-07-30T14:30:00",
+    "created_at": "2026-07-30T14:30:00",
     "agent": "jianzhi",
     "book": "我的小说",
     "input_tokens": 3200,
     "output_tokens": 850,
-    "model": "deepseek-v4-flash"
+    "model_name": "deepseek-v4-flash"
   }
 ]
 ```
@@ -1275,8 +1286,8 @@ curl -X POST http://localhost:8000/api/muse/start \
 1. GET  /api/books              → 获取工作区列表
 2. POST /api/books/open         → 打开目标工作区
 3. GET  /api/books/{book}/sessions → 获取会话列表
-4. POST /api/chat/messages      → 发送消息
-5. GET  /api/events/stream      → 订阅 SSE 接收流式响应
+4. GET  /api/events/stream      → 订阅 SSE 接收流式响应（先于发消息建立）
+5. POST /api/chat/messages      → 发送消息
 6. POST /api/chat/confirm/{id}  → 响应确认请求（如有）
 ```
 

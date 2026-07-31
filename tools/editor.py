@@ -22,6 +22,7 @@ v5.0 改造：底层实现从文件读写改为调 db/proxy.py 的 ProxyService�
 
 import json
 import re
+import sys
 from pathlib import Path
 
 from typing import TYPE_CHECKING
@@ -40,8 +41,24 @@ def register_proxy(workspace: Path, proxy: "ProxyService"):
 
 
 def unregister_proxy(workspace: Path):
-    """工作区删除时清理代理实例"""
-    _proxy_instances.pop(str(workspace.resolve()), None)
+    """工作区删除时清理代理实例（关闭 DB 连接，防止 Windows 句柄占用）
+
+    P2：仅从字典移除会遗留打开的 SQLite 连接，删除/移动工作区时
+    Windows 下 rmtree 常因句柄占用失败；close 幂等，重复调用安全。
+    关闭失败不静默：打印到 stderr，让后续 rmtree 失败的原因可排查。
+    """
+    key = str(workspace.resolve())
+    proxy = _proxy_instances.pop(key, None)
+    if proxy is not None:
+        db = getattr(proxy, "_db", None)
+        if db is not None:
+            try:
+                db.close()
+            except Exception as e:
+                # 不静默：close 失败将导致 Windows 句柄占用，后续删除/移动
+                # 必然失败，必须让调用方（CLI/API 消费端）看到具体原因
+                print(f"[editor] 关闭 DB 连接失败（{workspace}）：{e}",
+                      file=sys.stderr)
 
 
 def _get_proxy(workspace: Path):
@@ -289,8 +306,10 @@ def _load_unlink_blacklist(workspace: Path) -> set[str]:
         data = json.loads(fp.read_text(encoding="utf-8"))
         if isinstance(data, list):
             return set(data)
-    except (json.JSONDecodeError, Exception) as e:
-        print(f"[DEBUG] 加载 unlink 黑名单失败: {e}")
+    except json.JSONDecodeError as e:
+        # 不静默：黑名单文件损坏必须显式报错，由上层（lint 链路）上报处置，
+        # 而不是返回空集让黑名单静默失效
+        raise ValueError(f"unlink 黑名单文件损坏（{fp}）：{e}") from e
     return set()
 
 

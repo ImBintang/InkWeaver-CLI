@@ -28,48 +28,75 @@ TOOL_RESULTS_DIR = Path(".task_outputs") / "tool-results"
 DEBT_FILE = "lint-debt.json"
 
 
-def _read_lint_report(workspace: Path) -> str:
-    """重新运行 lint 检查（刷新 lint-debt.json）并返回完整债务报告"""
-    # 先重跑 lint 以反映当前缓存/DB 的最新状态
+def _read_lint_report(workspace: Path, agent=None) -> str:
+    """重新运行 lint 检查（刷新 lint-debt.json）并返回完整债务报告
+
+    P1-13：任务内（proxy 缓存已加载）只对白名单内文档运行 lint，
+    避免全量 lint 改写非任务文档、将其注入缓存并在 finish_task 落库。
+    """
+    # 先重跑 lint 以反映当前缓存/DB 的最新状态；失败不静默，原因随报告返回
+    lint_warning = ""
     try:
         from tools.lint import run_lint
-        run_lint(workspace)
-    except Exception:
-        pass  # 即使 run_lint 失败，仍尝试读取旧报告
+        whitelist = None
+        if (agent is not None and getattr(agent, '_proxy', None) is not None
+                and agent._proxy.is_cache_loaded()):
+            whitelist = [
+                (doc.doc_type, doc.name)
+                for (_, _), doc in agent._proxy._cache.items()
+                if not doc.is_deleted
+            ]
+        run_lint(workspace, whitelist=whitelist)
+    except Exception as e:
+        lint_warning = f"\n（lint 重跑失败：{e}，以下为缓存报告）"
     fp = workspace / DEBT_FILE
     if not fp.exists():
-        return "（lint 报告不存在，请先运行 lint 检查）"
+        return f"（lint 报告不存在，请先运行 lint 检查）{lint_warning}"
     try:
         data = json.loads(fp.read_text(encoding="utf-8"))
         lines = ["## 完整 Lint 债务报告", ""]
         for debt_type, items in data.items():
-            if items:
-                lines.append(f"### {debt_type}（{len(items)} 项）")
-                for item in items:
-                    if debt_type == "broken_links":
-                        lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
-                    elif debt_type == "plot_broken_links":
-                        lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
-                    elif debt_type == "state_missing":
-                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "state_verbose":
-                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "length_overage":
-                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "desc_verbose":
-                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "file_errors":
-                        lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "unended_plots":
-                        lines.append(f"  ⚠️ {item.get('name', '?')}（{item.get('detail', '')}）")
-                    elif debt_type == "appearance":
-                        lines.append(f"  {item.get('file', '?')}（{item.get('detail', '')}）")
+            if not items:
+                continue
+            # P1-12：importance_scores 是 dict 而非 list，单独格式化
+            if debt_type == "importance_scores":
+                lines.append(f"### importance_scores（{len(items)} 项）")
+                for target, info in list(items.items())[:20]:
+                    if isinstance(info, dict):
+                        lines.append(
+                            f"  🔶 {target}（等级{info.get('level', '?')} / "
+                            f"{info.get('mention_count', '?')}条目提及 / "
+                            f"词频{info.get('frequency', '?')} / "
+                            f"覆盖{info.get('chapter_count', '?')}章）")
                     else:
-                        lines.append(f"  ⚠️ {json.dumps(item, ensure_ascii=False)}")
+                        lines.append(f"  🔶 {target}：{info}")
                 lines.append("")
-        return "\n".join(lines) if len(lines) > 1 else "（lint 报告为空，无债务）"
+                continue
+            if not isinstance(items, list):
+                lines.append(f"### {debt_type}（数据格式异常，跳过）")
+                lines.append("")
+                continue
+            lines.append(f"### {debt_type}（{len(items)} 项）")
+            for item in items:
+                if not isinstance(item, dict):
+                    lines.append(f"  ⚠️ {item}")
+                    continue
+                if debt_type in ("broken_links", "plot_broken_links"):
+                    lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
+                elif debt_type in ("state_missing", "state_verbose", "length_overage",
+                                   "desc_verbose", "file_errors"):
+                    lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                elif debt_type == "unended_plots":
+                    lines.append(f"  ⚠️ {item.get('name', '?')}（{item.get('detail', '')}）")
+                elif debt_type == "appearance":
+                    lines.append(f"  {item.get('file', '?')}（{item.get('detail', '')}）")
+                else:
+                    lines.append(f"  ⚠️ {json.dumps(item, ensure_ascii=False)}")
+            lines.append("")
+        report = "\n".join(lines) if len(lines) > 1 else "（lint 报告为空，无债务）"
+        return report + lint_warning
     except Exception as e:
-        return f"（读取 lint 报告失败：{e}）"
+        return f"（读取 lint 报告失败：{e}）{lint_warning}"
 
 
 class JianzhiAgent(BaseAgent):
@@ -97,6 +124,25 @@ class JianzhiAgent(BaseAgent):
 
         self.system_prompt = self.build_system_prompt()
         self.tool_defs = self.build_tool_defs()
+
+    def close(self):
+        """关闭持有的 DB 连接（幂等；切书/进程退出时调用，P1-37）"""
+        if getattr(self, '_db_service', None) is not None:
+            try:
+                self._db_service.close()
+            except Exception as e:
+                # 不静默：关闭失败通过事件总线上报（清理路径失败也须让上层感知）
+                try:
+                    self.bus.emit(EventType.ERROR,
+                                  {"text": f"关闭数据库连接失败：{e}"},
+                                  source="jianzhi")
+                except Exception as e2:
+                    # 最外层兜底：上报通道故障时打印 stderr（消费端：日志）
+                    import sys as _sys
+                    print(f"[jianzhi] 关闭 DB 失败且上报通道故障：{e}（{e2}）",
+                          file=_sys.stderr)
+        self._db_service = None
+        self._proxy = None
 
     def build_system_prompt(self) -> str:
         """组装 system prompt"""
@@ -221,8 +267,10 @@ class JianzhiAgent(BaseAgent):
             if memory_block:
                 parts.append("")
                 parts.append(memory_block)
-        except Exception:
-            pass  # DB 未就绪时静默跳过
+        except Exception as e:
+            # 不静默：记忆注入失败必须让 LLM 感知（否则会误以为记忆为空）
+            parts.append("")
+            parts.append(f"（注：记忆上下文加载失败：{e}，本次会话无记忆约束）")
 
         return "\n".join(parts)
 
@@ -1019,6 +1067,28 @@ class JianzhiAgent(BaseAgent):
             },
         })
 
+        # waive_forced_debt — 强制债务豁免（P1-15 出口）
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "waive_forced_debt",
+                "description": "强制债务豁免：当用户已批准的强制债务（等级≥2断链）确实无法创建词条时"
+                                "（创建内容失败 / 实为规则概念 / 语义已变），调用此工具请求用户豁免。"
+                                "用户批准后该债务将被取消链接，finish_task 不再校验。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "要豁免的断链目标名称列表",
+                        },
+                    },
+                    "required": ["targets"],
+                },
+            },
+        })
+
         # 为每个 skill 生成一个工具（渐进式披露：只暴露 name+description，调用时加载全文）
         for skill_name in self.skills.skill_names():
             doc = self.skills.documents.get(skill_name)
@@ -1135,6 +1205,7 @@ class JianzhiAgent(BaseAgent):
                 snapshot_path = snapshot_dir / "cache_snapshot.json"
                 self._proxy.snapshot(snapshot_path)
             # 自动运行 lint（任务内：只检查白名单内文档）
+            lint_result = ""
             try:
                 from tools.lint import run_lint
                 lint_whitelist = None
@@ -1147,11 +1218,17 @@ class JianzhiAgent(BaseAgent):
                 chapter_scope = sorted(self.permission.whitelist.read_chapters or [])
                 lint_result = run_lint(self.workspace, whitelist=lint_whitelist,
                                        chapter_scope=chapter_scope or None)
-            except Exception:
-                lint_result = "（lint 检查异常）"
+            except Exception as e:
+                # 错误不静默：失败原因随审核上下文注入，供 LLM 感知并处置
+                lint_result = f"（lint 检查异常：{e}）"
             # v5.4.2：断链重要性等级3审核节点
             forced_debts_approved = []
-            forced = self._extract_forced_debts()
+            forced = []
+            try:
+                forced = self._extract_forced_debts()
+            except Exception as e:
+                # 强制债务读取失败不静默：原因注入 lint 结果，本次跳过强制审核
+                lint_result += f"\n（强制债务读取失败：{e}，本次已跳过强制债务审核）"
             if forced:
                 approved, rejected = self._audit_forced_debts(forced)
                 if rejected:
@@ -1174,7 +1251,9 @@ class JianzhiAgent(BaseAgent):
                     "status": "error",
                     "message": (
                         f"强制债务未解决：{', '.join(forced_unresolved)}。"
-                        f"请先通过 submit_plan 申请白名单扩展并创建对应词条。"
+                        f"请先通过 submit_plan 申请白名单扩展并创建对应词条；"
+                        f"若确无法创建（如实体实为规则概念、创建反复失败），"
+                        f"可调用 waive_forced_debt 请求用户豁免该债务。"
                     )
                 }, ensure_ascii=False)
             # 沿用旧 finish_task 逻辑：校验存在性 + 记录 log.json + 构建关系图
@@ -1220,6 +1299,42 @@ class JianzhiAgent(BaseAgent):
             self._stop_agent_loop = True
             return _wf_finish(self.workspace)
 
+        if name == "waive_forced_debt":
+            # P1-15：强制债务豁免出口——LLM 确实无法创建时请求用户豁免，
+            # 批准后从强制债务清单移除并 unlink，避免 finish_task 无限阻塞
+            targets = args.get("targets", [])
+            if not isinstance(targets, list) or not targets:
+                return "错误：请提供 targets 参数（要豁免的断链目标名称列表）"
+            pending = getattr(self, '_forced_debts_pending', None) or []
+            pending_targets = {
+                d.get("target") if isinstance(d, dict) else d for d in pending
+            }
+            unknown = [t for t in targets if t not in pending_targets]
+            if unknown:
+                return f"错误：以下目标不在强制债务清单中：{', '.join(unknown)}"
+            response = self.bus.request_confirm(
+                "forced_debt_waive", {"targets": targets}, source="jianzhi")
+            if not response or response.get("_timeout"):
+                return json.dumps({
+                    "status": "rejected",
+                    "message": "豁免请求超时/无响应，默认拒绝。仍需创建这些词条。"
+                }, ensure_ascii=False)
+            if response.get("action") != "approve":
+                return json.dumps({
+                    "status": "rejected",
+                    "message": "用户未批准豁免，仍需创建这些词条。"
+                }, ensure_ascii=False)
+            # 批准：从强制债务清单移除 + unlink
+            self._forced_debts_pending = [
+                d for d in pending
+                if not ((d.get("target") if isinstance(d, dict) else d) in targets)
+            ]
+            self._unlink_rejected([{"target": t} for t in targets])
+            return json.dumps({
+                "status": "ok",
+                "message": f"已豁免并取消链接：{', '.join(targets)}。finish_task 不再校验这些实体。"
+            }, ensure_ascii=False)
+
         dispatch = {
             "update_todo": self._handle_todo,
             "tools_log_check": self._handle_tools_log_check,
@@ -1247,7 +1362,7 @@ class JianzhiAgent(BaseAgent):
             "memory_forget": lambda **kw: memory_tools.memory_forget(self.workspace, **kw),
             "doc_diff": lambda **kw: diff_tools.doc_diff(self.workspace),
             "context_query": lambda **kw: self.context.query_context(**kw),
-            "lint_report": lambda **kw: _read_lint_report(self.workspace),
+            "lint_report": lambda **kw: _read_lint_report(self.workspace, self),
             # 统一文档管理工具
             "create_doc": lambda **kw: editor_tools.create_doc(self.workspace, **kw),
             "edit_doc": lambda **kw: editor_tools.edit_doc(self.workspace, **kw),
@@ -1323,8 +1438,9 @@ class JianzhiAgent(BaseAgent):
                     if full:
                         return full[:30000]
                     return data.get("result_preview", "(缓存无完整输出)")
-            except Exception:
-                pass
+            except Exception as e:
+                # 不静默：缓存读取失败需让 LLM 知道，而非假装未找到
+                return f"（PersistCache 读取失败：{e}）未找到工具调用记录：{tool_use_id}"
         return f"未找到工具调用记录：{tool_use_id}"
 
     def _handle_read_chapters(self, chapters: str) -> str:
@@ -1463,16 +1579,25 @@ class JianzhiAgent(BaseAgent):
             # 按等级降序、词频降序排列
             forced.sort(key=lambda x: (-x.get("level", 0), -x.get("frequency", 0)))
             return forced
-        except Exception:
-            return []
+        except Exception as e:
+            # 不静默：读取失败必须让调用方知道（否则"失败"会被当成"无强制债务"）
+            raise RuntimeError(f"读取 lint-debt.json 失败：{e}") from e
 
     def _audit_forced_debts(self, forced: list[dict]) -> tuple[list[dict], list[dict]]:
         """通过事件总线请求用户审核：返回 (approved, rejected)"""
         # 发射确认请求，阻塞等待用户响应
         response = self.bus.request_confirm("forced_debt", {"items": forced}, source="jianzhi")
 
-        # 解析响应：{"approved": [...], "rejected": [...]}  或默认全部通过
-        if not response or response.get("action") == "approve_all":
+        # P1-18：超时/空响应默认全部拒绝（fail-safe）——用户不在场时
+        # 不强行创建高重要性实体；全部拒绝即全部 unlink，成为豁免出口
+        if not response or response.get("_timeout"):
+            self.bus.emit(EventType.INFO,
+                          {"text": "强制债务审核超时/无响应，默认全部拒绝并取消链接。"},
+                          source="jianzhi")
+            return [], forced
+
+        # 解析响应：{"approved": [...], "rejected": [...]}  或全部批准
+        if response.get("action") == "approve_all":
             return forced, []
 
         rejected_indices = set(response.get("rejected_indices", []))
@@ -1566,8 +1691,8 @@ class JianzhiAgent(BaseAgent):
             parts.append("### 计划内的知识条目")
             parts.extend(f"- {e}" for e in wiki_entries)
 
-        # 注入 lint 结果
-        if lint_result and lint_result != "（lint 检查异常）":
+        # 注入 lint 结果（含异常信息时同样注入，让 LLM 感知失败原因并处置）
+        if lint_result:
             parts.append("")
             parts.append("### 自动 Lint 检查结果")
             parts.append(lint_result[:8000])

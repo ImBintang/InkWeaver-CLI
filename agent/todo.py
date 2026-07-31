@@ -1,6 +1,6 @@
 """Todo 会话计划管理（参照 s03）"""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 PLAN_REMINDER_INTERVAL = 3
 MAX_ITEMS = 12
@@ -17,7 +17,9 @@ class TodoManager:
     """轻量会话计划，最多 12 项，最多 1 个 in_progress"""
 
     def __init__(self):
-        self.items: list[PlanItem] = field(default_factory=list)
+        # P1-10：非 dataclass 类不能用 field()，否则 self.items 是 Field 对象
+        # （恒真），"无计划"判断与迭代全部行为错误
+        self.items: list[PlanItem] = []
         self.rounds_since_update: int = 0
 
     def update(self, items: list[dict]) -> str:

@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 from pathlib import Path
 
 
@@ -27,6 +28,13 @@ def parse_chapter_spec(spec: str) -> list[int]:
             start, end = _extract_digits(start_str.strip()), _extract_digits(end_str.strip())
             if start == 0 and end == 0:
                 continue
+            # P2：残缺区间（如 "1-"、"-5"）不再生成非法章节 0，只取有效侧
+            if start == 0:
+                result.append(end)
+                continue
+            if end == 0:
+                result.append(start)
+                continue
             if start <= end:
                 result.extend(range(start, end + 1))
             else:
@@ -45,7 +53,11 @@ def _get_db(workspace_path: Path):
 
 
 def _load_processed_ranges(workspace_path: Path) -> list:
-    """从 log.json 加载已处理的章节范围"""
+    """从 log.json 加载已处理的章节范围
+
+    log.json 损坏不静默：打印警告到 stderr——否则损坏会被当作
+    "未处理过"，导致已处理章节被重复导入/覆盖（消费端：CLI 用户可见）。
+    """
     log_fp = workspace_path / "log.json"
     if not log_fp.exists():
         return []
@@ -53,7 +65,9 @@ def _load_processed_ranges(workspace_path: Path) -> list:
         with open(log_fp, "r", encoding="utf-8") as f:
             log = json.load(f)
         return log.get("processed", {}).get("chapter_ranges", [])
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[chapter] log.json 读取失败，将视为未处理过（{log_fp}）：{e}",
+              file=sys.stderr)
         return []
 
 
@@ -128,6 +142,8 @@ def read_chapters(workspace_path: Path, chapters: str) -> str:
     rows = db.chapter_get_range(nums)
     found = {r["chapter_num"]: r for r in rows}
 
+    # 注意：不截断正文（v4.0.0 Bug#6 起删除 MAX_BODY_CHARS）——
+    # 截断会丢失 50% 内容并诱发模型幻觉，完整正文交给消费端自行取舍
     parts = []
     for num in nums:
         row = found.get(num)
@@ -291,6 +307,10 @@ def write_chapter(workspace_path: Path, num: int, content: str) -> str:
         return "错误：章节号必须为正整数"
 
     content = content.strip()
+    # P1-20：空/纯空白内容拒绝写入，避免误调用静默清空整章（DB 无备份）
+    if not content:
+        return "错误：内容为空，拒绝写入（如需清空章节请使用明确操作）"
+
     lines = content.splitlines()
     raw_title = lines[0].strip() if lines else ""
     body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""

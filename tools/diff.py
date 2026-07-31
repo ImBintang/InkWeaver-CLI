@@ -145,6 +145,7 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
     _save_log(workspace, log)
 
     # 6. 债务治理后重跑 lint，刷新债务数据
+    lint_note = ""
     try:
         from tools.lint import run_lint
         lint_result = run_lint(workspace)
@@ -152,17 +153,25 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
         fix_count = 0
         debt_count = 0
         for line in lint_result.splitlines():
-            if "自动修复" in line:
-                m = re.search(r"（(\d+) 项）", line)
-                if m:
-                    fix_count = int(m.group(1))
-            if "待处理债务" in line:
-                m = re.search(r"（(\d+) 项）", line)
-                if m:
-                    debt_count = int(m.group(1))
+            m = re.search(r"### 自动修复（(\d+) 项）", line)
+            if m:
+                fix_count = int(m.group(1))
+            m = re.search(r"待处理债务 (\d+) 项", line)
+            if m:
+                debt_count = int(m.group(1))
         lint_note = f" | lint: 自动修复 {fix_count} 处，剩余债务 {debt_count} 项"
-    except Exception:
-        lint_note = " | lint 刷新失败（跳过）"
+        # P1-28：全局 lint 的自动修复经 proxy 写入缓存，这里立即 flush 落库，
+        # 避免报告宣称"已自动修复"但 DB 未变。无章节数据时缓存保留至下次 flush。
+        if proxy.is_cache_loaded():
+            max_ch = proxy._db.chapter_max_num()
+            if max_ch > 0:
+                proxy.flush(scope_chapter=max_ch)
+                lint_note += "（自动修复已落库）"
+            else:
+                lint_note += "（DB 无章节数据，修复保留在缓存中）"
+    except Exception as e:
+        # 错误不静默：失败原因随结果回传，由 LLM/用户决定如何处理
+        lint_note = f" | lint 刷新失败：{e}"
 
     return (f"✅ 任务已完成。已记录：{len(chapter_nums)} 章、"
             f"{len(new_wiki + updated_wiki)} 个 wiki 词条、"

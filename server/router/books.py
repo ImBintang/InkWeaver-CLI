@@ -63,19 +63,22 @@ async def list_books() -> list[dict]:
         for name in entries:
             ws_path = state.workspaces_dir / name
             chapters = 0
+            chapters_error = None
             db = None
             try:
                 db = SQLiteService(ws_path / "wiki.db")
                 chapters = db.chapter_count()
-            except Exception:
-                pass
+            except Exception as e:
+                # 不静默：单个工作区读取失败保留错误信息（区分"无数据"与"损坏"）
+                chapters_error = str(e)
             finally:
                 if db:
                     db.close()
-            result.append({"name": name, "path": str(ws_path), "chapters": chapters})
+            result.append({"name": name, "path": str(ws_path),
+                           "chapters": chapters, "chapters_error": chapters_error})
         return result
-    except Exception:
-        return []
+    except Exception as e:
+        raise HTTPException(500, detail=f"读取工作区列表失败：{e}")
 
 
 @router.get("/api/books/current")
@@ -134,10 +137,10 @@ def _get_db(book: str) -> SQLiteService:
 @router.get("/api/books/{book}/chapters")
 async def list_chapters(book: str) -> list[dict]:
     """列出某工作区下的所有章节"""
+    db = None
     try:
         db = _get_db(book)
         rows = db.chapter_list_all_with_count()
-        db.close()
         return [
             {
                 "num": r["chapter_num"],
@@ -148,27 +151,33 @@ async def list_chapters(book: str) -> list[dict]:
             }
             for r in rows
         ]
-    except Exception:
-        return []
+    except Exception as e:
+        raise HTTPException(500, detail=f"列出章节失败：{e}")
+    finally:
+        if db:
+            db.close()
 
 
 @router.get("/api/books/{book}/chapters/{num}")
 async def get_chapter(book: str, num: int) -> dict:
     """获取单章详情"""
+    db = None
     try:
         db = _get_db(book)
         row = db.chapter_get(num)
-        db.close()
         return row if row else {}
-    except Exception:
-        return {}
+    except Exception as e:
+        raise HTTPException(500, detail=f"读取章节 {num} 失败：{e}")
+    finally:
+        if db:
+            db.close()
 
 
 @router.post("/api/books/{book}/chapters/import")
 async def import_chapter(book: str, req: ChapterImportReq) -> dict:
     """导入章节文件"""
     try:
-        ws_path = state.workspaces_dir / book
+        ws_path = _safe_book_path(book)
         result = workspace_tools.import_novel(ws_path, req.file_path)
         if result.startswith("错误"):
             raise HTTPException(400, detail=result)
@@ -188,8 +197,8 @@ async def list_drafts(book: str, chapter_num: int | None = None) -> list[dict]:
     try:
         db = _get_db(book)
         return db.draft_list(chapter_num=chapter_num)
-    except Exception:
-        return []
+    except Exception as e:
+        raise HTTPException(500, detail=f"列出草稿失败：{e}")
     finally:
         if db:
             db.close()
@@ -203,8 +212,8 @@ async def get_draft(book: str, draft_id: int) -> dict:
         db = _get_db(book)
         row = db.draft_get(draft_id)
         return row if row else {}
-    except Exception:
-        return {}
+    except Exception as e:
+        raise HTTPException(500, detail=f"读取草稿 #{draft_id} 失败：{e}")
     finally:
         if db:
             db.close()
@@ -269,12 +278,25 @@ async def delete_draft(book: str, draft_id: int) -> dict:
 # ─── 内部工具 ──────────────────────────────────────────────────────
 
 def _rebuild_jianzhi():
-    """重建鉴知 Agent 实例（open_book 时调用）"""
+    """重建鉴知 Agent 实例（open_book 时调用）
+
+    P1-37：重建前先关闭旧实例的 SQLite 连接，避免句柄累积
+    导致 Windows 下 wiki.db 被锁、删除/移动失败。
+    """
     from commands.common import load_config, SKILLS_DIR
 
     if not state.workspace_path:
         return
     try:
+        # 关闭旧实例连接（幂等）
+        old = state.jianzhi
+        if old is not None:
+            try:
+                close = getattr(old, "close", None)
+                if close:
+                    close()
+            except Exception as e:
+                print(f"[books] ⚠ 关闭旧鉴知实例失败: {e}")
         from Jianzhi import JianzhiAgent
         config = load_config()
         state.jianzhi = JianzhiAgent(
@@ -283,5 +305,7 @@ def _rebuild_jianzhi():
             skills_dir=SKILLS_DIR,
             bus=state.bus,
         )
-    except Exception:
+    except Exception as e:
+        # 不静默：重建失败原因打印到服务端日志（GUI 会在下次调用时感知 jianzhi 为空）
+        print(f"[books] ⚠ 重建鉴知失败: {e}")
         state.jianzhi = None

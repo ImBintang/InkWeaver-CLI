@@ -54,8 +54,9 @@ async def get_settings() -> dict:
     try:
         config = load_config()
         return _mask_api_key(config)
-    except Exception:
-        return {}
+    except Exception as e:
+        # 不静默：配置读取失败必须返回 500，前端才能向用户展示明确错误
+        raise HTTPException(500, detail=f"读取配置失败：{e}")
 
 
 @router.put("/api/settings")
@@ -81,8 +82,9 @@ async def list_models() -> list[dict]:
             if len(key) > 8:
                 m["api_key"] = key[:4] + "***" + key[-4:]
         return models
-    except Exception:
-        return []
+    except Exception as e:
+        # 不静默：返回 500 而非空列表，避免前端误以为"没有模型"
+        raise HTTPException(500, detail=f"读取模型列表失败：{e}")
 
 
 @router.post("/api/settings/models")
@@ -104,13 +106,20 @@ async def add_model(req: ModelReq) -> dict:
 
 @router.put("/api/settings/models/{model_id}")
 async def update_model(model_id: str, req: ModelUpdateReq) -> dict:
-    """更新模型"""
+    """更新模型
+
+    P1-39：api_key 传空串/缺失时保留原 Key（“留空则保留原 Key”的 UI 承诺），
+    避免前端编辑时置空的 api_key 覆盖已保存密钥。
+    """
     try:
         config = load_config()
         models = config.get("models", [])
+        updates = req.model_dump(exclude_unset=True)
+        if "api_key" in updates and not (updates["api_key"] or "").strip():
+            updates.pop("api_key")  # 留空则保留原 Key
         for i, m in enumerate(models):
             if m.get("id") == model_id:
-                updated = {**m, **req.model_dump(exclude_unset=True), "id": model_id}
+                updated = {**m, **updates, "id": model_id}
                 models[i] = updated
                 save_config(config)
                 return {"ok": True}
@@ -147,8 +156,9 @@ async def get_model_assignments() -> dict:
     try:
         config = load_config()
         return config.get("assignments", {})
-    except Exception:
-        return {}
+    except Exception as e:
+        # 不静默：返回 500 而非空对象，避免前端误以为"没有分配"
+        raise HTTPException(500, detail=f"读取模型分配失败：{e}")
 
 
 @router.put("/api/settings/assignments/{role}")

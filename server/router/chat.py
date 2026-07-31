@@ -1,8 +1,6 @@
 """鉴知 HTTP API — 对话发送 + 确认响应 + 上下文管理"""
 
-import json
 import threading
-import time
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
@@ -40,8 +38,12 @@ async def chat_send(req: ChatSendReq, session_id: str | None = Query(default=Non
                 raise HTTPException(403, detail={"code": "session_full", "session_id": target})
         except HTTPException:
             raise
-        except Exception:
-            pass
+        except Exception as e:
+            # 不静默：会话读取失败（文件损坏等）上报 ERROR 事件（前端 SSE 可见），
+            # 但允许继续发送——消息写入路径会再次校验并给出明确错误
+            state.bus.emit(EventType.ERROR,
+                           {"text": f"会话检查失败（{target}）：{e}"},
+                           source="server")
     with state.agent_lock:
         if state.agent_thread and state.agent_thread.is_alive():
             raise HTTPException(409, detail="Agent 正在运行中，请等待完成")
@@ -55,19 +57,23 @@ async def chat_send(req: ChatSendReq, session_id: str | None = Query(default=Non
 
 def _run_jianzhi(text: str, session_id: str | None = None):
     """在独立线程中运行鉴知对话（复用持久化实例保持多轮上下文）"""
+    # P1-38：用局部变量贯穿任务全程，避免 finally 重读全局被任务中切换的会话串写
+    target_session = session_id or state.current_session_id
     try:
         if state.jianzhi is None:
             _rebuild_jianzhi()
         if state.jianzhi is None:
             state.bus.emit(EventType.ERROR, {"text": "无法初始化鉴知 Agent"}, source="jianzhi")
             return
-        state.current_session_id = session_id
+        if target_session:
+            state.current_session_id = target_session
+        # 广播任务开始（含会话绑定），供 SSE 后台消费者将输出缓冲到正确会话
+        state.bus.emit(EventType.TASK_START, {"session_id": target_session}, source="jianzhi")
         state.jianzhi.chat(text)
     except Exception as e:
         state.bus.emit(EventType.ERROR, {"text": str(e)}, source="jianzhi")
     finally:
-        target = state.current_session_id
-        state.bus.emit(EventType.TASK_DONE, {"session_id": target}, source="jianzhi")
+        state.bus.emit(EventType.TASK_DONE, {"session_id": target_session}, source="jianzhi")
 
 
 # ─── 确认响应 ──────────────────────────────────────────────────────
@@ -79,8 +85,12 @@ async def chat_resolve_confirm(confirm_id: str, req: ConfirmResReq) -> dict:
         if state.session_manager and state.current_session_id:
             try:
                 state.session_manager.save_pending_confirm(state.current_session_id, None)
-            except Exception:
-                pass
+            except Exception as e:
+                # 不静默：清除待确认状态失败（会话文件损坏）须上报，
+                # 但不应阻断确认本身（确认是主流程，清除是辅助）
+                state.bus.emit(EventType.ERROR,
+                               {"text": f"清除待确认状态失败：{e}"},
+                               source="server")
         state.bus.resolve_confirm(confirm_id, req.model_dump())
         return {"ok": True}
     except Exception as e:
@@ -126,8 +136,9 @@ async def chat_context_report() -> dict:
             "output_tokens": 0,
             "total_tokens": 0,
         }
-    except Exception:
-        return {"ok": True, "tokens": 0, "percent": 0}
+    except Exception as e:
+        # 不静默：返回明确的错误结构（ok=False），前端可展示失败原因
+        return {"ok": False, "error": str(e)}
 
 
 @router.post("/api/chat/clear")
@@ -139,15 +150,7 @@ async def chat_clear(session_id: str | None = Query(default=None)) -> dict:
             state.jianzhi.clear_context()
         if state.session_manager and target:
             try:
-                sess = state.session_manager.get_session(target)
-                new_meta = {"type": "meta", "id": sess["id"], "name": sess.get("name", "新会话"),
-                            "created_at": sess.get("created_at", ""), "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                            "archived": False, "compact_summary": sess.get("compact_summary", ""),
-                            "pending_confirm": None, "message_count": 0, "first_user_message": "",
-                            "cap": sess.get("cap", 500)}
-                fpath = state.session_manager.sess_file_path(target)
-                fpath.write_text(json.dumps(new_meta, ensure_ascii=False) + "\n", encoding="utf-8")
-                state.session_manager._update_index_summary(target, count=0, updated=new_meta["updated_at"])
+                state.session_manager.clear_session(target)
             except Exception as e:
                 print(f"[chat] ⚠ session clear failed: {e}")
         return {"ok": True, "session_id": target}

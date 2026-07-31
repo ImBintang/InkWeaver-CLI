@@ -21,6 +21,8 @@ WRITE_TOOLS = {
     "new_rule", "edit_rule", "delete_rule",
     "new_plot", "edit_plot", "end_plot", "delete_plot",
     "create_doc", "edit_doc", "edit_doc_text", "edit_doc_wikilink", "delete_doc",
+    # P1-08：Knowledge 模式子代理派发与索引修改同样必须在执行阶段才能进行
+    "knowledge_task", "plot_task", "edit_index",
 }
 
 # Review 模式下禁止的新建操作
@@ -145,9 +147,19 @@ class Whitelist:
             "delete_doc": lambda: self._check_doc_write(
                 params, self.edit_wiki, self.edit_rule, self.edit_plot
             ),
+            # P1-07：破坏性删除/收尾操作必须显式列白名单，否则默认拒绝
+            "delete_wiki": lambda: (
+                params.get("category"), params.get("name")
+            ) in self.edit_wiki,
+            "delete_rule": lambda: params.get("name") in self.edit_rule,
+            "delete_plot": lambda: params.get("name") in self.edit_plot,
+            "end_plot": lambda: params.get("name") in self.edit_plot,
         }
         check = checks.get(tool_name)
-        return check() if check else True
+        if check is None:
+            # fail-closed：未登记的写工具默认拒绝，避免新增破坏性工具时静默放行
+            return False
+        return check()
 
     def allows_read(self, tool_name: str, params: dict) -> bool:
         """检查读操作是否在白名单内（review 模式用）"""
@@ -187,6 +199,20 @@ class PermissionManager:
         self.phase = "planning"          # planning | executing
         self.mode = "extract"            # extract | review
         self.whitelist = Whitelist()
+        self._unlocked = False           # P1-05：Knowledge 模式 confirm_plan 后的全放行标志
+
+    def confirm_plan(self) -> str:
+        """Knowledge 专家模式：确认计划，切换至执行阶段（写权限全放行）
+
+        与 submit_plan（结构化白名单）不同：Knowledge 模式没有 plan JSON，
+        用户在 planning 阶段确认后直接解锁写权限（planning 阶段已由
+        WRITE_TOOLS 拦截兜底，杜绝规划期写入）。
+        """
+        if self.phase == "executing":
+            return "已处于执行阶段"
+        self.phase = "executing"
+        self._unlocked = True
+        return "OK"
 
     def submit_plan(self, plan_json: dict) -> str:
         """提交计划，构建白名单，切换至执行阶段"""
@@ -204,29 +230,61 @@ class PermissionManager:
         """
         if self.mode != "review":
             return "错误：submit_review_plan 仅能在 review 模式下使用"
+
+        # 字段缺失不静默：逐项校验并返回可读错误（否则 KeyError 被上层
+        # 吞成泛化"工具调度异常"，LLM 无法定位问题）
+        def _check(item: dict, key: str) -> str | None:
+            if not isinstance(item, dict) or not item.get(key):
+                return f"补充计划条目缺少字段「{key}」：{json.dumps(item, ensure_ascii=False)}"
+            return None
+
         for item in plan_json.get("new_wiki", []):
+            err = _check(item, "category") or _check(item, "name")
+            if err:
+                return f"错误：{err}"
             key = (item["category"], item["name"])
             self.whitelist.new_wiki.add(key)
             self.whitelist.edit_wiki.add(key)  # 创建后需能编辑补内容
             self.whitelist.read_wiki.add(key)
         for item in plan_json.get("edit_wiki", []):
+            err = _check(item, "category") or _check(item, "name")
+            if err:
+                return f"错误：{err}"
             key = (item["category"], item["name"])
             self.whitelist.edit_wiki.add(key)
             self.whitelist.read_wiki.add(key)
         for item in plan_json.get("new_rule", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.new_rule.add(item["name"])
         for item in plan_json.get("edit_rule", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.edit_rule.add(item["name"])
         for item in plan_json.get("new_plot", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.new_plot.add(item["name"])
             self.whitelist.read_plot.add(item["name"])
         for item in plan_json.get("edit_plot", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.edit_plot.add(item["name"])
             self.whitelist.read_plot.add(item["name"])
         # v5.4.2：支持审核阶段申请创建类别
         for item in plan_json.get("new_category", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.new_category.add(item["name"])
         for item in plan_json.get("edit_category", []):
+            err = _check(item, "name")
+            if err:
+                return f"错误：{err}"
             self.whitelist.edit_category.add(item["name"])
         return json.dumps({
             "status": "approved",
@@ -245,6 +303,7 @@ class PermissionManager:
         self.phase = "planning"
         self.mode = "extract"
         self.whitelist = Whitelist()
+        self._unlocked = False
 
     def _param_summary(self, tool_name: str, params: dict) -> str:
         """生成参数摘要用于拦截信息"""
@@ -290,7 +349,8 @@ class PermissionManager:
 
         # Step 2: 执行阶段 / Review 模式 → 写操作白名单检查
         if (self.phase == "executing" or self.mode == "review") and tool_name in WRITE_TOOLS:
-            if not self.whitelist.allows_write(tool_name, params):
+            # P1-05：Knowledge 模式 confirm_plan 后解锁（无结构化白名单）
+            if not self._unlocked and not self.whitelist.allows_write(tool_name, params):
                 param_info = self._param_summary(tool_name, params)
                 return (
                     f"[权限拦截] {tool_name}({param_info}) 不在计划白名单内。\n"

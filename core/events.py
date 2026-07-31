@@ -98,11 +98,12 @@ class EventBus:
         # 阻塞 Agent 线程，直到 resolve_confirm 被调用或超时
         resolved = event.wait(timeout=timeout)
         if not resolved:
-            # 超时自动放行，避免死锁
-            print(f"[WARN] 确认请求超时（{timeout}s），自动放行 (confirm_type={confirm_type})")
+            # P1-18：超时不自动放行，默认拒绝（fail-safe）——用户不在场时
+            # 高重要性实体/计划不能被默认批准；拒绝后由 Agent 自行降级处理
+            print(f"[WARN] 确认请求超时（{timeout}s），默认拒绝 (confirm_type={confirm_type})")
             with self._lock:
                 self._pending_confirms.pop(confirm_id, None)
-            return {"action": "approve", "_timeout": True}
+            return {"action": "reject", "_timeout": True}
         with self._lock:
             return self._confirm_results.pop(confirm_id, {})
 

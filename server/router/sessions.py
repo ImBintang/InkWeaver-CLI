@@ -19,7 +19,10 @@ class SessionPatch(BaseModel):
     archived: bool | None = None
 
 
-def _mgr():
+def _mgr(book: str):
+    if state.current_book and state.current_book != book:
+        from fastapi import HTTPException
+        raise HTTPException(409, detail=f"当前工作区为「{state.current_book}」，请先切换")
     if state.session_manager is None:
         if state.workspace_path:
             state.bind_session_manager()
@@ -38,7 +41,7 @@ async def list_sessions(book: str) -> dict:
 
 @router.post("/api/books/{book}/sessions")
 async def create_session(book: str, req: SessionCreate) -> dict:
-    mgr = _mgr()
+    mgr = _mgr(book)
     sid = mgr.create_session(req.name, req.cap)
     sess = mgr.activate(sid, clear_pending_confirm=True)
     state.current_session_id = sid
@@ -47,12 +50,12 @@ async def create_session(book: str, req: SessionCreate) -> dict:
 
 @router.get("/api/books/{book}/sessions/{session_id}")
 async def get_session(book: str, session_id: str) -> dict:
-    return _mgr().get_session(session_id)
+    return _mgr(book).get_session(session_id)
 
 
 @router.patch("/api/books/{book}/sessions/{session_id}")
 async def patch_session(book: str, session_id: str, req: SessionPatch) -> dict:
-    mgr = _mgr()
+    mgr = _mgr(book)
     if req.name is not None: mgr.rename(session_id, req.name)
     if req.archived is not None: mgr.archive(session_id, req.archived)
     return mgr.get_session(session_id)
@@ -60,7 +63,7 @@ async def patch_session(book: str, session_id: str, req: SessionPatch) -> dict:
 
 @router.delete("/api/books/{book}/sessions/{session_id}")
 async def delete_session(book: str, session_id: str) -> dict:
-    mgr = _mgr()
+    mgr = _mgr(book)
     mgr.delete_session(session_id)
     state.current_session_id = mgr.load_index().get("current_session_id")
     return {"ok": True, "new_current": state.current_session_id}
@@ -68,11 +71,11 @@ async def delete_session(book: str, session_id: str) -> dict:
 
 @router.post("/api/books/{book}/sessions/{session_id}/activate")
 async def activate_session(book: str, session_id: str) -> dict:
-    sess = _mgr().activate(session_id, clear_pending_confirm=True)
+    sess = _mgr(book).activate(session_id, clear_pending_confirm=True)
     state.current_session_id = session_id
     return sess
 
 
 @router.get("/api/books/{book}/sessions/{session_id}/stats")
 async def session_stats(book: str, session_id: str) -> dict:
-    return _mgr().get_stats(session_id)
+    return _mgr(book).get_stats(session_id)

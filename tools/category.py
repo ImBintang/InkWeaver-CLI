@@ -180,8 +180,10 @@ def edit_index(workspace: Path, content: str, category: str = None) -> str:
         return f"错误：类别「{category}」不存在"
     try:
         spec = json.loads(content) if isinstance(content, str) else content
-    except json.JSONDecodeError:
-        spec = {"description": content}
+    except json.JSONDecodeError as e:
+        # 不静默：JSON 解析失败返回错误，拒绝静默降级为 description
+        # （否则 LLM 以为 spec 已更新，实际写入的是结构化数据丢失的伪 spec）
+        return f"错误：spec 必须是合法 JSON（解析失败：{e}）"
     proxy._db.update_category(cat["id"], spec=json.dumps(spec, ensure_ascii=False))
     return f"已更新类别：{category}"
 

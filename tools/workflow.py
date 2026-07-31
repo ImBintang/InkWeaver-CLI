@@ -37,13 +37,20 @@ def submit_plan(workspace: Path, plan_json_str: str) -> str:
         }, ensure_ascii=False)
 
     # 检查章节数限制
+    # P1-17：default_chapters 只能收紧上限，不能放宽——上限硬性固定为 20 章
     from tools.chapter import parse_chapter_spec
     chapters = parse_chapter_spec(plan.get("scope", ""))
-    max_chapters = plan.get("default_chapters", 10)
-    if len(chapters) > max(20, max_chapters):
+    # default_chapters 无效时按默认 20 处理（非静默吞错：
+    # 这是参数规范化，最终仍受 max_chapters 上限约束，超限计划照样被拒）
+    try:
+        default_cap = int(plan.get("default_chapters", 20))
+    except (TypeError, ValueError):
+        default_cap = 20
+    max_chapters = max(1, min(20, default_cap))
+    if len(chapters) > max_chapters:
         return json.dumps({
             "status": "error",
-            "message": f"单次提取不得超过 20 章（当前 {len(chapters)} 章）"
+            "message": f"单次提取不得超过 {max_chapters} 章（当前 {len(chapters)} 章）"
         }, ensure_ascii=False)
 
     # 校验每项是否缺少必需字段

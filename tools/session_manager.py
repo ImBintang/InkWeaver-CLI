@@ -1,22 +1,25 @@
 """SessionManager — JSONL-backed storage for chat sessions in one book."""
 
 import json
+import sys
 import time
 import secrets
 from pathlib import Path
 from typing import Any
 
-from fastapi import HTTPException
 
-
-class SessionFullError(HTTPException):
+class SessionFullError(Exception):
+    """会话消息数已达上限"""
     def __init__(self, session_id: str):
-        super().__init__(status_code=403, detail={"code": "session_full", "session_id": session_id})
+        self.session_id = session_id
+        super().__init__(f"会话「{session_id}」消息数已达上限")
 
 
-class SessionNotFound(HTTPException):
+class SessionNotFound(Exception):
+    """会话不存在"""
     def __init__(self, session_id: str):
-        super().__init__(status_code=404, detail=f"会话「{session_id}」不存在")
+        self.session_id = session_id
+        super().__init__(f"会话「{session_id}」不存在")
 
 
 class SessionManager:
@@ -47,7 +50,11 @@ class SessionManager:
             if not isinstance(data.get("sessions"), list):
                 return self._empty_index()
             return data
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            # 不静默：索引损坏被静默重置会让用户看到"会话全部丢失"
+            # 且无法排查；打印警告到 stderr（消费端：服务日志）
+            print(f"[session_manager] 会话索引损坏，已重建空索引（{self.index_path}）：{e}",
+                  file=sys.stderr)
             return self._empty_index()
 
     def _save_index(self, index: dict):
@@ -85,6 +92,7 @@ class SessionManager:
             except json.JSONDecodeError:
                 end -= 1
         meta, messages = None, []
+        skipped = 0
         for line in lines[:end]:
             line = line.strip()
             if not line:
@@ -92,11 +100,17 @@ class SessionManager:
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
+                # 不静默：跳过损坏行（尾部截断容错），但统计数量并在
+                # 非零时打印警告——文件损坏必须可发现（消费端：服务日志）
+                skipped += 1
                 continue
             if obj.get("type") == "meta":
                 meta = obj
             elif obj.get("type") == "message":
                 messages.append(obj)
+        if skipped:
+            print(f"[session_manager] 会话文件含 {skipped} 行损坏 JSON（{fpath}），已跳过",
+                  file=sys.stderr)
         return meta, messages
 
     def _rewrite_meta_line(self, fpath: Path, new_meta: dict):
@@ -114,6 +128,30 @@ class SessionManager:
         tmp = fpath.with_suffix(".tmp")
         tmp.write_text(content, encoding="utf-8")
         tmp.replace(fpath)
+
+    def _read_meta_only(self, fpath: Path) -> dict | None:
+        """只读取 JSONL 首行 meta（不解析全部消息）
+
+        P1-21：add_message / save_pending_confirm 等高频路径原用 get_session
+        全量解析，每追加一条消息 O(n)，长会话 O(n²) 膨胀。本方法只读首行。
+        """
+        if not fpath.exists():
+            return None
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                first = f.readline().strip()
+            if not first:
+                return None
+            obj = json.loads(first)
+            return obj if obj.get("type") == "meta" else None
+        except json.JSONDecodeError as e:
+            # 不静默：meta 损坏意味着会话不可恢复，不能与"会话不存在"
+            # 混为一谈；打印真实原因，调用方仍按不存在处理但日志可查
+            print(f"[session_manager] 会话 meta 损坏（{fpath}）：{e}", file=sys.stderr)
+            return None
+        except OSError as e:
+            print(f"[session_manager] 读取会话 meta 失败（{fpath}）：{e}", file=sys.stderr)
+            return None
 
     def get_session(self, sid: str) -> dict:
         fpath = self.sess_file_path(sid)
@@ -152,18 +190,23 @@ class SessionManager:
         return sess
 
     def add_message(self, sid: str, msg: dict):
-        sess = self.get_session(sid)
-        if sess["message_count"] >= sess["cap"]:
-            raise SessionFullError(sid)
         fpath = self.sess_file_path(sid)
+        # P1-21：轻量读取 meta（仅首行），避免每消息全量解析 O(n²)
+        meta = self._read_meta_only(fpath)
+        if meta is None:
+            raise SessionNotFound(sid)
+        if meta.get("message_count", 0) >= meta.get("cap", self.default_cap):
+            raise SessionFullError(sid)
         with open(fpath, "a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "message", **msg}, ensure_ascii=False) + "\n")
-        new_meta = {**sess, "type": "meta", "message_count": sess["message_count"] + 1,
-                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-        if not sess["first_user_message"] and msg.get("role") == "user":
-            new_meta["first_user_message"] = msg.get("content", "")[:100]
+        new_meta = {**meta, "type": "meta",
+                    "message_count": meta.get("message_count", 0) + 1,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if not meta.get("first_user_message") and msg.get("role") == "user":
+            new_meta["first_user_message"] = (msg.get("content") or "")[:100]
         self._rewrite_meta_line(fpath, new_meta)
-        self._update_index_summary(sid, name=sess["name"], count=new_meta["message_count"],
+        self._update_index_summary(sid, name=meta.get("name", ""),
+                                    count=new_meta["message_count"],
                                     updated=new_meta["updated_at"])
 
     def _update_index_summary(self, sid: str, name=None, count=None, archived=None, updated=None):
@@ -202,8 +245,12 @@ class SessionManager:
         return result
 
     def save_pending_confirm(self, sid: str, confirm: dict | None):
-        sess = self.get_session(sid)
-        self._rewrite_meta_line(self.sess_file_path(sid), {**sess, "type": "meta", "pending_confirm": confirm})
+        fpath = self.sess_file_path(sid)
+        # P1-21：轻量读取 meta（仅首行），SSE 确认路径高频调用，避免全量解析
+        meta = self._read_meta_only(fpath)
+        if meta is None:
+            raise SessionNotFound(sid)
+        self._rewrite_meta_line(fpath, {**meta, "type": "meta", "pending_confirm": confirm})
 
     def load_pending_confirm(self, sid: str) -> dict | None:
         return self.get_session(sid).get("pending_confirm")
@@ -219,11 +266,14 @@ class SessionManager:
         sess = self.get_session(sid)
         fpath = self.sess_file_path(sid)
         total_in, total_out, model_usage = 0, 0, {}
+        skipped = 0
         if fpath.exists():
             for raw in fpath.read_text(encoding="utf-8").rstrip("\n").split("\n"):
                 try:
                     obj = json.loads(raw)
                 except json.JSONDecodeError:
+                    # 不静默：损坏行跳过但计数，避免统计"悄悄少算"
+                    skipped += 1
                     continue
                 if obj.get("type") == "usage":
                     total_in += obj.get("input_tokens", 0)
@@ -232,6 +282,9 @@ class SessionManager:
                     mu = model_usage.setdefault(m, {"input": 0, "output": 0})
                     mu["input"] += obj.get("input_tokens", 0)
                     mu["output"] += obj.get("output_tokens", 0)
+        if skipped:
+            print(f"[session_manager] 会话统计跳过 {skipped} 行损坏 JSON（{fpath}）",
+                  file=sys.stderr)
         return {"total_input_tokens": total_in, "total_output_tokens": total_out,
                 "total_messages": sess["message_count"], "last_active": sess["updated_at"],
                 "model_usage": model_usage}
@@ -246,3 +299,25 @@ class SessionManager:
         idx = {"current_session_id": cur, "sessions": sessions}
         self._save_index(idx)
         return idx
+
+    def set_current_in_index(self, sid: str | None):
+        """公开方法：更新 index 中的 current_session_id"""
+        idx = self.load_index()
+        idx["current_session_id"] = sid
+        self._save_index(idx)
+
+    def clear_session(self, sid: str) -> dict:
+        """清空会话消息（保留 meta，重置 message_count=0）"""
+        sess = self.get_session(sid)
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        new_meta = {
+            "type": "meta", "id": sess["id"], "name": sess.get("name", "新会话"),
+            "created_at": sess.get("created_at", ""), "updated_at": now,
+            "archived": False, "compact_summary": sess.get("compact_summary", ""),
+            "pending_confirm": None, "message_count": 0, "first_user_message": "",
+            "cap": sess.get("cap", self.default_cap),
+        }
+        fpath = self.sess_file_path(sid)
+        fpath.write_text(json.dumps(new_meta, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._update_index_summary(sid, count=0, updated=now)
+        return new_meta

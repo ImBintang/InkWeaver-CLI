@@ -49,17 +49,45 @@ class MuseWorkflow:
         self._chapter_arg = chapter  # 用户传入的目标章节号（None 表示自动）
         self.target_chapter: int | None = None  # run() 时解析
         self.chapter_ceiling: int | None = None  # target_chapter - 1，知识版本卡控上限
+        # P1-19: 追踪已创建的 agent，异常路径统一清理 drain 消费线程
+        self._agents: list = []
 
     def run(self):
-        """运行妙笔工作流"""
-        self._resolve_chapter_anchor()
-        if not self.outline:
-            self._step_input_outline()
-        else:
-            self.io.save_outline(self.outline)
-        self._step_knowledge_prep()
-        self._step_writing_loop()
+        """运行妙笔工作流
+
+        P1-19：整体兜底——任一步骤异常时仍清理已创建 agent 的 drain 线程，
+        然后重新抛出（错误层层上报，由消费端决定如何展示）。
+        """
+        try:
+            self._resolve_chapter_anchor()
+            if not self.outline:
+                self._step_input_outline()
+            else:
+                self.io.save_outline(self.outline)
+            self._step_knowledge_prep()
+            self._step_writing_loop()
+        except BaseException:
+            # P2：BaseException 覆盖 KeyboardInterrupt/SystemExit——
+            # 用户 Ctrl+C 中断也必须先清理 drain 线程再重新抛出
+            self._cleanup_agents()
+            raise
+        self._cleanup_agents()
         self._finish()
+
+    def _cleanup_agents(self):
+        """停止所有已创建 Agent 的 drain 消费线程（P1-19：异常路径也必须执行）
+
+        单个 agent 清理失败不静默：打印到 stderr（消费端：服务日志），
+        线程泄漏会导致进程句柄累积，必须可发现。
+        """
+        import sys as _sys
+        for agent in getattr(self, "_agents", []):
+            try:
+                self._stop_drain(agent)
+            except Exception as e:
+                print(f"[muse] 停止 drain 线程失败（{agent}）：{e}",
+                      file=_sys.stderr)
+        self._agents = []
 
     def _resolve_chapter_anchor(self):
         """解析目标章节号和版本卡控上限"""
@@ -77,14 +105,15 @@ class MuseWorkflow:
         self.chapter_ceiling = self.target_chapter - 1 if self.target_chapter > 1 else None
 
         # 校验上一章是否存在（target=1 时无需上一章）
+        # P2：sys.exit(1) 在 GUI 中会杀死宿主进程，改为抛异常由消费端统一处理
         if self.target_chapter > 1:
             prev_num = self.target_chapter - 1
             from tools.chapter import read_chapters
             prev_text = read_chapters(self.workspace, str(prev_num))
             if "（不存在）" in prev_text or prev_text.startswith("错误"):
-                print(f"错误：第 {prev_num} 章不存在，请先导入后再写第 {self.target_chapter} 章。")
-                import sys
-                sys.exit(1)
+                raise RuntimeError(
+                    f"第 {prev_num} 章不存在，请先导入后再写第 {self.target_chapter} 章。"
+                )
 
         print(f"目标章节：第 {self.target_chapter} 章")
         if self.chapter_ceiling:
@@ -99,8 +128,10 @@ class MuseWorkflow:
         print(prompt)
         try:
             return input().strip().lower() == "y"
-        except (EOFError, KeyboardInterrupt):
-            return True
+        except EOFError:
+            # 不静默：输入流结束不可当作"确认放行"（无 TTY 时终止流程而非自动通过）
+            raise RuntimeError("输入流已结束（EOF），无法进行人工确认，流程终止。")
+        # KeyboardInterrupt 不捕获：Ctrl+C 直接中断（run() 兜底会清理 drain 线程）
 
     def _input(self, prompt: str = "") -> str:
         """读取输入，_auto_approve 时返回空"""
@@ -110,8 +141,10 @@ class MuseWorkflow:
             print(prompt)
         try:
             return input().strip()
-        except (EOFError, KeyboardInterrupt):
-            return ""
+        except EOFError:
+            # 不静默：输入流结束不可当作空输入继续（打回理由缺失会掩盖真实意图）
+            raise RuntimeError("输入流已结束（EOF），无法继续读取输入，流程终止。")
+        # KeyboardInterrupt 不捕获：Ctrl+C 直接中断
 
     # ---- 工作区切换 ----
 
@@ -125,8 +158,9 @@ class MuseWorkflow:
         print("请输入编号切换工作区（直接回车取消）：")
         try:
             choice = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            choice = ""
+        except EOFError:
+            choice = ""  # EOF 视为取消切换
+        # KeyboardInterrupt 不捕获：Ctrl+C 直接中断
         if not choice:
             print("已取消切换。")
             return
@@ -158,8 +192,9 @@ class MuseWorkflow:
         print("确认使用当前工作区？[y/n]")
         try:
             choice = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            choice = "y"
+        except EOFError:
+            choice = ""  # EOF 不误作确认（此前默认 y 属静默放行）
+        # KeyboardInterrupt 不捕获：Ctrl+C 直接中断
         if choice == "n":
             self._switch_workspace_interactive()
 
@@ -170,8 +205,9 @@ class MuseWorkflow:
         while True:
             try:
                 line = input()
-            except (EOFError, KeyboardInterrupt):
-                break
+            except EOFError:
+                break  # EOF：保留已输入内容结束输入
+            # KeyboardInterrupt 不捕获：Ctrl+C 直接中断
             if line.strip() == "qqq":
                 break
             lines.append(line)
@@ -230,31 +266,48 @@ class MuseWorkflow:
         """② 知识准备
 
         顺序：先生成先验知识 → 用户确认 → 再生成前情提要 → 用户确认
+
+        P1-14：打回后走增量修正路径——修正结果作为下一轮展示内容，
+        不再被下一轮全量重生成覆盖，用户的打回理由因此真正生效。
         """
         print("=" * 40)
         print("第二步：知识准备")
 
         # ---- 先验知识 ----
+        reason = ""
         while True:
-            print("正在生成先验知识...")
-            self.prior_knowledge = self._run_researcher()
-            self.io.save_prior_knowledge(self.prior_knowledge)
+            if reason:
+                # 修正轮：基于当前内容 + 打回理由增量修正，不重新全量生成
+                print("正在根据反馈增量修正先验知识...")
+                self.prior_knowledge = self._revise_prior_knowledge(reason)
+                self.io.save_prior_knowledge(self.prior_knowledge)
+                reason = ""
+            else:
+                print("正在生成先验知识...")
+                self.prior_knowledge = self._run_researcher()
+                self.io.save_prior_knowledge(self.prior_knowledge)
             print("\n" + "=" * 40)
             print("先验知识：")
             print(self.prior_knowledge)
             print("\n确认知识准备通过？[y/n]")
             if self._confirm(""):
                 break
-            else:
-                reason = self._input("请输入打回理由：")
-                print("正在根据反馈增量修正...")
-                self._revise_knowledge(reason)
+            reason = self._input("请输入打回理由：")
+            if not reason:
+                reason = "（未提供具体理由，请根据展示内容自行修正明显问题）"
 
         # ---- 前情提要 ----
+        reason = ""
         while True:
-            print("正在生成前情提要...")
-            self.plot_summary = self._run_plot_summary()
-            self.io.save_plot_summary(self.plot_summary)
+            if reason:
+                print("正在根据反馈增量修正前情提要...")
+                self.plot_summary = self._revise_plot_summary(reason)
+                self.io.save_plot_summary(self.plot_summary)
+                reason = ""
+            else:
+                print("正在生成前情提要...")
+                self.plot_summary = self._run_plot_summary()
+                self.io.save_plot_summary(self.plot_summary)
             print("\n" + "=" * 40)
             print("前情提要：")
             self.plot_summary = textwrap.dedent(self.plot_summary)
@@ -262,10 +315,9 @@ class MuseWorkflow:
             print("\n确认前情提要通过？[y/n]")
             if self._confirm(""):
                 break
-            else:
-                reason = self._input("请输入打回理由：")
-                print("正在根据反馈增量修正...")
-                self._revise_knowledge(reason)
+            reason = self._input("请输入打回理由：")
+            if not reason:
+                reason = "（未提供具体理由，请根据展示内容自行修正明显问题）"
 
     @staticmethod
     def _check_word_count(text: str) -> list[dict]:
@@ -334,6 +386,7 @@ class MuseWorkflow:
         agent = self._create_agent(["muse_knowledge.skill.md"])
         messages = [{"role": "user", "content": f"以下是大纲/草稿：\n\n{self.outline}"}]
         messages = agent_loop(agent, messages)
+        self._stop_drain(agent)
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("knowledge_prep", agent)
         self._save_token_stats()
@@ -347,6 +400,7 @@ class MuseWorkflow:
         agent = self._create_agent(["muse_plot.skill.md"])
         messages = [{"role": "user", "content": f"以下是大纲/草稿：\n\n{self.outline}"}]
         messages = agent_loop(agent, messages)
+        self._stop_drain(agent)
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("plot_summary", agent)
         self._save_token_stats()
@@ -355,29 +409,44 @@ class MuseWorkflow:
             return agent._last_subagent_output
         return self._extract_last_text(messages)
 
-    def _revise_knowledge(self, reason: str):
-        """增量修正知识准备"""
+    def _revise_prior_knowledge(self, reason: str) -> str:
+        """增量修正先验知识（P1-14：基于当前内容 + 打回理由，不重新全量生成）"""
         context = (
             f"## 当前先验知识\n{self.prior_knowledge}\n\n"
-            f"## 当前前情提要\n{self.plot_summary}\n\n"
             f"## 打回理由\n{reason}"
         )
-        agent = self._create_agent(["muse_knowledge.skill.md", "muse_plot.skill.md"])
-        messages = [{"role": "user", "content": context + "\n\n请根据打回理由修正上述知识文档。"}]
+        agent = self._create_agent(["muse_knowledge.skill.md"])
+        messages = [{
+            "role": "user",
+            "content": context + "\n\n请根据打回理由修正上述先验知识，输出修正后的完整文档。"
+        }]
         messages = agent_loop(agent, messages)
+        self._stop_drain(agent)
         self.io.save_session_log(messages)
         self._update_token_stats_from_agent("knowledge_revise", agent)
         self._save_token_stats()
         result = self._extract_last_text(messages)
-        # 简单分成先验知识和前情提要（按段落分割）
-        parts = result.split("\n## ")
-        if len(parts) >= 2:
-            self.prior_knowledge = parts[0]
-            self.plot_summary = "\n## ".join(parts[1:])
-        else:
-            self.prior_knowledge = result
-        self.io.save_prior_knowledge(self.prior_knowledge)
-        self.io.save_plot_summary(self.plot_summary)
+        # 修正无输出时保留原内容，不让空结果覆盖已有文档
+        return result if result else self.prior_knowledge
+
+    def _revise_plot_summary(self, reason: str) -> str:
+        """增量修正前情提要（P1-14）"""
+        context = (
+            f"## 当前前情提要\n{self.plot_summary}\n\n"
+            f"## 打回理由\n{reason}"
+        )
+        agent = self._create_agent(["muse_plot.skill.md"])
+        messages = [{
+            "role": "user",
+            "content": context + "\n\n请根据打回理由修正上述前情提要，输出修正后的完整文档。"
+        }]
+        messages = agent_loop(agent, messages)
+        self._stop_drain(agent)
+        self.io.save_session_log(messages)
+        self._update_token_stats_from_agent("plot_summary_revise", agent)
+        self._save_token_stats()
+        result = self._extract_last_text(messages)
+        return result if result else self.plot_summary
 
     # ---- 步骤③→④：写作与审阅循环 ----
 
@@ -594,6 +663,7 @@ class MuseWorkflow:
         context = "\n\n".join(context_parts)
         messages = [{"role": "user", "content": context}]
         messages = agent_loop(agent, messages)
+        self._stop_drain(agent)
         self.io.save_session_log(messages)
         step_name = f"review_round_{self.io.round}"
         self._update_token_stats_from_agent(step_name, agent)
@@ -635,17 +705,20 @@ class MuseWorkflow:
         from core.events import EventBus
         import threading
         bus = EventBus()
+        stop_event = threading.Event()
 
         # 轻量级消费线程：排干队列，避免事件累积；确认类事件自动放行
         def _drain():
-            while True:
+            while not stop_event.is_set():
                 evt = bus.get(timeout=0.2)
                 if evt is None:
                     continue
                 if evt.type == EventType.CONFIRM_REQUEST:
                     cid = evt.data.get("confirm_id", "")
                     if cid:
-                        bus.resolve_confirm(cid, {"action": "approve"})
+                        # 妙笔为无人值守流程且 MuseAgent 不发起确认：
+                        # 任何意外确认请求默认拒绝（fail-safe，与 P1-18 一致）
+                        bus.resolve_confirm(cid, {"action": "reject"})
 
         drain_thread = threading.Thread(target=_drain, daemon=True)
         drain_thread.start()
@@ -657,6 +730,10 @@ class MuseWorkflow:
             bus=bus,
             chapter_ceiling=self.chapter_ceiling,
         )
+        # 保存 drain 线程引用，供 agent_loop 结束后清理（P1-19：异常时统一清理）
+        agent._drain_thread = drain_thread
+        agent._drain_stop = stop_event
+        self._agents.append(agent)
         # 将 skill 全文注入 system prompt（LLM 才能看到工作流指引）
         # SkillRegistry 使用 frontmatter 中的 name 字段做 key，不是文件名
         for name in skill_names:
@@ -692,6 +769,16 @@ class MuseWorkflow:
                 if text:
                     return text
         return ""
+
+    @staticmethod
+    def _stop_drain(agent):
+        """停止 Agent 的 drain 消费线程"""
+        stop = getattr(agent, "_drain_stop", None)
+        thread = getattr(agent, "_drain_thread", None)
+        if stop:
+            stop.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
 
     def _finish(self):
         print(f"\n妙笔任务完成！")

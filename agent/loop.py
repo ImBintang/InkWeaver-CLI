@@ -23,7 +23,7 @@ def agent_loop(agent, messages: list) -> list:
     source = getattr(agent, "_agent_name", "system")
 
     # 在循环开始时检测 /compact 命令
-    if messages and len(messages) > 0:
+    if messages:
         last_user = None
         for msg in reversed(messages):
             if msg.get("role") == "user" and isinstance(msg.get("content"), str):

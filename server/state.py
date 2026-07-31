@@ -24,6 +24,9 @@ class ServerState:
         # ─── Session management (v6.2) ───
         self.current_session_id: str | None = None
         self.session_manager: SessionManager | None = None
+        # P1-34：SSE 后台消费者（单例守护线程，幂等启动）
+        self._sse_consumer_started: bool = False
+        self._sse_consumer_thread: threading.Thread | None = None
 
 
     def bind_session_manager(self) -> SessionManager:
@@ -42,8 +45,7 @@ class ServerState:
             active = [s for s in idx["sessions"] if not s.get("archived")]
             if active:
                 cur = active[0]["id"]
-                idx["current_session_id"] = cur
-                mgr._save_index(idx)
+                mgr.set_current_in_index(cur)
             else:
                 cur = mgr.create_session("新会话")
         return mgr.activate(cur, clear_pending_confirm=True)

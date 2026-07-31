@@ -72,12 +72,22 @@ def query_relations(workspace: Path, name: str) -> str:
 
 
 def get_all_relations(workspace: Path) -> dict:
-    """获取完整关系图（v5：遍历 DB 的 relations 字段）
+    """获取完整关系图（v5：遍历 DB 的 relations 字段 + 合并缓存）
 
     返回 {name: [related_name, ...]} 格式，保持与 v4 兼容。
+    P1-25：任务内 edit_doc(relations=...) 的变更（缓存 is_new/is_dirty）不再丢失。
     """
     proxy = _get_proxy(workspace)
     result = {}
+
+    # 先收集缓存中的关系（新/脏条目优先，覆盖 DB 结果）
+    cache_relations = {}
+    for (dt, _), doc in proxy._cache.items():
+        if doc.is_deleted or not doc.relations:
+            continue
+        if dt in ("wiki", "plot") and (doc.is_new or doc.is_dirty):
+            names = _resolve_relation_names(proxy, dt, doc.relations)
+            cache_relations[doc.name] = names
 
     for doc_type in ("wiki", "plot"):
         finder = {
@@ -88,16 +98,14 @@ def get_all_relations(workspace: Path) -> dict:
             "wiki": proxy._db.wiki_get_current,
             "plot": proxy._db.plot_get_current,
         }
-        lister = {
-            "wiki": lambda: proxy._db.wiki_list_main(cat_id) ,
-            "plot": proxy._db.plot_list_main,
-        }
 
         if doc_type == "wiki":
             cats = proxy._db.list_categories("wiki")
             for cat in cats:
                 mains = proxy._db.wiki_list_main(cat["id"])
                 for m in mains:
+                    if m["name"] in cache_relations:
+                        continue
                     current = getter[doc_type](m["id"])
                     if current and current.get("relations"):
                         names = _resolve_relation_names(proxy, doc_type, current["relations"])
@@ -105,11 +113,15 @@ def get_all_relations(workspace: Path) -> dict:
         else:
             mains = proxy._db.plot_list_main()
             for m in mains:
+                if m["name"] in cache_relations:
+                    continue
                 current = getter[doc_type](m["id"])
                 if current and current.get("relations"):
                     names = _resolve_relation_names(proxy, doc_type, current["relations"])
                     result[m["name"]] = names
 
+    # 缓存中的新/脏关系以缓存为准覆盖（含 DB 不存在的新卡片）
+    result.update(cache_relations)
     return result
 
 

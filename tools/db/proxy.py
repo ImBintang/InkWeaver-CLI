@@ -225,6 +225,7 @@ class ProxyService:
             doc.is_dirty = True
         if chapter:
             doc.chapter = chapter
+            doc.is_dirty = True  # 章节号变更也必须落库，否则 flush Pass 2 会跳过
 
         return f"已更新{doc_type}：{name}（缓存中，finish_task 时写入 DB）"
 
@@ -250,10 +251,12 @@ class ProxyService:
 
     def delete_doc(self, doc_type: str, name: str,
                    category: str = None) -> str:
-        """标记删除（暂不实现物理删除）"""
+        """标记删除（缓存优先 → DB 兜底），flush 时物理删除"""
         doc = self._find_in_cache(doc_type, name)
         if doc is None:
-            return f"错误：{doc_type}「{name}」不在本次任务范围内，无法删除"
+            doc = self._load_from_db(doc_type, name)
+            if doc is None:
+                return f"错误：{doc_type}「{name}」不存在"
         doc.is_deleted = True
         doc.is_dirty = True
         return f"已标记删除：{name}（finish_task 时生效）"
@@ -311,6 +314,14 @@ class ProxyService:
                          version_chapter: int,
                          yaml_only: bool = True) -> str:
         """读取指定历史版本（不影响缓存，纯只读）
+
+        Args:
+            doc_type: "wiki" | "plot" | "rule"
+            name: 词条名
+            version_chapter: 版本的 updated_chapter 值
+            yaml_only: 是否只返回 frontmatter
+        """
+        """读取指定历史版本（不影响缓存，纯只读）
     
         Args:
             doc_type: "wiki" | "plot" | "rule"
@@ -338,9 +349,10 @@ class ProxyService:
                     f"可用版本：{timeline}")
     
         # 构建临时 CachedDoc 用于生成 frontmatter
+        # 类别从 main 表读取（index 版本表无 category_id 字段）
         category = None
         if doc_type == "wiki":
-            cat_id = version_data.get("category_id")
+            cat_id = main.get("category_id")
             if cat_id:
                 cat = self._db.get_category(cat_id)
                 category = cat["name"] if cat else None
@@ -388,13 +400,17 @@ class ProxyService:
         else:
             return f"错误：不支持的查询类型"
 
-        # 合并缓存中新增的、过滤删除的
+        # 合并缓存中新增的、过滤删除的（含任务内标记删除的 DB 条目）
         cache_entries = [
             v for v in self._cache.values()
             if v.doc_type == doc_type and not v.is_deleted
         ]
+        deleted_names = {
+            v.name for v in self._cache.values()
+            if v.doc_type == doc_type and v.is_deleted
+        }
 
-        all_items = list(mains)
+        all_items = [m for m in mains if m["name"] not in deleted_names]
         existing_names = {m["name"] for m in all_items}
         for ce in cache_entries:
             if ce.is_new:
@@ -623,10 +639,11 @@ class ProxyService:
         # 决定写入策略
         write_mode = vm.decide_write_strategy(doc_type, main["id"], scope_max)
 
-        # 获取类别名（wiki 专用）
+        # 获取类别名（wiki 专用）：index 版本表无 category_id 字段，
+        # 必须从 main 表读取，否则 re-extract 后词条被归入“未分类”（P1-30）
         category = None
         if doc_type == "wiki":
-            cat_id = version_data.get("category_id")
+            cat_id = main.get("category_id")
             if cat_id:
                 cat = self._db.get_category(cat_id)
                 category = cat["name"] if cat else ""
@@ -762,6 +779,7 @@ class ProxyService:
         """finish_task 时统一写入 DB（事务保证原子性）
 
         两遍遍历：
+          Pass 0 — 物理删除标记删除的已有条目
           Pass 1 — 创建所有 main 记录，建立 name→actual_id 映射
           Pass 2 — 解析 [[wikilink]] 填充 relations，创建 version 并 set_current
         """
@@ -770,128 +788,140 @@ class ProxyService:
 
         from auto.relation_extractor import extract_wikilinks
 
-        self._db.auto_commit = False
-        try:
-            with self._db.conn:  # 事务
-                # ── Pass 1: 创建 main 记录 ──
-                created_map: dict[str, int] = {}  # name → actual_id
+        # 整段事务在连接锁内执行，与 GUI 等其它线程的写互斥；
+        # transaction() 抑制 _commit 提前提交，退出时统一提交（异常回滚）。
+        with self._db._lock:
+            try:
+                with self._db.transaction():
+                    # ── Pass 0: 物理删除标记删除的已有条目 ──
+                    deleter = {
+                        "wiki": self._db.wiki_delete,
+                        "plot": self._db.plot_delete,
+                        "rule": self._db.rule_delete,
+                    }
+                    for (doc_type, main_id), doc in list(self._cache.items()):
+                        if doc.is_deleted and main_id > 0:
+                            deleter[doc_type](main_id)
 
-                for (doc_type, main_id), doc in list(self._cache.items()):
-                    if doc.is_deleted:
-                        continue
-                    if not doc.is_new:
-                        # 已存在的条目，记录到 created_map 供关系解析
-                        if main_id > 0:
-                            created_map[doc.name] = main_id
-                        continue
+                    # ── Pass 1: 创建 main 记录 ──
+                    created_map: dict[str, int] = {}  # name → actual_id
 
-                    create_ch = doc.first_chapter or doc.chapter or scope_chapter
-                    if doc_type == "wiki":
-                        cat = self._db.get_category_by_name(doc.category)
-                        if cat is None:
-                            # Fix 7: 自动创建缺失类别（防御性）
-                            cat_id = self._db.create_category(
-                                doc.category or "未分类", "wiki", {})
+                    for (doc_type, main_id), doc in list(self._cache.items()):
+                        if doc.is_deleted:
+                            continue
+                        if not doc.is_new:
+                            # 已存在的条目，记录到 created_map 供关系解析
+                            if main_id > 0:
+                                created_map[doc.name] = main_id
+                            continue
+
+                        create_ch = doc.first_chapter or doc.chapter or scope_chapter
+                        if doc_type == "wiki":
+                            cat = self._db.get_category_by_name(doc.category)
+                            if cat is None:
+                                # Fix 7: 自动创建缺失类别（防御性）
+                                cat_id = self._db.create_category(
+                                    doc.category or "未分类", "wiki", {})
+                            else:
+                                cat_id = cat["id"]
+                            actual_id = self._db.wiki_create_main(
+                                doc.name, cat_id, create_ch)
+                        elif doc_type == "plot":
+                            actual_id = self._db.plot_create_main(
+                                doc.name, create_ch, doc.chapters)
                         else:
-                            cat_id = cat["id"]
-                        actual_id = self._db.wiki_create_main(
-                            doc.name, cat_id, create_ch)
-                    elif doc_type == "plot":
-                        actual_id = self._db.plot_create_main(
-                            doc.name, create_ch, doc.chapters)
-                    else:
-                        actual_id = self._db.rule_create_main(
-                            doc.name, create_ch)
+                            actual_id = self._db.rule_create_main(
+                                doc.name, create_ch)
 
-                    created_map[doc.name] = actual_id
+                        created_map[doc.name] = actual_id
 
-                # ── Pass 2: 解析 relations + 创建 version + set_current ──
-                from tools.db.version_manager import VersionManager
-                vm = VersionManager(self._db)
+                    # ── Pass 2: 解析 relations + 创建 version + set_current ──
+                    from tools.db.version_manager import VersionManager
+                    vm = VersionManager(self._db)
 
-                for (doc_type, main_id), doc in list(self._cache.items()):
-                    if doc.is_deleted:
-                        continue
-                    if not (doc.is_new or doc.is_dirty):
-                        continue
+                    for (doc_type, main_id), doc in list(self._cache.items()):
+                        if doc.is_deleted:
+                            continue
+                        if not (doc.is_new or doc.is_dirty):
+                            continue
 
-                    actual_id = created_map.get(doc.name, main_id)
-                    # 新建条目用 doc.chapter（最新版本），更新条目用 scope_chapter（本次提取范围）
-                    if doc.is_new:
-                        actual_ch = doc.chapter or doc.first_chapter or scope_chapter
-                    else:
-                        actual_ch = scope_chapter or doc.chapter
-
-                    # 解析 [[wikilink]] → relations（wiki/plot 参与关系系统）
-                    if doc_type in ("wiki", "plot") and doc.content:
-                        targets = extract_wikilinks(doc.content)
-                        if targets:
-                            rel_ids = []
-                            seen = set()
-                            for t in targets:
-                                tid = self._resolve_name_to_id(t, created_map)
-                                if tid and tid != actual_id and tid not in seen:
-                                    rel_ids.append(tid)
-                                    seen.add(tid)
-                            doc.relations = rel_ids
-
-                    # ── 版本写入：重新提取走 version_manager，正常提取走原逻辑 ──
-                    if doc.write_mode == "overwrite" and doc.base_version_id:
-                        # 重新提取 + 同章节覆盖：原地更新索引行
-                        self._db.update_version(
-                            doc_type, doc.base_version_id, doc.to_dict())
-                        vm._update_pointer(doc_type, actual_id)
-                        # plot 额外字段
-                        if doc_type == "plot":
-                            self._db.plot_set_current(
-                                actual_id, doc.base_version_id, actual_ch,
-                                chapters=doc.chapters,
-                                ended=int(doc.ended),
-                                end_notes=doc.end_notes,
-                            )
-                    elif not doc.is_new and doc.write_mode == "insert" and doc.base_version_id is not None:
-                        # 重新提取 + 不同章节：插入新版本，由 vm 管理指针
-                        vm.commit(doc_type, actual_id, actual_ch,
-                                  doc.to_dict(), strategy="insert")
-                        # plot 额外字段
-                        if doc_type == "plot":
-                            self._db.plot_set_current(
-                                actual_id,
-                                self._db.list_versions("plot", actual_id)[-1]["id"],
-                                actual_ch,
-                                chapters=doc.chapters,
-                                ended=int(doc.ended),
-                                end_notes=doc.end_notes,
-                            )
-                    else:
-                        # 正常提取 / 非白名单编辑
+                        actual_id = created_map.get(doc.name, main_id)
+                        # 新建条目用 doc.chapter（最新版本），更新条目用 scope_chapter（本次提取范围）
                         if doc.is_new:
-                            # 新建条目：直接插入
-                            creator = {
-                                "wiki": self._db.wiki_create_version,
-                                "plot": self._db.plot_create_version,
-                                "rule": self._db.rule_create_version,
-                            }[doc_type]
-                            ver_id = creator(actual_id, actual_ch, doc.to_dict())
-                            # set_current
+                            actual_ch = doc.chapter or doc.first_chapter or scope_chapter
+                        else:
+                            actual_ch = scope_chapter or doc.chapter
+
+                        # 解析 [[wikilink]] → relations（wiki/plot 参与关系系统）
+                        if doc_type in ("wiki", "plot") and doc.content:
+                            targets = extract_wikilinks(doc.content)
+                            if targets:
+                                rel_ids = []
+                                seen = set()
+                                for t in targets:
+                                    tid = self._resolve_name_to_id(t, created_map)
+                                    if tid and tid != actual_id and tid not in seen:
+                                        rel_ids.append(tid)
+                                        seen.add(tid)
+                                doc.relations = rel_ids
+
+                        # ── 版本写入：重新提取走 version_manager，正常提取走原逻辑 ──
+                        if doc.write_mode == "overwrite" and doc.base_version_id:
+                            # 重新提取 + 同章节覆盖：原地更新索引行
+                            self._db.update_version(
+                                doc_type, doc.base_version_id, doc.to_dict())
+                            vm._update_pointer(doc_type, actual_id)
+                            # plot 额外字段
                             if doc_type == "plot":
                                 self._db.plot_set_current(
-                                    actual_id, ver_id, actual_ch,
+                                    actual_id, doc.base_version_id, actual_ch,
                                     chapters=doc.chapters,
                                     ended=int(doc.ended),
                                     end_notes=doc.end_notes,
                                 )
-                            else:
-                                setter = {
-                                    "wiki": self._db.wiki_set_current,
-                                    "rule": self._db.rule_set_current,
-                                }[doc_type]
-                                setter(actual_id, ver_id, actual_ch)
+                        elif not doc.is_new and doc.write_mode == "insert" and doc.base_version_id is not None:
+                            # 重新提取 + 不同章节：插入新版本，由 vm 管理指针
+                            vm.commit(doc_type, actual_id, actual_ch,
+                                      doc.to_dict(), strategy="insert")
+                            # plot 额外字段
+                            if doc_type == "plot":
+                                self._db.plot_set_current(
+                                    actual_id,
+                                    self._db.list_versions("plot", actual_id)[-1]["id"],
+                                    actual_ch,
+                                    chapters=doc.chapters,
+                                    ended=int(doc.ended),
+                                    end_notes=doc.end_notes,
+                                )
                         else:
-                            # 已存在条目：由 vm 自动判定 overwrite/insert
-                            # 防止同 chapter 重复插入（设计决策 #6）
-                            ver_id = vm.commit(doc_type, actual_id,
-                                               actual_ch, doc.to_dict())
+                            # 正常提取 / 非白名单编辑
+                            if doc.is_new:
+                                # 新建条目：直接插入
+                                creator = {
+                                    "wiki": self._db.wiki_create_version,
+                                    "plot": self._db.plot_create_version,
+                                    "rule": self._db.rule_create_version,
+                                }[doc_type]
+                                ver_id = creator(actual_id, actual_ch, doc.to_dict())
+                                # set_current
+                                if doc_type == "plot":
+                                    self._db.plot_set_current(
+                                        actual_id, ver_id, actual_ch,
+                                        chapters=doc.chapters,
+                                        ended=int(doc.ended),
+                                        end_notes=doc.end_notes,
+                                    )
+                                else:
+                                    setter = {
+                                        "wiki": self._db.wiki_set_current,
+                                        "rule": self._db.rule_set_current,
+                                    }[doc_type]
+                                    setter(actual_id, ver_id, actual_ch)
+                            else:
+                                # 已存在条目：由 vm 自动判定 overwrite/insert
+                                # 防止同 chapter 重复插入（设计决策 #6）
+                                ver_id = vm.commit(doc_type, actual_id,
+                                                   actual_ch, doc.to_dict())
                             # plot 额外字段
                             if doc_type == "plot":
                                 self._db.plot_set_current(
@@ -903,25 +933,23 @@ class ProxyService:
                                     end_notes=doc.end_notes,
                                 )
 
-            # ── 指针一致性修复：确保所有受影响 main 的 current_version 指向 MAX(chapter) ──
+                # ── 指针一致性修复：确保所有受影响 main 的 current_version 指向 MAX(chapter) ──
                 affected_mains = set()
-                for (doc_type, main_id), doc in list(self._cache.items()):
-                    if not doc.is_deleted and (doc.is_new or doc.is_dirty):
-                        actual_id = created_map.get(doc.name, main_id)
-                        if actual_id > 0:
-                            affected_mains.add((doc_type, actual_id))
-                for doc_type, mid in affected_mains:
-                    vm._update_pointer(doc_type, mid)
+                for (doc_type2, main_id2), doc2 in list(self._cache.items()):
+                    if not doc2.is_deleted and (doc2.is_new or doc2.is_dirty):
+                        actual_id2 = created_map.get(doc2.name, main_id2)
+                        if actual_id2 > 0:
+                            affected_mains.add((doc_type2, actual_id2))
+                for doc_type3, mid in affected_mains:
+                    vm._update_pointer(doc_type3, mid)
 
-            # 清理缓存
-            self._cache.clear()
-            self._next_temp_id = -1
-            if self._snapshot_path and self._snapshot_path.exists():
-                self._snapshot_path.unlink()
-                self._snapshot_path = None
+                # 清理缓存（事务已提交）
+                self._cache.clear()
+                self._next_temp_id = -1
+                if self._snapshot_path and self._snapshot_path.exists():
+                    self._snapshot_path.unlink()
+                    self._snapshot_path = None
 
-        except Exception as e:
-            raise RuntimeError(
-                f"flush 失败，缓存已保留可重试：{e}")
-        finally:
-            self._db.auto_commit = True
+            except Exception as e:
+                raise RuntimeError(
+                    f"flush 失败，缓存已保留可重试：{e}")

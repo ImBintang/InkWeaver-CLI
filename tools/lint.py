@@ -71,10 +71,33 @@ class LintDoc:
 
 
 def _gather_all_docs(workspace: Path) -> list[LintDoc]:
-    """从 DB 通过 proxy 获取所有文档（合并缓存中的新条目）"""
+    """从 DB 通过 proxy 获取所有文档（合并缓存中的新条目与脏条目）
+
+    P0-1 修复：任务内 LLM 通过 edit_wiki 修改的已存在词条（is_dirty=True）
+    必须以缓存内容为准，否则 lint 自动修复会基于 DB 旧内容覆盖 LLM 新编辑。
+    """
     from tools.editor import _get_proxy
     proxy = _get_proxy(workspace)
     docs: list[LintDoc] = []
+
+    # 缓存中所有未删除条目按 (doc_type, name) 索引，供 DB 条目合并
+    cached_by_name: dict[tuple[str, str], object] = {}
+    for (dt, _), cached in proxy._cache.items():
+        if dt in ("wiki", "plot", "rule") and not cached.is_deleted:
+            cached_by_name[(dt, cached.name)] = cached
+
+    def _cached_or_db(dt: str, name: str, db_doc: LintDoc) -> LintDoc:
+        """DB 条目优先被缓存中的脏条目覆盖（含 is_new 占位条目）"""
+        cached = cached_by_name.get((dt, name))
+        if cached is None or not (cached.is_new or cached.is_dirty):
+            return db_doc
+        return LintDoc(
+            doc_type=dt, name=cached.name,
+            category=(cached.category or "") if dt == "wiki" else "",
+            content=cached.content, description=cached.description,
+            state=cached.state, chapters=cached.chapters,
+            ended=cached.ended,
+        )
 
     # wiki
     cats = proxy.list_categories("wiki")
@@ -85,14 +108,15 @@ def _gather_all_docs(workspace: Path) -> list[LintDoc]:
             current = proxy._db.wiki_get_current(m["id"])
             if current is None:
                 continue
-            docs.append(LintDoc(
+            db_doc = LintDoc(
                 doc_type="wiki", name=m["name"], category=cat_name,
                 content=current.get("content", ""),
                 description=current.get("description", ""),
                 state=current.get("state", ""),
                 chapters="", ended=False,
-            ))
-    # 缓存中新增的 wiki
+            )
+            docs.append(_cached_or_db("wiki", m["name"], db_doc))
+    # 缓存中新增且 DB 无记录的 wiki（is_new）
     for (dt, _), cached in proxy._cache.items():
         if dt == "wiki" and cached.is_new and not cached.is_deleted:
             docs.append(LintDoc(
@@ -107,14 +131,15 @@ def _gather_all_docs(workspace: Path) -> list[LintDoc]:
         current = proxy._db.plot_get_current(m["id"])
         if current is None:
             continue
-        docs.append(LintDoc(
+        db_doc = LintDoc(
             doc_type="plot", name=m["name"], category="",
             content=current.get("content", ""),
             description=current.get("description", ""),
             state=current.get("state", ""),
             chapters=m.get("chapters", ""),
             ended=bool(m.get("ended", False)),
-        ))
+        )
+        docs.append(_cached_or_db("plot", m["name"], db_doc))
     for (dt, _), cached in proxy._cache.items():
         if dt == "plot" and cached.is_new and not cached.is_deleted:
             docs.append(LintDoc(
@@ -129,13 +154,14 @@ def _gather_all_docs(workspace: Path) -> list[LintDoc]:
         current = proxy._db.rule_get_current(m["id"])
         if current is None:
             continue
-        docs.append(LintDoc(
+        db_doc = LintDoc(
             doc_type="rule", name=m["name"], category="",
             content=current.get("content", ""),
             description=current.get("description", ""),
             state=current.get("state", ""),
             chapters="", ended=False,
-        ))
+        )
+        docs.append(_cached_or_db("rule", m["name"], db_doc))
     for (dt, _), cached in proxy._cache.items():
         if dt == "rule" and cached.is_new and not cached.is_deleted:
             docs.append(LintDoc(
@@ -484,7 +510,17 @@ def check_plot_range(workspace: Path, docs: list[LintDoc]) -> list[dict]:
         if max_in_field > max_chapter:
             nums = parse_chapter_spec(str(d.chapters))
             valid_nums = [n for n in nums if n <= max_chapter]
-            new_chapters = _compact_chapter_list(valid_nums) if valid_nums else str(max_chapter)
+            if not valid_nums:
+                # 全部越界：不静默归属最新章节（P1-27），报告债务由人工处理
+                auto_fixes.append({
+                    "type": "plot_range_invalid",
+                    "file": f"plot/{d.name}",
+                    "detail": (f"chapters「{d.chapters}」全部超出最大章节 {max_chapter}，"
+                               f"无法自动修正，请人工核对章节号后修改"),
+                    "auto_fixed": False,
+                })
+                continue
+            new_chapters = _compact_chapter_list(valid_nums)
 
             proxy.update_doc(doc_type="plot", name=d.name,
                              chapters=new_chapters, chapter=0)
@@ -820,6 +856,15 @@ def run_lint(workspace: Path, chapters: str | None = None,
         docs = [d for d in docs if (d.doc_type, d.name) in wl_set]
 
     if not docs:
+        # P1-16：即使无文档也要覆盖 debt 文件，避免残留上一任务的债务数据
+        debt_fp = workspace / DEBT_FILE
+        with open(debt_fp, "w", encoding="utf-8") as f:
+            json.dump({
+                "broken_links": [], "state_missing": [], "state_verbose": [],
+                "length_overage": [], "desc_verbose": [],
+                "plot_broken_links": [], "appearance": [], "file_errors": [],
+                "unended_plots": [], "importance_scores": {},
+            }, f, ensure_ascii=False, indent=2)
         return "（无文档需要检查）"
 
     # 1. 正文结构
@@ -890,14 +935,15 @@ def run_lint(workspace: Path, chapters: str | None = None,
     with open(debt_fp, "w", encoding="utf-8") as f:
         json.dump(debt_data, f, ensure_ascii=False, indent=2)
 
-    # ── 构建关系图（可选） ──
+    # ── 构建关系图（可选，失败不阻断 lint，但原因必须上报） ──
+    relation_error: str | None = None
     try:
         from auto.relation_extractor import build_relations, save_relations
         relations = build_relations(workspace)
         if relations:
             save_relations(workspace, relations)
-    except Exception:
-        pass
+    except Exception as e:
+        relation_error = str(e)
 
     # ── 格式化摘要 ──
     lines = [
@@ -907,8 +953,9 @@ def run_lint(workspace: Path, chapters: str | None = None,
         "",
     ]
 
-    # 自动修复汇总
-    all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + plot_range_fixes + importance_unlink_fixes
+    # 自动修复汇总（只统计真正完成的自动修复）
+    all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + \
+        [f for f in plot_range_fixes if f.get("auto_fixed")] + importance_unlink_fixes
     total_fixed = len(all_fixes)
     if all_fixes:
         lines.append("## 代码 lint 完成\n")
@@ -946,6 +993,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
         ("desc_verbose", desc_debts),
         ("plot_broken_links", plot_link_debts),
         ("unended_plots", unended_plot_debts),
+        ("plot_range_invalid", [d for d in plot_range_fixes if d.get("type") == "plot_range_invalid"]),
     ]
     all_debt_items = []
     for _, items in debt_groups:
@@ -965,7 +1013,10 @@ def run_lint(workspace: Path, chapters: str | None = None,
     if plot_range_fixes:
         lines.append(f"### 剧情范围修正（{len(plot_range_fixes)} 处）")
         for d in plot_range_fixes:
-            lines.append(f"  🔧 {d['file']}：{d['detail']}")
+            if d.get("auto_fixed"):
+                lines.append(f"  🔧 {d['file']}：{d['detail']}")
+            else:
+                lines.append(f"  ⚠️ {d['file']}：{d['detail']}")
         lines.append("")
 
     # 出场统计
@@ -976,6 +1027,9 @@ def run_lint(workspace: Path, chapters: str | None = None,
         lines.append("")
 
     lines.append(f"总计：自动修复 {total_fixed} 处，待处理债务 {total_debts} 项")
+
+    if relation_error:
+        lines.append(f"\n⚠️ 关系图更新失败：{relation_error}")
 
     return "\n".join(lines)
 

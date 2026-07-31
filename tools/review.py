@@ -112,7 +112,6 @@ def _dispatch(workspace: Path, name: str, args: dict) -> str:
     from tools import rules as rules_tools
     from tools import relation as relation_tools
     from tools import memory as memory_tools
-    from tools import editor as editor_tools
     from tools import plot as plot_tools
 
     dispatch_map = {
@@ -122,8 +121,10 @@ def _dispatch(workspace: Path, name: str, args: dict) -> str:
         "read_wiki": lambda **kw: wiki_tools.read_wiki(workspace, yaml_only=False, **kw),
         "new_wiki": lambda **kw: "错误：审核模式不允许写操作",
         "edit_wiki": lambda **kw: "错误：审核模式不允许写操作",
-        "edit_doc_text": lambda **kw: editor_tools.edit_doc_text(workspace, **kw),
-        "edit_doc_wikilink": lambda **kw: editor_tools.edit_doc_wikilink(workspace, **kw),
+        # P1-22：统一文档编辑工具同样拦截，审核只读隔离不被绕过
+        "edit_doc_text": lambda **kw: "错误：审核模式不允许写操作",
+        "edit_doc_wikilink": lambda **kw: "错误：审核模式不允许写操作",
+        "delete_doc": lambda **kw: "错误：审核模式不允许写操作",
         "read_memory": lambda **kw: memory_tools.read_memory(workspace, **kw),
         "check_wiki": lambda **kw: wiki_tools.check_wiki(workspace, **kw),
         "read_index": lambda **kw: category_tools.read_index(workspace, **kw),
@@ -171,11 +172,6 @@ def run_review(llm: LLMClient, workspace: Path, cli=None,
     except Exception as e:
         lint_result = f"（lint 检查异常：{e}）"
 
-    # 如果 lint 完全无问题，快速返回
-    if lint_result.strip() in ("✅ 无债务", "✅ 所有检查通过", ""):
-        # 仍然让 LLM 做语义检查
-        pass
-
     system_prompt = _build_system_prompt(chapters, lint_result)
     tools = build_shared_subagent_tools() + _build_review_tools()
 
@@ -214,7 +210,10 @@ def run_review(llm: LLMClient, workspace: Path, cli=None,
             tool_name = func["name"]
             try:
                 tool_input = json.loads(func["arguments"])
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                # 不静默：解析失败打印警告（消费端：日志），
+                # 参数清空后继续执行，避免单次脏参数中断整个审核
+                print(f"[review] 工具参数解析失败 (tool={tool_name}): {e}")
                 tool_input = {}
 
             if tool_name == "agent_output":

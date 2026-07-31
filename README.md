@@ -325,12 +325,17 @@ InkWeaver-CLI/
 │   ├── agent.py            # MuseAgent 工具分发 + 版本硬切
 │   └── workflow.py         # 四步写作状态机
 ├── server/                 # FastAPI HTTP 服务
-│   ├── state.py            # 服务器全局状态
+│   ├── main.py             # FastAPI 应用实例 + 异常处理器
+│   ├── state.py            # 服务器全局状态（含 session 管理）
+│   ├── sse.py              # SSE 事件推送 + 会话消息缓冲
 │   └── router/             # API 路由
 │       ├── books.py        # 工作区/章节/草稿
 │       ├── chat.py         # 鉴知对话
 │       ├── muse.py         # 妙笔写作
-│       └── knowledge.py    # 知识库查询
+│       ├── knowledge.py    # 知识库查询
+│       ├── sessions.py     # 会话 CRUD
+│       ├── settings.py     # 配置/模型管理
+│       └── stats.py        # Token 统计
 └── pyproject.toml          # 包定义 + entry_points
 ```
 

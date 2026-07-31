@@ -25,27 +25,25 @@ class PlotWorkflow:
             self.cli.logger.write(tag, text)
 
     def _resolve_plot_names(self, names: list[str], full: bool = False) -> tuple[list[str], list[str]]:
-        """解析剧情卡片名称列表，返回 (成功内容列表, 失败名称列表)"""
-        from tools.plot import read_plot, plot_list
+        """解析剧情卡片名称列表，返回 (成功内容列表, 失败名称列表)
 
-        # 获取所有卡片名称（兼容 v5 格式和旧版 wikilink 格式）
-        all_plots_raw = plot_list(self.workspace, ended="all")
+        P1-23：不再依赖 plot_list 文本输出（默认第一页 20 张限制），
+        直接经 proxy 读取全部卡片名称（DB + 缓存合并），中后期作品不再误报未找到。
+        """
+        from tools.plot import read_plot
+        from tools.editor import _get_proxy
+
+        proxy = _get_proxy(self.workspace)
         known_names = set()
-        if not (isinstance(all_plots_raw, str) and all_plots_raw.startswith("错误")):
-            for line in all_plots_raw.splitlines():
-                line = line.strip()
-                if line.startswith("- "):
-                    # v5 格式: "- 卡片名：描述" 或 "- 卡片名"
-                    text = line[2:].strip()
-                    # 旧格式: "- [[卡片名]] | chapters: ..."
-                    m = re.match(r"\[\[(.+?)\]\]", text)
-                    if m:
-                        known_names.add(m.group(1))
-                    else:
-                        # v5 格式: 取冒号前的部分作为名称
-                        name_part = text.split("：")[0].split(":")[0].strip()
-                        if name_part:
-                            known_names.add(name_part)
+        try:
+            for m in proxy._db.plot_list_main():
+                known_names.add(m["name"])
+        except Exception as e:
+            return [], [f"（读取剧情卡片列表失败：{e}）"]
+        # 合并缓存中的新增/修改卡片（任务内新建尚未落库）
+        for v in proxy._cache.values():
+            if v.doc_type == "plot" and not v.is_deleted:
+                known_names.add(v.name)
 
         successes = []
         failures = []
@@ -80,7 +78,11 @@ class PlotWorkflow:
         full_contents, full_fail = self._resolve_plot_names(plot_full, full=True)
         all_plot_fail = only_fail + full_fail
         if all_plot_fail:
-            return f"错误：以下剧情卡片未找到，请检查并重试：{'、'.join(sorted(all_plot_fail))}"
+            # 区分「读取失败」与「确实不存在」：失败项自带括号原因，
+            # 不能统一误报为“未找到”，错误必须原样呈现给消费端（LLM）
+            has_err = any(f.startswith("（") for f in all_plot_fail)
+            verb = "读取失败或未找到" if has_err else "未找到"
+            return f"错误：以下剧情卡片{verb}，请检查后重试：{'、'.join(sorted(all_plot_fail))}"
 
         # 4. 拼接消息
         sections = ["# 参考材料"]

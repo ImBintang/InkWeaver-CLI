@@ -124,6 +124,12 @@ def ws_delete(
         fmt.error("请先指定一个有效工作区")
         raise typer.Exit(1)
 
+    # P0-2：删除前断言目标位于工作区根目录之下（配合 resolve_workspace 名称校验双保险）
+    ws_dir = get_workspaces_dir(config)
+    if ws == ws_dir or ws_dir not in ws.parents:
+        fmt.error(f"拒绝删除：目标不在工作区目录下：{ws}")
+        raise typer.Exit(1)
+
     if not yes:
         confirm = typer.confirm(f"确认删除工作区「{ws.name}」？")
         if not confirm:
@@ -161,22 +167,39 @@ def ws_move(
     if target == ws_dir:
         fmt.error("目标路径与当前相同")
         raise typer.Exit(1)
+    # P1-04：目标位于源目录内部时，复制会递归包含自身，必须拒绝
+    if ws_dir in target.parents:
+        fmt.error(f"目标路径位于当前工作区目录内部：{target}")
+        raise typer.Exit(1)
     if target.exists():
         fmt.error(f"目标路径已存在：{target}")
         raise typer.Exit(1)
 
     try:
         target.mkdir(parents=True, exist_ok=True)
-        for item in ws_dir.iterdir():
-            dst = target / item.name
-            if item.is_dir():
-                shutil.copytree(item, dst)
-            else:
-                shutil.copy2(item, dst)
+        # 复制阶段：任一项失败即回滚已复制内容，原目录保持不动
+        copied = []
+        try:
+            for item in ws_dir.iterdir():
+                dst = target / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dst)
+                else:
+                    shutil.copy2(item, dst)
+                copied.append(item.name)
+        except Exception:
+            for name in copied:
+                p = target / name
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
+            raise
+        # 复制完整后才删除原目录（删除失败同样回滚：目标已可重试，原目录仍在）
         shutil.rmtree(ws_dir)
         config.setdefault("workspace", {})["dir"] = str(target)
         save_config(config)
         fmt.result(f"工作区目录已迁移到：{target}")
     except Exception as e:
-        fmt.error(f"迁移失败：{e}")
+        fmt.error(f"迁移失败：{e}（原工作区已保留）")
         raise typer.Exit(1)

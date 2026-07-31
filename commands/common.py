@@ -84,6 +84,10 @@ def resolve_workspace(config: dict, workspace_name: str = "") -> Path | None:
     ws_dir = get_workspaces_dir(config)
 
     if workspace_name:
+        # P0-2：显式名称必须通过合法名称校验（拒绝 ..、/、\ 等路径穿越）
+        from tools.workspace import _VALID_NAME_RE
+        if not _VALID_NAME_RE.match(workspace_name):
+            return None
         target = ws_dir / workspace_name
         if target.exists():
             return target
@@ -92,9 +96,12 @@ def resolve_workspace(config: dict, workspace_name: str = "") -> Path | None:
     # 用 config 中的 last
     last = config.get("workspace", {}).get("last", "")
     if last:
-        target = ws_dir / last
-        if target.exists():
-            return target
+        # P0-2：配置中的 last 同样校验，防止配置被篡改后穿越
+        from tools.workspace import _VALID_NAME_RE
+        if _VALID_NAME_RE.match(last):
+            target = ws_dir / last
+            if target.exists():
+                return target
 
     # 回退到第一个
     workspaces = sorted([d for d in ws_dir.iterdir() if d.is_dir()])

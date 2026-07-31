@@ -148,8 +148,10 @@ def end_plot(workspace: Path, name: str, end_notes: str = "") -> str:
     if not result.startswith("错误"):
         try:
             record_extraction(workspace, [], [], [name])
-        except Exception:
-            pass
+        except Exception as e:
+            # 不静默：end_plot 本身成功，但提取记录写入失败必须告知消费端
+            # （LLM 可见的告警），避免日志与 DB 状态不一致被当作正常
+            result += f"\n⚠️ 已结束卡片，但提取记录写入失败（不影响结果）：{e}"
     return result
 
 
@@ -179,14 +181,18 @@ def query_plot_by_chapters(workspace: Path, chapters: str) -> str:
     # 从 DB 获取所有剧情卡片（含已结束）
     mains = proxy._db.plot_list_main()
 
-    # 合并缓存中新增的
-    cache_entries = [
-        v for v in proxy._cache.values()
-        if v.doc_type == "plot" and not v.is_deleted and v.is_new
-    ]
+    # P1-24：合并缓存中新增/修改（is_new 或 is_dirty）的卡片；
+    # DB 行若在缓存中有新/脏版本则跳过，避免陈旧重复
+    cache_by_name = {
+        v.name: v
+        for v in proxy._cache.values()
+        if v.doc_type == "plot" and not v.is_deleted and (v.is_new or v.is_dirty)
+    }
 
     results = []
     for m in mains:
+        if m["name"] in cache_by_name:
+            continue
         card_chapters = m.get("chapters", "")
         if not card_chapters:
             continue
@@ -195,7 +201,7 @@ def query_plot_by_chapters(workspace: Path, chapters: str) -> str:
             ended = "已结束" if m.get("ended") else "未结束"
             results.append(f"| {m['name']} | {card_chapters} | {ended} |")
 
-    for doc in cache_entries:
+    for doc in cache_by_name.values():
         if not doc.chapters:
             continue
         card_set = set(parse_chapter_spec(doc.chapters))

@@ -182,11 +182,11 @@ class CompactWorkflow:
         if system_msg is None:
             return messages  # 没有 system prompt，不压缩
 
-        # 2. 分层：保留最近 4 条（≈ 2 轮 user+assistant）+ 其余历史
-        recent = messages[-4:]
-        history_start = system_idx + 1 if system_idx is not None else 0
-        history_end = max(history_start, len(messages) - 4)
-        history = messages[history_start:history_end]
+        # 2. 分层：保留最近 2 轮完整对话（以 assistant 为轮边界，保证
+        #    tool_calls↔tool 配对不被拆散，避免压缩后下次 API 调用 400）
+        recent_start = self._find_recent_start(messages, system_idx + 1)
+        recent = messages[recent_start:]
+        history = messages[system_idx + 1:recent_start]
 
         # 3. 压缩历史
         if len(history) <= 2:
@@ -208,6 +208,27 @@ class CompactWorkflow:
             result.append({"role": "system", "content": f"【历史摘要】\n{compressed}"})
         result.extend(recent)
         return result
+
+    @staticmethod
+    def _find_recent_start(messages: list, floor: int) -> int:
+        """定位保留区起点：从末尾向前数 2 个 assistant 消息（轮边界）
+
+        返回的起点保证 recent=messages[start:] 以 assistant 开头、
+        不落在 tool 响应上（tool 响应必须与所属 assistant 同段保留）。
+        """
+        i = len(messages) - 1
+        rounds = 0
+        while i >= floor:
+            if messages[i].get("role") == "assistant":
+                rounds += 1
+                if rounds == 2:
+                    break
+            i -= 1
+        start = i
+        # 起点若落在 tool 响应上（理论上不会，防御性收拢到其 assistant）
+        while start > floor and messages[start].get("role") == "tool":
+            start -= 1
+        return max(start, floor)
 
     @staticmethod
     def _format_as_summary(messages: list[dict]) -> str:
@@ -232,7 +253,9 @@ PERSIST_ALWAYS = {
 }
 
 # 读取类工具的结果必须完整保留，不能被 PersistCache 吞掉
-PERSIST_NEVER = {"read_chapters", "read_wiki", "read_plot", "lint_report"}
+# v6.4.5：补 read_rule —— wiki/rules/plot 均有 yaml_only 阅读选择，
+# 完整阅读（yaml_only=false）时结果必须全量可见，截断会诱发模型幻觉
+PERSIST_NEVER = {"read_chapters", "read_rule", "read_wiki", "read_plot", "lint_report"}
 
 
 class PersistCache:
@@ -316,6 +339,8 @@ class PersistCache:
                 f = stats.get("failed", 0)
                 return f"[{tool_name} 已执行，成功 {s} 个，失败 {f} 个。详情已缓存 session/compact_cache.json]"
             except (ValueError, TypeError):
+                # 结果非 JSON（如纯文本错误）：降级为通用占位符，
+                # 完整内容仍在缓存中可查，不属静默抑制
                 pass
         if items:
             return f"[{tool_name} 已执行 ({len(items)} items)，结果已缓存 session/compact_cache.json]"

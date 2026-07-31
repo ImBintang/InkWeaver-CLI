@@ -1,10 +1,25 @@
 """Agent 抽象基类 — 定义所有 Agent 的通用接口"""
 
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from api import LLMClient
 from core.events import EventBus, EventType
+
+# 模块级 Token 统计服务单例（避免每次 LLM 调用都开关 DB 连接）
+_token_stats_svc = None
+_token_stats_lock = __import__("threading").Lock()
+
+
+def _get_token_stats():
+    global _token_stats_svc
+    if _token_stats_svc is None:
+        with _token_stats_lock:
+            if _token_stats_svc is None:
+                from tools.db.token_stats import TokenStatsService
+                _token_stats_svc = TokenStatsService()
+    return _token_stats_svc
 
 
 class BaseAgent(ABC):
@@ -78,8 +93,25 @@ class BaseAgent(ABC):
             input_tokens = prompt_tokens
             output_tokens = completion_tokens
         else:
-            from agent.compact import estimate_tokens
-            input_tokens = estimate_tokens(self.messages)
+            # P1-11：tiktoken 环境故障（离线加载编码失败等）时降级为字符粗估，
+            # 不允许异常沿对话循环传播中断整个会话；估算仅用于统计，不影响正确性
+            try:
+                from agent.compact import estimate_tokens
+                input_tokens = estimate_tokens(self.messages)
+            except Exception as e:
+                # 不静默：降级为字符粗估前提示一次（事件总线消费端可见），
+                # 避免统计口径变化被当作正常
+                if not getattr(self, "_tiktoken_warned", False):
+                    self._tiktoken_warned = True
+                    try:
+                        self.bus.emit(EventType.INFO,
+                                      {"text": f"tiktoken 不可用，Token 估算降级为字符粗估：{e}"},
+                                      source=getattr(self, "_agent_name", "system"))
+                    except Exception as e2:
+                        # 最外层兜底：上报通道故障打印 stderr（消费端：日志）
+                        print(f"[base] tiktoken 降级提示上报失败：{e2}", file=sys.stderr)
+                input_tokens = sum(
+                    len(str(m.get("content", ""))) for m in self.messages) // 2
             output_tokens = 0
 
         total = input_tokens + output_tokens
@@ -99,16 +131,15 @@ class BaseAgent(ABC):
         self._persist_token_record(input_tokens, output_tokens)
 
     def _persist_token_record(self, input_tokens: int, output_tokens: int):
-        """将单次 token 消耗写入全局 token_stats.db（静默失败）"""
+        """将单次 token 消耗写入全局 token_stats.db（失败不阻断主流程，但必须上报）"""
         try:
-            from tools.db.token_stats import TokenStatsService
             agent_name = getattr(self, "_agent_name", "system")
             model_id = getattr(self.llm, "model", "")
             model_name = getattr(self.llm, "model_name", "") or model_id
             book = getattr(self, "_book_name", "")
             purpose = getattr(self, "_purpose", "") or agent_name
 
-            ts = TokenStatsService()
+            ts = _get_token_stats()
             ts.record(
                 book=book,
                 agent=agent_name,
@@ -118,9 +149,18 @@ class BaseAgent(ABC):
                 output_tokens=output_tokens,
                 purpose=purpose,
             )
-            ts.close()
-        except Exception:
-            pass  # Token 统计是辅助功能，失败不影响主流程
+        except Exception as e:
+            # 不静默：Token 统计失败通过事件总线上报（用户可感知统计缺失），
+            # 但不阻断主流程（统计是辅助功能）
+            try:
+                self.bus.emit(EventType.INFO,
+                              {"text": f"Token 统计写入失败：{e}"},
+                              source=getattr(self, "_agent_name", "system"))
+            except Exception as e2:
+                # 最外层兜底：事件上报通道也故障时打印 stderr（消费端：日志），
+                # 保证统计失败不石沉大海
+                print(f"[base] Token 统计写入失败且上报通道故障：{e}（{e2}）",
+                      file=sys.stderr)
 
     def token_report(self) -> str:
         """返回累计 token 统计"""

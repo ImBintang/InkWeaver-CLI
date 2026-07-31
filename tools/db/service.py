@@ -3,9 +3,12 @@
 单例模式，全局一个连接。不感知缓存层。
 """
 
+import functools
 import json
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -40,20 +43,39 @@ class SQLiteService:
     """SQLite 数据库服务"""
 
     def __init__(self, db_path: Path):
+        # 单连接跨线程访问必须互斥（GUI 请求线程与 Agent flush 线程共享同一连接）
+        self._lock = threading.RLock()
+        self._tx_depth = 0  # 显式事务嵌套深度，>0 时抑制 _commit 提前提交
         if isinstance(db_path, str) and db_path == ":memory:":
-            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False, timeout=30)
         else:
-            self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            self.conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.auto_commit = True  # False 时由调用方管理事务
+        self.conn.execute("PRAGMA busy_timeout=30000")
+        self.auto_commit = True  # 兼容旧调用方；flush 请使用 transaction() 上下文
         self._init_schema()
 
     def _commit(self):
-        """受 auto_commit 控制的提交（flush 事务期间跳过）"""
-        if self.auto_commit:
-            self.conn.commit()
+        """受 auto_commit 控制的提交（显式事务期间跳过），线程安全"""
+        if self.auto_commit and self._tx_depth == 0:
+            with self._lock:
+                self.conn.commit()
+
+    @contextmanager
+    def transaction(self):
+        """显式事务上下文：期间抑制 _commit，退出时提交（异常则回滚）
+
+        flush 等批量写入必须使用本上下文，避免与其它线程的写操作
+        交错提交导致半事务状态。
+        """
+        self._tx_depth += 1
+        try:
+            with self.conn:
+                yield
+        finally:
+            self._tx_depth -= 1
 
     def _init_schema(self):
         from tools.db.schema import ALL_TABLES
@@ -62,7 +84,12 @@ class SQLiteService:
         self.conn.commit()
 
     def close(self):
-        self.conn.close()
+        """关闭连接（幂等，重复调用不抛异常）"""
+        with self._lock:
+            try:
+                self.conn.close()
+            except sqlite3.Error:
+                pass  # 已关闭或连接不可用
 
     def integrity_check(self) -> list[str]:
         cursor = self.conn.execute("PRAGMA integrity_check")
@@ -570,6 +597,32 @@ class SQLiteService:
         self.conn.execute("DELETE FROM chapters")
         self._commit()
 
+    # ── 物理删除（delete_doc 的 flush 落库） ──
+
+    def wiki_delete(self, main_id: int):
+        """物理删除词条及其全部版本记录"""
+        self.conn.execute(
+            "DELETE FROM wiki_index WHERE main_id = ?", (main_id,))
+        self.conn.execute(
+            "DELETE FROM wiki_main WHERE id = ?", (main_id,))
+        self._commit()
+
+    def plot_delete(self, main_id: int):
+        """物理删除剧情卡片及其全部版本记录"""
+        self.conn.execute(
+            "DELETE FROM plot_index WHERE main_id = ?", (main_id,))
+        self.conn.execute(
+            "DELETE FROM plot_main WHERE id = ?", (main_id,))
+        self._commit()
+
+    def rule_delete(self, main_id: int):
+        """物理删除规则文档及其全部版本记录"""
+        self.conn.execute(
+            "DELETE FROM rules_index WHERE main_id = ?", (main_id,))
+        self.conn.execute(
+            "DELETE FROM rules_main WHERE id = ?", (main_id,))
+        self._commit()
+
     # ── 版本卡控查询（v5.3 妙笔章节锚定）──
 
     def latest_version_at(self, doc_type: str, main_id: int,
@@ -742,3 +795,21 @@ class SQLiteService:
     def draft_count(self) -> int:
         cur = self.conn.execute("SELECT COUNT(*) FROM drafts")
         return cur.fetchone()[0]
+
+
+# ── 线程安全包装：所有公共方法自动加锁 ────────────────────────────────
+# 单连接跨线程是设计事实（Agent flush 线程 + GUI 请求线程共享同一连接），
+# 用 RLock 串行化所有公共方法调用；flush 的整段事务在锁内执行，
+# 避免“接口成功、数据丢失”的静默写竞争。
+
+def _synchronized(method):
+    @functools.wraps(method)
+    def _impl(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return _impl
+
+
+for _name in list(SQLiteService.__dict__):
+    if not _name.startswith("_"):
+        setattr(SQLiteService, _name, _synchronized(getattr(SQLiteService, _name)))

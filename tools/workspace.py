@@ -2,6 +2,7 @@
 
 import re
 import shutil
+import sys
 from pathlib import Path
 
 # 工作区名称允许的字符：字母、数字、中文、下划线、横线、点
@@ -51,6 +52,27 @@ def create_workspace(workspaces_dir: Path, name: str) -> Path | None:
     return target
 
 
+def _close_proxy(workspace_path: Path):
+    """注销并关闭工作区的代理实例与 DB 连接（P1-26）
+
+    删除/重命名前必须执行，否则 Windows 下 rmtree/rename 常因
+    SQLite 句柄占用失败，且旧 key 在代理注册表悬空。
+    关闭失败不静默：打印到 stderr，让 CLI 用户感知后续 rmtree 失败的真实原因。
+    """
+    from tools.editor import unregister_proxy, _proxy_instances
+    key = str(workspace_path.resolve())
+    proxy = _proxy_instances.get(key)
+    if proxy is not None:
+        try:
+            proxy._db.close()
+        except Exception as e:
+            # 不静默：close 失败通常意味着后续 rmtree/rename 会被句柄占用
+            # 阻断，必须让用户看到具体原因（消费端：CLI 用户 / 日志）
+            print(f"[workspace] 关闭 DB 连接失败（{workspace_path}）：{e}",
+                  file=sys.stderr)
+    unregister_proxy(workspace_path)
+
+
 def update_workspace(old_path: Path, new_name: str) -> Path | str:
     """重命名工作区"""
     err = _validate_name(new_name)
@@ -60,16 +82,35 @@ def update_workspace(old_path: Path, new_name: str) -> Path | str:
     new_path = parent / new_name
     if new_path.exists():
         return f"错误：工作区「{new_name}」已存在"
+    # P1-26：重命名前注销并关闭旧路径的代理，避免 SQLite 连接句柄占用
+    _close_proxy(old_path)
     old_path.rename(new_path)
     return new_path
 
 
 def delete_workspace(workspace_path: Path) -> bool:
-    """删除工作区"""
+    """删除工作区
+
+    防御：拒绝删除路径本身为磁盘根目录的情况；
+    P1-26：删除前关闭 SQLite 连接，避免 Windows 下 rmtree 句柄占用失败。
+
+    返回 False 时具体原因打印到 stderr（消费端：CLI 用户可见）。
+    """
     try:
-        shutil.rmtree(workspace_path)
+        resolved = workspace_path.resolve()
+    except OSError as e:
+        print(f"[workspace] 无法解析路径（{workspace_path}）：{e}", file=sys.stderr)
+        return False
+    if resolved == Path(resolved.anchor):
+        print(f"[workspace] 拒绝删除磁盘根目录：{resolved}", file=sys.stderr)
+        return False
+    _close_proxy(resolved)
+    try:
+        shutil.rmtree(resolved)
         return True
-    except OSError:
+    except OSError as e:
+        # 不静默：删除失败（通常是句柄占用/权限）必须给出具体原因
+        print(f"[workspace] 删除失败（{resolved}）：{e}", file=sys.stderr)
         return False
 
 

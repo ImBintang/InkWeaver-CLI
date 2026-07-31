@@ -1,7 +1,13 @@
-"""SSE push — EventBus consume → browser EventSource + session persistence."""
+"""SSE push — EventBus consume → browser EventSource + session persistence.
 
-import asyncio
+P1-34/35/36：唯一后台消费者线程消费 state.bus（无论前端是否连接），
+负责消息缓冲落盘与确认持久化；SSE 客户端通过订阅队列接收广播事件，
+避免多客户端竞争消费总线导致事件被抢走/丢失，且前端断开时消息不再永久丢失。
+"""
+
 import json
+import queue
+import threading
 import time
 from collections import defaultdict
 from fastapi import APIRouter
@@ -12,47 +18,138 @@ from server.state import state
 router = APIRouter()
 
 _msg_buffers: dict[str, list[dict]] = defaultdict(list)
+_buf_lock = threading.Lock()
+_subscribers: set[queue.Queue] = set()
+_subs_lock = threading.Lock()
+_stop_consumer = threading.Event()
+
+
+def _broadcast(evt: dict):
+    """将事件广播给所有 SSE 订阅者（拷贝订阅者列表，避免迭代中变更）"""
+    with _subs_lock:
+        subs = list(_subscribers)
+    for sub in subs:
+        try:
+            sub.put_nowait(evt)
+        except queue.Full:
+            pass  # 订阅者队列满 → 丢弃（消费端断开时自动注销）
 
 
 def _flush_buffer(session_id: str):
-    buf = _msg_buffers.pop(session_id, [])
+    """将缓冲的消息落盘；失败不静默，转 error 事件广播供前端感知"""
+    with _buf_lock:
+        buf = _msg_buffers.pop(session_id, [])
     if not buf or not state.session_manager:
         return
-    for item in buf:
-        state.session_manager.add_message(session_id, item)
+    try:
+        for item in buf:
+            state.session_manager.add_message(session_id, item)
+    except Exception as e:
+        _broadcast({
+            "type": "error",
+            "data": {"text": f"会话「{session_id}」消息落盘失败：{e}"},
+            "source": "system",
+            "timestamp": time.time(),
+        })
+
+
+def _consumer_loop():
+    """后台消费者：唯一从 state.bus 取事件的线程
+
+    职责：
+    - token/output → 追加到活动会话的消息缓冲（task_done 时落盘）
+    - confirm_request → 持久化待确认状态
+    - task_done → 刷新缓冲（无论前端是否在线）
+    - 全部事件 → 广播给所有 SSE 订阅者
+    """
+    active_session: str | None = None  # 当前运行任务绑定的会话（防止任务中切换会话导致串写）
+    while not _stop_consumer.is_set():
+        event = state.bus.get(timeout=0.2)
+        if event is None:
+            continue
+
+        if event.type.value == "task_start":
+            active_session = (event.data or {}).get("session_id") or state.current_session_id
+
+        target = active_session or state.current_session_id
+
+        if target and event.type.value in ("token", "output"):
+            payload = event.data or {}
+            msg = {
+                "id": payload.get("id") or int(time.time() * 1000),
+                "role": "assistant",
+                "content": payload.get("text", ""),
+                "timestamp": int(time.time()),
+            }
+            with _buf_lock:
+                _msg_buffers[target].append(msg)
+
+        if target and event.type.value == "confirm_request":
+            try:
+                state.session_manager.save_pending_confirm(target, event.data)
+            except Exception as e:
+                _broadcast({
+                    "type": "error",
+                    "data": {"text": f"确认状态保存失败：{e}"},
+                    "source": "system",
+                    "timestamp": time.time(),
+                })
+
+        if event.type.value == "task_done":
+            done_target = (event.data or {}).get("session_id") or active_session or state.current_session_id
+            if done_target:
+                _flush_buffer(done_target)
+            active_session = None
+
+        _broadcast({
+            "type": event.type.value,
+            "data": event.data,
+            "source": event.source,
+            "timestamp": event.timestamp,
+        })
+
+
+def _ensure_consumer():
+    """确保后台消费者已启动（幂等；单例守护线程）"""
+    if not getattr(state, "_sse_consumer_started", False):
+        state._sse_consumer_started = True
+        state._sse_consumer_thread = threading.Thread(
+            target=_consumer_loop, daemon=True, name="sse-consumer"
+        )
+        state._sse_consumer_thread.start()
 
 
 @router.get("/api/events/stream")
 async def event_stream():
+    _ensure_consumer()
+    sub: queue.Queue = queue.Queue(maxsize=2000)
+    with _subs_lock:
+        _subscribers.add(sub)
+
     async def generate():
-        yield _sse_event("frontend_ready", {})
-        while True:
-            event = await asyncio.to_thread(state.bus.get, timeout=0.1)
-            if event:
-                cur = state.current_session_id
-                if cur and event.type.value in ("token", "output"):
-                    payload = event.data or {}
-                    msg = {
-                        "id": payload.get("data", {}).get("id") or int(time.time() * 1000),
-                        "role": "assistant",
-                        "content": payload.get("data", {}).get("text", ""),
-                        "timestamp": int(time.time()),
-                    }
-                    _msg_buffers[cur].append(msg)
-                if cur and event.type.value == "confirm_request":
-                    try:
-                        state.session_manager.save_pending_confirm(cur, event.data)
-                    except Exception:
-                        pass
-                if event.type.value == "task_done":
-                    target = (event.data or {}).get("session_id") or cur
-                    if target:
-                        _flush_buffer(target)
-                yield _sse_event(event.type.value, {
-                    "data": event.data, "source": event.source, "timestamp": event.timestamp,
-                })
+        try:
+            yield _sse_event("frontend_ready", {})
+            while True:
+                try:
+                    evt = sub.get_nowait()
+                except queue.Empty:
+                    await asyncio_sleep(0.05)
+                    continue
+                payload = {k: v for k, v in evt.items() if k != "type"}
+                yield _sse_event(evt["type"], payload)
+        finally:
+            # 客户端断开：注销订阅者，避免队列堆积
+            with _subs_lock:
+                _subscribers.discard(sub)
+
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+async def asyncio_sleep(seconds: float):
+    """事件循环内休眠（避免每次轮询都经 asyncio.to_thread 起线程）"""
+    import asyncio
+    await asyncio.sleep(seconds)
 
 
 def _sse_event(event_type: str, payload: dict) -> str:

@@ -1,5 +1,6 @@
 """chat 命令 — 鉴知对话 REPL"""
 
+import sys
 import threading
 import typer
 
@@ -137,8 +138,10 @@ class _CLIConsumer:
                         self.bus.resolve_confirm(cid, {"action": "approve"})
                 try:
                     self.io.print_info(f"事件处理异常：{e}")
-                except Exception:
-                    pass
+                except Exception as e2:
+                    # 最外层兜底：IO 通道也故障时打印 stderr，保证异常不石沉大海
+                    print(f"[chat] 事件处理异常且 IO 上报失败：{e}（{e2}）",
+                          file=sys.stderr)
 
     def stop(self):
         self._running = False
@@ -223,7 +226,9 @@ class _CLIConsumer:
                 try:
                     reject_ids = {int(x.strip()) - 1 for x in response.split(",") if x.strip()}
                 except ValueError:
-                    reject_ids = set()
+                    # 不静默：解析失败按全部拒绝处理（fail-safe，与 P1-18 超时默认拒绝一致）
+                    self.io.print_info("⚠️ 拒绝编号解析失败（需为数字，如 \"2\" 或 \"1,2\"），已按全部拒绝处理")
+                    reject_ids = set(range(len(items)))
                 self.bus.resolve_confirm(confirm_id, {"rejected_indices": list(reject_ids)})
 
         else:
@@ -267,12 +272,12 @@ def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
                 try:
                     n = int(args[idx + 1])
                 except ValueError:
-                    pass
+                    io.print_info(f"⚠️ 章节数「{args[idx + 1]}」不是有效整数，使用默认值 {n}")
         elif args:
             try:
                 n = int(args[0])
             except ValueError:
-                pass
+                io.print_info(f"⚠️ 章节数「{args[0]}」不是有效整数，使用默认值 {n}")
         from tools import workspace as workspace_tools
         io.print_info(workspace_tools.list_latest_chapters(ws, n))
 

@@ -12,6 +12,7 @@ from tools.knowledge_task import run_knowledge_task
 from tools.plot_task import run_plot_task
 from tools.review import run_review as _run_review
 from tools import diff as diff_tools
+from core.events import EventType
 
 
 class KnowledgeAgent(JianzhiAgent):
@@ -460,7 +461,11 @@ class KnowledgeAgent(JianzhiAgent):
 
         # confirm_plan 已由 check 处理并返回结果
         if name == "confirm_plan":
-            self.permission.confirm_plan()
+            try:
+                self.permission.confirm_plan()
+            except Exception as e:
+                # 错误不静默：切换失败原因返回给 LLM
+                return f"错误：切换执行阶段失败：{e}"
             msg = "✅ 已切换至「执行阶段」，写操作已放行。"
             return msg
 
@@ -501,7 +506,7 @@ class KnowledgeAgent(JianzhiAgent):
                     {"input_tokens": i, "output_tokens": o}
                 ), **kw
             ),
-            "finish_task": lambda **kw: diff_tools.finish_task(self.workspace, **kw),
+            "finish_task": lambda **kw: self._finish_knowledge_task(**kw),
             "get_unprocessed_chapters": lambda **kw: str(diff_tools.get_unprocessed_chapters(self.workspace, **kw)),
             # 统一文档管理工具
             "create_doc": lambda **kw: editor_tools.create_doc(self.workspace, **kw),
@@ -521,3 +526,33 @@ class KnowledgeAgent(JianzhiAgent):
 
         # 交给父类处理通用工具
         return super().dispatch_tool(name, args)
+
+    def _finish_knowledge_task(self, **kw) -> str:
+        """Knowledge 模式收尾：校验 + 记录日志 + 缓存落库 + 重置权限
+
+        P1-06 修复：原实现直接映射 diff_tools.finish_task，绕过父类的
+        _proxy.flush() 与 permission.reset()，导致知识提取结果不落库、
+        权限状态残留到下一轮对话。
+        """
+        result = diff_tools.finish_task(self.workspace, **kw)
+        if result.startswith("错误"):
+            return result
+
+        # diff.finish_task 内部的全局 lint 已触发 flush（P1-28）；此处兜底：
+        # 缓存仍非空时（DB 无章节数据等场景）再 flush 一次，确保结果落库
+        if hasattr(self, '_proxy') and self._proxy is not None and self._proxy.is_cache_loaded():
+            try:
+                from tools.chapter import parse_chapter_spec
+                scope = parse_chapter_spec(kw.get("chapters", ""))
+                max_ch = self._proxy._db.chapter_max_num()
+                scope_chapter = scope[-1] if scope else max_ch
+                if scope_chapter > 0:
+                    self._proxy.flush(scope_chapter=scope_chapter)
+            except Exception as e:
+                self.bus.emit(EventType.ERROR,
+                              {"text": f"DB flush 失败：{e}"},
+                              source="knowledge")
+                return f"DB 写入失败：{e}。缓存已保留，可重试。"
+
+        self.permission.reset()
+        return result
