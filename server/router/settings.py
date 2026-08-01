@@ -4,7 +4,7 @@ import copy
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from commands.common import load_config, save_config
+from commands.common import load_config, save_config, get_workspaces_dir
 
 router = APIRouter()
 
@@ -148,6 +148,37 @@ async def delete_model(model_id: str) -> dict:
         raise HTTPException(500, detail=str(e))
 
 
+@router.post("/api/settings/models/{model_id}/test")
+def test_model(model_id: str) -> dict:
+    """模型连通性测试：用该模型配置发起一次最小请求。
+
+    使用同步 def 合 FastAPI 线程池执行，避免阻塞事件循环（LLM 调用可能耗时）。
+    """
+    config = load_config()
+    models = config.get("models", [])
+    model = next((m for m in models if m.get("id") == model_id), None)
+    if model is None:
+        raise HTTPException(404, detail=f"模型 {model_id} 不存在")
+    api_cfg = {
+        "url": model.get("base_url", ""),
+        "key": model.get("api_key", ""),
+        "model": model.get("model", ""),
+        "output_max_tokens": 16,
+    }
+    try:
+        from api import LLMClient
+        client = LLMClient(api_cfg)
+        # 最小请求（不带 thinking 参数，兼容所有 OpenAI 兼容供应商）
+        client.client.chat.completions.create(
+            model=client.model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=5,
+        )
+        return {"ok": True, "message": "连接成功", "model": client.model}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ─── 模型分配 ──────────────────────────────────────────────────────
 
 @router.get("/api/settings/assignments")
@@ -172,3 +203,17 @@ async def set_model_assignment(role: str, req: AssignmentReq) -> dict:
         return {"ok": True}
     except Exception as e:
         raise HTTPException(500, detail=str(e))
+
+
+# ─── 工作区存储 ────────────────────────────────────────────────────
+
+@router.get("/api/settings/workspace/size")
+async def workspace_size() -> dict:
+    """计算工作区根目录总大小（字节）"""
+    try:
+        config = load_config()
+        ws_dir = get_workspaces_dir(config)
+        total = sum(p.stat().st_size for p in ws_dir.rglob("*") if p.is_file())
+        return {"ok": True, "bytes": total, "dir": str(ws_dir)}
+    except Exception as e:
+        raise HTTPException(500, detail=f"计算工作区大小失败：{e}")

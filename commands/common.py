@@ -30,12 +30,15 @@ def resolve_api_config(config: dict, role: str = "chat") -> dict:
 
     Args:
         config: 完整配置字典
-        role: 角色名（chat/extract/write/review）
+        role: 角色名（3 角色：chat[鉴知，含对话+提取] / write[写作] / review[审阅]）
 
     Returns:
         {"url": ..., "key": ..., "model": ..., "output_max_tokens": ...}
     """
     assignments = config.get("assignments", {})
+    # 鉴知统一：extract（知识提取）已并入 chat 角色，旧 extract 分配映射到 chat
+    if role == "extract":
+        role = "chat"
     model_id = assignments.get(role, "")
     models = config.get("models", [])
 

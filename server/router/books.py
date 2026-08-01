@@ -2,6 +2,7 @@
 
 import copy
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -37,6 +38,11 @@ class BookOpenReq(BaseModel):
 class BookCreateReq(BaseModel):
     name: str
     path: str = ""
+
+
+class BookRenameReq(BaseModel):
+    name: str
+    new_name: str
 
 
 class ChapterImportReq(BaseModel):
@@ -124,6 +130,73 @@ async def create_book(req: BookCreateReq) -> dict:
         raise
     except Exception as e:
         raise HTTPException(500, detail=str(e))
+
+
+def _close_jianzhi_quietly():
+    """关闭当前鉴知实例的 DB 连接（重命名/删除工作区前调用，避免 Windows 文件锁）"""
+    old = state.jianzhi
+    if old is not None:
+        try:
+            close = getattr(old, "close", None)
+            if close:
+                close()
+        except Exception as e:
+            print(f"[books] ⚠ 关闭鉴知连接失败: {e}")
+    state.jianzhi = None
+
+
+@router.post("/api/books/rename")
+async def rename_book(req: BookRenameReq) -> dict:
+    """重命名工作区（目录改名）"""
+    old_name = req.name.strip()
+    new_name = req.new_name.strip()
+    if not new_name:
+        raise HTTPException(400, detail="新名称不能为空")
+    if not _NAME_RE.match(new_name):
+        raise HTTPException(400, detail=f"非法工作区名「{new_name}」")
+    if old_name == new_name:
+        return {"ok": True, "name": new_name}
+    old_path = _safe_book_path(old_name)
+    new_path = _safe_book_path(new_name)
+    if not old_path.exists() or not old_path.is_dir():
+        raise HTTPException(404, detail=f"工作区「{old_name}」不存在")
+    if new_path.exists():
+        raise HTTPException(400, detail=f"工作区「{new_name}」已存在")
+    is_current = state.current_book == old_name
+    if is_current:
+        _close_jianzhi_quietly()
+    try:
+        old_path.rename(new_path)
+    except Exception as e:
+        raise HTTPException(500, detail=f"重命名失败：{e}")
+    if is_current:
+        state.current_book = new_name
+        state.workspace_path = new_path
+        _rebuild_jianzhi()
+        try:
+            state.bind_session_manager()
+        except Exception as e:
+            print(f"[books] ⚠ rename 后重绑会话失败: {e}")
+    return {"ok": True, "name": new_name}
+
+
+@router.delete("/api/books/{name}")
+async def delete_book(name: str) -> dict:
+    """删除工作区（整个目录，危险操作，前端需二次确认）"""
+    target = _safe_book_path(name)
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(404, detail=f"工作区「{name}」不存在")
+    if state.current_book == name:
+        _close_jianzhi_quietly()
+        state.current_book = None
+        state.workspace_path = None
+        state.session_manager = None
+        state.current_session_id = None
+    try:
+        shutil.rmtree(target)
+    except Exception as e:
+        raise HTTPException(500, detail=f"删除工作区失败：{e}")
+    return {"ok": True}
 
 
 # ─── 章节管理 ──────────────────────────────────────────────────────

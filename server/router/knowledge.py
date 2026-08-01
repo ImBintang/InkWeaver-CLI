@@ -1,5 +1,7 @@
 """知识库 HTTP API（wiki/rules/plots/categories）"""
 
+import json
+
 from fastapi import APIRouter
 
 from server.state import state
@@ -12,6 +14,22 @@ router = APIRouter()
 def _get_db(book: str) -> SQLiteService:
     ws_path = _safe_book_path(book)
     return SQLiteService(ws_path / "wiki.db")
+
+
+def _resolve_relation_names(db: SQLiteService, rel_ids: list) -> list[str]:
+    """将 relations 中的 main_id 列表解析为名称列表（复用 tools/relation.py 逻辑）"""
+    names: list[str] = []
+    for rid in rel_ids:
+        for getter in (db.wiki_get_main, db.plot_get_main, db.rule_get_main):
+            try:
+                m = getter(rid)
+            except Exception:
+                m = None
+            if m:
+                if m["name"] not in names:
+                    names.append(m["name"])
+                break
+    return names
 
 
 # ─── 类别 ──────────────────────────────────────────────────────────
@@ -69,30 +87,73 @@ async def list_wiki_cards(book: str, category: str | None = None) -> list[dict]:
 
 @router.get("/api/books/{book}/wiki/{name}")
 async def get_wiki_detail(book: str, name: str) -> dict:
-    """获取 wiki 词条详情"""
+    """获取 wiki 词条详情（未命中时回退查规则/剧情卡片，供详情页复用）"""
     db = None
     try:
         db = _get_db(book)
         main = db.wiki_find_main(name)
-        if main is None:
-            return {}
-        version = db.latest_version_at("wiki", main["id"], 999999)
-        cat = db.get_category(main["category_id"])
-        result = {
-            "name": main["name"],
-            "category": cat["name"] if cat else "",
-            "created_chapter": main.get("created_chapter", 0),
-            "updated_chapter": main.get("updated_chapter", 0),
-        }
-        if version:
-            result.update({
-                "keywords": version.get("keywords", ""),
-                "description": version.get("description", ""),
-                "state": version.get("state", ""),
-                "content": version.get("content", ""),
-                "relations": version.get("relations", "[]"),
-            })
-        return result
+        if main is not None:
+            version = db.latest_version_at("wiki", main["id"], 999999)
+            cat = db.get_category(main["category_id"])
+            result = {
+                "name": main["name"],
+                "type": "wiki",
+                "category": cat["name"] if cat else "",
+                "created_chapter": main.get("created_chapter", 0),
+                "updated_chapter": main.get("updated_chapter", 0),
+            }
+            if version:
+                # relations 存的是 main_id 列表（JSON 字符串），解析为词条名称
+                raw_relations = version.get("relations", "[]")
+                try:
+                    rel_ids = json.loads(raw_relations) if isinstance(raw_relations, str) else (raw_relations or [])
+                except (json.JSONDecodeError, TypeError):
+                    rel_ids = []
+                rel_names = _resolve_relation_names(db, rel_ids) if isinstance(rel_ids, list) else []
+                result.update({
+                    "keywords": version.get("keywords", ""),
+                    "description": version.get("description", ""),
+                    "state": version.get("state", ""),
+                    "content": version.get("content", ""),
+                    "relations": json.dumps(rel_names, ensure_ascii=False),
+                })
+            return result
+
+        # 回退：规则
+        rule = db.rule_find_main(name)
+        if rule is not None:
+            ver = db.latest_version_at("rule", rule["id"], 999999)
+            return {
+                "name": rule["name"],
+                "type": "rule",
+                "category": "规则",
+                "created_chapter": rule.get("created_chapter", 0),
+                "updated_chapter": rule.get("updated_chapter", 0),
+                "keywords": (ver or {}).get("keywords", ""),
+                "description": "",
+                "state": "",
+                "content": (ver or {}).get("content", ""),
+                "relations": "[]",
+            }
+
+        # 回退：剧情卡片
+        plot = db.plot_find_main(name)
+        if plot is not None:
+            ver = db.latest_version_at("plot", plot["id"], 999999)
+            return {
+                "name": plot["name"],
+                "type": "plot",
+                "category": "剧情卡片",
+                "created_chapter": plot.get("created_chapter", 0),
+                "updated_chapter": plot.get("updated_chapter", 0),
+                "keywords": (ver or {}).get("keywords", ""),
+                "description": "",
+                "state": "",
+                "content": (ver or {}).get("content", ""),
+                "relations": "[]",
+            }
+
+        return {}
     except Exception as e:
         print(f"[WARN] 获取 wiki 详情失败 (book={book}, name={name}): {e}")
         return {}

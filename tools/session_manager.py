@@ -203,9 +203,13 @@ class SessionManager:
                     "message_count": meta.get("message_count", 0) + 1,
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
         if not meta.get("first_user_message") and msg.get("role") == "user":
-            new_meta["first_user_message"] = (msg.get("content") or "")[:100]
+            first_text = (msg.get("content") or "").strip()
+            new_meta["first_user_message"] = first_text[:100]
+            # 自动命名：当会话名仍为默认「新会话」时，用首条用户消息截断作为标题
+            if first_text and meta.get("name", "") in ("", "新会话"):
+                new_meta["name"] = first_text[:20] + ("…" if len(first_text) > 20 else "")
         self._rewrite_meta_line(fpath, new_meta)
-        self._update_index_summary(sid, name=meta.get("name", ""),
+        self._update_index_summary(sid, name=new_meta.get("name", meta.get("name", "")),
                                     count=new_meta["message_count"],
                                     updated=new_meta["updated_at"])
 
