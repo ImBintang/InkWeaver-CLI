@@ -108,6 +108,9 @@ def agent_loop(agent, messages: list) -> list:
             if tool_name == "agent_output":
                 text = tool_input.get("text", "")
                 bus.emit(EventType.OUTPUT, {"text": text}, source=source)
+                # 记录本轮经 agent_output 发射过的文本，供调用方（如 Jianzhi.chat 尾部）
+                # 去重，避免同一回复被 agent_output 与尾部兑底各发射一次 OUTPUT 导致重复发言
+                agent._last_agent_output = text
                 result = "(已输出)"
             else:
                 # 发射工具调用事件

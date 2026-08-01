@@ -10,17 +10,22 @@ import json
 from pathlib import Path
 
 from api import LLMClient
+from core.events import EventType
 
 
 class WritingWorkflow:
     """写作 Workflow — 纯 chat 调用，组装上下文"""
 
-    def __init__(self, llm: LLMClient, workspace: Path, writer_skill_text: str = "", cli=None):
+    def __init__(self, llm: LLMClient, workspace: Path, writer_skill_text: str = "", cli=None, bus=None):
         self.llm = llm
         self.workspace = workspace
         self.cli = cli
         self._last_usage = {}
         self.writer_skill_text = writer_skill_text
+        # 全局事件总线（GUI 模式注入）：注入后 run() 走流式调用，
+        # 正文逐 token 发射 TOKEN 事件 → SSE → 前端实时展示写作过程；
+        # CLI/修改轮（run_revise）bus=None 保持原有非流式行为
+        self.bus = bus
 
     def _log(self, tag: str, text: str):
         if self.cli and self.cli.logger:
@@ -103,16 +108,34 @@ class WritingWorkflow:
             )
 
         messages = [{"role": "user", "content": context}]
-        response = self.llm.chat(
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=None,
-        )
+        if self.bus is not None:
+            # 流式模式：正文逐 token 推送前端，让用户实时看到写作过程
+            response = None
+            for chunk in self.llm.chat_stream(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=None,
+            ):
+                if chunk["type"] == "token":
+                    try:
+                        self.bus.emit(EventType.TOKEN, {"text": chunk["text"]}, source="muse")
+                    except Exception:
+                        pass  # 事件上报失败不阻断写作
+                elif chunk["type"] == "done":
+                    response = chunk
+            if response and response.get("usage"):
+                self._last_usage = response["usage"]
+            result = ((response.get("content") if response else "") or "").strip()
+        else:
+            response = self.llm.chat(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=None,
+            )
+            if "usage" in response:
+                self._last_usage = response["usage"]
+            result = response.get("content", "").strip()
 
-        if "usage" in response:
-            self._last_usage = response["usage"]
-
-        result = response.get("content", "").strip()
         self._log("WRITING_WF_END", result[:200])
         return result
 

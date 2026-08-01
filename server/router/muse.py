@@ -35,8 +35,26 @@ async def muse_start(req: MuseStartReq) -> dict:
     return {"ok": True}
 
 
+def _map_opinions(issues: list) -> list:
+    """将审阅 issue（level/quote/description/suggestion）映射为前端 MuseOpinion 结构"""
+    level_sev = {0: "error", 1: "error", 2: "warning", 3: "info"}
+    opinions = []
+    for i, issue in enumerate(issues, 1):
+        level = issue.get("level")
+        sev = level_sev.get(level, "info") if isinstance(level, int) else "info"
+        quote = (issue.get("quote") or "").strip()
+        desc = issue.get("description", "")
+        sug = issue.get("suggestion", "")
+        text = f"「{quote}」{desc}" if quote else desc
+        if sug:
+            text += f"（建议：{sug}）"
+        opinions.append({"id": i, "paragraph": 0, "text": text, "severity": sev})
+    return opinions
+
+
 def _run_muse(outline: str, chapter_num: int | None):
     """在独立线程中运行妙笔工作流"""
+    wf = None
     try:
         from Muse import MuseWorkflow
         config = load_config()
@@ -48,6 +66,7 @@ def _run_muse(outline: str, chapter_num: int | None):
             outline_text=outline,
             auto_approve=True,  # API 模式无 stdin，自动通过所有确认
             chapter=chapter_num,
+            bus=state.bus,  # 注入全局事件总线：准备/写作/审阅过程实时推送前端
         )
         wf.run()
     except SystemExit as e:
@@ -59,7 +78,21 @@ def _run_muse(outline: str, chapter_num: int | None):
     except Exception as e:
         state.bus.emit(EventType.ERROR, {"text": str(e)}, source="muse")
     finally:
-        state.bus.emit(EventType.TASK_DONE, {}, source="muse")
+        # TASK_DONE 携带审阅结果回传前端（此前为空 {} 导致前端拿不到意见/分数/定稿）
+        payload: dict = {}
+        if wf is not None:
+            review = getattr(wf, "final_review", None)
+            if review:
+                payload["score"] = review.get("score")
+                payload["pass"] = review.get("pass")
+                payload["opinions"] = _map_opinions(review.get("issues", []))
+            if getattr(wf, "final_text", ""):
+                payload["final_text"] = wf.final_text
+            try:
+                payload["task_dir"] = str(wf.io.task_dir)
+            except Exception:
+                pass
+        state.bus.emit(EventType.TASK_DONE, payload, source="muse")
 
 
 @router.get("/api/muse/status")

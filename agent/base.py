@@ -36,6 +36,9 @@ class BaseAgent(ABC):
         self.messages: list = []
         self._last_usage = {}
         self._token_accum = {"input": 0, "output": 0, "total": 0}
+        # token 统计按工作区（书）聚合：_persist_token_record 读取此字段写入 book 列，
+        # 此前从未赋值导致所有记录 book 为空、按工作区查询恒为 0（token 统计“没同步”根因）
+        self._book_name = workspace.name
 
     @abstractmethod
     def build_system_prompt(self) -> str:

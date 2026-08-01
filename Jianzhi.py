@@ -1497,6 +1497,8 @@ class JianzhiAgent(BaseAgent):
         Returns:
             bool: 始终返回 False（v4 不再有 handoff 机制）
         """
+        # 重置 agent_output 去重标记（loop.py 发射 agent_output OUTPUT 时会重新写入）
+        self._last_agent_output = None
         self.messages.append({"role": "user", "content": user_input})
         self.messages = agent_loop(self, self.messages)
 
@@ -1526,10 +1528,13 @@ class JianzhiAgent(BaseAgent):
             del self._finish_pending
 
         # 打印最终输出（取最后一条 assistant 的文本回复）
+        # 去重：若该回复已经由 agent_output 工具发射过 OUTPUT（loop.py 记录于
+        # _last_agent_output），则不再重复发射，避免前端出现两条一模一样的发言
         for msg in reversed(self.messages):
             if msg.get("role") == "assistant" and msg.get("content"):
                 text = msg["content"].strip()
-                if text:
+                last_out = (getattr(self, "_last_agent_output", None) or "").strip()
+                if text and text.replace(" ", "").replace("\n", "") != last_out.replace(" ", "").replace("\n", ""):
                     self.bus.emit(EventType.OUTPUT, {"text": text}, source="jianzhi")
                 break
 

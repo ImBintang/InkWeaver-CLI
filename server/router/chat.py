@@ -1,5 +1,6 @@
 """鉴知 HTTP API — 对话发送 + 确认响应 + 上下文管理"""
 
+import time
 import threading
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -67,6 +68,20 @@ def _run_jianzhi(text: str, session_id: str | None = None):
             return
         if target_session:
             state.current_session_id = target_session
+        # 用户消息落盘：此前仅 assistant 回复经 SSE 缓冲落盘，user 消息从未写入，
+        # 导致会话恢复时用户发言全部丢失、first_user_message/自动命名失效（user=0 根因）
+        if state.session_manager and target_session:
+            try:
+                state.session_manager.add_message(target_session, {
+                    "id": int(time.time() * 1000),
+                    "role": "user",
+                    "content": text,
+                    "timestamp": int(time.time()),
+                })
+            except Exception as e:
+                state.bus.emit(EventType.ERROR,
+                               {"text": f"用户消息落盘失败（{target_session}）：{e}"},
+                               source="server")
         # 广播任务开始（含会话绑定），供 SSE 后台消费者将输出缓冲到正确会话
         state.bus.emit(EventType.TASK_START, {"session_id": target_session}, source="jianzhi")
         state.jianzhi.chat(text)

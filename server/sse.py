@@ -57,7 +57,8 @@ def _consumer_loop():
     """后台消费者：唯一从 state.bus 取事件的线程
 
     职责：
-    - token/output → 追加到活动会话的消息缓冲（task_done 时落盘）
+    - output（完整最终回复）→ 追加到活动会话的消息缓冲（task_done 时落盘）；
+      TOKEN 是流式碎片仅供前端实时展示，绝不落盘（否则一条回复会被拆成几十条碎片消息）
     - confirm_request → 持久化待确认状态
     - task_done → 刷新缓冲（无论前端是否在线）
     - 全部事件 → 广播给所有 SSE 订阅者
@@ -73,16 +74,24 @@ def _consumer_loop():
 
         target = active_session or state.current_session_id
 
-        if target and event.type.value in ("token", "output"):
+        # 只缓冲鉴知的 output 到会话文件：妙笔（source="muse"）的 OUTPUT 是写作产物，
+        # 不属于聊天会话，若一并缓冲会在妙笔任务期间串写进当前鉴知会话
+        if target and event.type.value == "output" and event.source == "jianzhi":
             payload = event.data or {}
-            msg = {
-                "id": payload.get("id") or int(time.time() * 1000),
-                "role": "assistant",
-                "content": payload.get("text", ""),
-                "timestamp": int(time.time()),
-            }
-            with _buf_lock:
-                _msg_buffers[target].append(msg)
+            text = (payload.get("text") or "").strip()
+            if text:
+                with _buf_lock:
+                    buf = _msg_buffers[target]
+                    # 去重：agent_output 工具与 Jianzhi.chat 尾部可能对同一回复发射两次 OUTPUT，
+                    # 内容与上一条已缓冲 assistant 消息一致时跳过，避免会话文件出现重复发言
+                    if not (buf and buf[-1].get("role") == "assistant"
+                            and (buf[-1].get("content") or "").strip() == text):
+                        buf.append({
+                            "id": payload.get("id") or int(time.time() * 1000),
+                            "role": "assistant",
+                            "content": text,
+                            "timestamp": int(time.time()),
+                        })
 
         if target and event.type.value == "confirm_request":
             try:

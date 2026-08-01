@@ -136,10 +136,20 @@ async def get_wiki_detail(book: str, name: str) -> dict:
                 "relations": "[]",
             }
 
-        # 回退：剧情卡片
+        # 回退：剧情卡片（额外携带 chapters/ended/end_notes 供详情页展示）
         plot = db.plot_find_main(name)
         if plot is not None:
             ver = db.latest_version_at("plot", plot["id"], 999999)
+            rel_names = []
+            if ver:
+                raw_rel = ver.get("relations") or []
+                if isinstance(raw_rel, str):
+                    try:
+                        raw_rel = json.loads(raw_rel)
+                    except (json.JSONDecodeError, TypeError):
+                        raw_rel = []
+                if isinstance(raw_rel, list):
+                    rel_names = _resolve_relation_names(db, raw_rel)
             return {
                 "name": plot["name"],
                 "type": "plot",
@@ -147,10 +157,13 @@ async def get_wiki_detail(book: str, name: str) -> dict:
                 "created_chapter": plot.get("created_chapter", 0),
                 "updated_chapter": plot.get("updated_chapter", 0),
                 "keywords": (ver or {}).get("keywords", ""),
-                "description": "",
-                "state": "",
+                "description": (ver or {}).get("description", ""),
+                "state": (ver or {}).get("state", ""),
                 "content": (ver or {}).get("content", ""),
-                "relations": "[]",
+                "relations": json.dumps(rel_names, ensure_ascii=False),
+                "chapters": plot.get("chapters", ""),
+                "ended": bool(plot.get("ended", 0)),
+                "end_notes": plot.get("end_notes", ""),
             }
 
         return {}
@@ -178,6 +191,8 @@ async def list_rules(book: str) -> list[dict]:
                 "id": r["id"],
                 "name": r["name"],
                 "content": (ver or {}).get("content", ""),
+                "keywords": (ver or {}).get("keywords", ""),
+                "summary": (ver or {}).get("description", ""),
             })
         return result
     except Exception as e:
@@ -204,6 +219,7 @@ async def list_plots(book: str) -> list[dict]:
                 "id": r["id"],
                 "title": r["name"],
                 "content": (ver or {}).get("content", ""),
+                "description": (ver or {}).get("description", ""),
                 "chapters": r.get("chapters", ""),
                 "ended": bool(r.get("ended", 0)),
             })

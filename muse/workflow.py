@@ -30,7 +30,7 @@ class MuseWorkflow:
 
     def __init__(self, config: dict, workspace: Path, skills_dir: Path, workspaces_dir: Optional[Path] = None,
                  io=None, outline_text: str = "", auto_approve: bool = False,
-                 chapter: int | None = None):
+                 chapter: int | None = None, bus=None):
         self.workspace = workspace
         self.skills_dir = skills_dir
         self.workspaces_dir = workspaces_dir
@@ -45,12 +45,35 @@ class MuseWorkflow:
         self._token_stats = {}  # step_name -> {input, output, total}
         self._token_total = {"input": 0, "output": 0, "total": 0}
         self._auto_approve = auto_approve  # 自动确认模式
+        # 全局事件总线（GUI 模式注入 state.bus；CLI 模式为 None，行为与以前一致）
+        # 注入后：各子 Agent 的 TOKEN/REASONING 会转发到前端实时展示，
+        # 并以 STEP_CHANGE 推进前端进度条（此前私有总线被 drain 丢弃导致前端静止无反馈）
+        self.bus = bus
+        # 最终成果缓存：供服务层在 TASK_DONE 中携带审阅意见/定稿回传前端
+        self.final_review: dict | None = None
+        self.final_text: str = ""
         # v5.3: 章节锚定
         self._chapter_arg = chapter  # 用户传入的目标章节号（None 表示自动）
         self.target_chapter: int | None = None  # run() 时解析
         self.chapter_ceiling: int | None = None  # target_chapter - 1，知识版本卡控上限
         # P1-19: 追踪已创建的 agent，异常路径统一清理 drain 消费线程
         self._agents: list = []
+
+    def _emit_step(self, step: int, detail: str = ""):
+        """发射 STEP_CHANGE 推进前端进度条（仅注入了 bus 的 GUI 模式生效）"""
+        if self.bus is not None:
+            try:
+                self.bus.emit(EventType.STEP_CHANGE, {"step": step, "detail": detail}, source="muse")
+            except Exception:
+                pass  # 事件上报失败不阻断写作主流程
+
+    def _emit_info(self, text: str):
+        """发射 INFO 提示到前端（仅 GUI 模式）"""
+        if self.bus is not None:
+            try:
+                self.bus.emit(EventType.INFO, {"text": text}, source="muse")
+            except Exception:
+                pass
 
     def run(self):
         """运行妙笔工作流
@@ -272,6 +295,8 @@ class MuseWorkflow:
         """
         print("=" * 40)
         print("第二步：知识准备")
+        # 推进前端进度条到“知识准备”，子 Agent 的 TOKEN 流随后实时展示准备过程
+        self._emit_step(1, "知识准备")
 
         # ---- 先验知识 ----
         reason = ""
@@ -464,14 +489,19 @@ class MuseWorkflow:
             # ③ 润色写作
             print("=" * 40)
             print(f"第三步：润色写作（第 {round_count} 轮）")
+            # 推进前端进度条到“写作中”（前端此时清空准备过程文本，开始展示正文流）
+            self._emit_step(2, f"写作（第 {round_count} 轮）")
             self.current_draft = self._run_writer()
             polished = polish_draft(self.current_draft)
             self.io.save_draft(polished)
             # 更新 current_draft 为润色版，供下一轮重写时传入
             self.current_draft = polished
+            self.final_text = polished  # 缓存定稿供 TASK_DONE 回传前端
 
             # ④ 写作审阅
             print("正在进行写作审阅...")
+            # 推进前端进度条到“审阅”
+            self._emit_step(3, "审阅")
             review_session = ReviewSession()
 
             # v5.4: R2+ 注入上轮 issues 和分数（供分数保底逻辑）
@@ -489,6 +519,7 @@ class MuseWorkflow:
 
             review_result = self._run_reviewer(polished, review_session)
             previous_review_result = review_result  # v5.4: 保存本轮结果
+            self.final_review = review_result  # 缓存审阅结果供 TASK_DONE 回传前端
 
             # 保存审阅意见到 review.md
             review_md_lines = [
@@ -569,6 +600,7 @@ class MuseWorkflow:
             workspace=self.workspace,
             writer_skill_text=writer_skill_text,
             cli=None,
+            bus=self.bus,  # GUI 模式注入总线：写作正文逐 token 推送前端实时展示
         )
 
         last_chapter = self._get_last_chapter_full()
@@ -719,6 +751,14 @@ class MuseWorkflow:
                         # 妙笔为无人值守流程且 MuseAgent 不发起确认：
                         # 任何意外确认请求默认拒绝（fail-safe，与 P1-18 一致）
                         bus.resolve_confirm(cid, {"action": "reject"})
+                    continue
+                # 转发到注入的全局事件总线（GUI 模式）→ SSE → 前端实时展示
+                # 准备/写作/审阅过程的 TOKEN/REASONING；CLI 模式 bus=None 仅排干（同以前）
+                if self.bus is not None:
+                    try:
+                        self.bus.emit(evt.type, evt.data, source=evt.source)
+                    except Exception:
+                        pass  # 转发失败不阻断写作主流程
 
         drain_thread = threading.Thread(target=_drain, daemon=True)
         drain_thread.start()
