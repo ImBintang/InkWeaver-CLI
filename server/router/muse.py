@@ -37,16 +37,22 @@ async def muse_start(req: MuseStartReq) -> dict:
 
 @router.post("/api/muse/stop")
 async def muse_stop() -> dict:
-    """终止妙笔任务（步骤边界生效，当前 LLM 调用完成后停止）"""
+    """终止妙笔任务（立即生效：流式循环即时打断 + 确认阻塞立即唤醒）"""
     evt = state.muse_stop_event
     if evt is None:
         raise HTTPException(404, detail="妙笔任务未在运行")
     evt.set()
+    # v6.5.9: 主动解除所有挂起确认，使阻塞在 request_confirm 的工作流线程立即醒来
+    state.bus.cancel_confirms({"action": "reject", "_stopped": True})
     return {"ok": True}
 
 
 def _map_opinions(issues: list) -> list:
-    """将审阅 issue（level/quote/description/suggestion）映射为前端 MuseOpinion 结构"""
+    """将审阅 issue（level/quote/description/suggestion）映射为前端意见卡片结构
+
+    v6.5.8: 透传结构化字段（level/quote/description/suggestion）供前端照搬
+    审阅过程中的评分卡片样式渲染；text 保留为兼容字段（不再需要“第x段”）。
+    """
     level_sev = {0: "error", 1: "error", 2: "warning", 3: "info"}
     opinions = []
     for i, issue in enumerate(issues, 1):
@@ -58,13 +64,22 @@ def _map_opinions(issues: list) -> list:
         text = f"「{quote}」{desc}" if quote else desc
         if sug:
             text += f"（建议：{sug}）"
-        opinions.append({"id": i, "paragraph": 0, "text": text, "severity": sev})
+        opinions.append({
+            "id": i,
+            "level": level if isinstance(level, int) else None,
+            "quote": quote,
+            "description": desc,
+            "suggestion": sug,
+            "text": text,
+            "severity": sev,
+        })
     return opinions
 
 
 def _run_muse(outline: str, chapter_num: int | None):
     """在独立线程中运行妙笔工作流"""
     wf = None
+    stopped_by_user = False  # v6.5.6: 用户终止标记——finally 据此跳过重复 TASK_DONE
     try:
         from Muse import MuseWorkflow
         from muse.workflow import MuseStopped
@@ -77,7 +92,7 @@ def _run_muse(outline: str, chapter_num: int | None):
             skills_dir=SKILLS_DIR,
             workspaces_dir=state.workspaces_dir,
             outline_text=outline,
-            auto_approve=True,  # API 模式无 stdin，自动通过所有确认
+            auto_approve=False,  # v6.5.3: 取消自动通过，走事件总线确认卡片（bus 已注入）
             chapter=chapter_num,
             bus=state.bus,  # 注入全局事件总线：准备/写作/审阅过程实时推送前端
             stop_event=stop_event,  # v6.5.3: 用户终止信号
@@ -85,6 +100,7 @@ def _run_muse(outline: str, chapter_num: int | None):
         wf.run()
     except MuseStopped:
         # 用户主动终止：通知前端（TASK_DONE 携带 stopped 标记）
+        stopped_by_user = True
         state.bus.emit(EventType.INFO, {"text": "妙笔任务已终止"}, source="muse")
         state.bus.emit(EventType.TASK_DONE, {"stopped": True}, source="muse")
         return
@@ -99,6 +115,10 @@ def _run_muse(outline: str, chapter_num: int | None):
     finally:
         # 任务结束：无论正常/异常/终止，都清理终止信号
         state.muse_stop_event = None
+        # v6.5.6: 用户终止分支已发射 TASK_DONE(stopped)，此处跳过，
+        # 避免空 payload 的第二次 TASK_DONE 把前端从大纲输入视图拉回空白审计视图
+        if stopped_by_user:
+            return
         # TASK_DONE 携带审阅结果回传前端（此前为空 {} 导致前端拿不到意见/分数/定稿）
         payload: dict = {}
         if wf is not None:

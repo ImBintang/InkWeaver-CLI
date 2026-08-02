@@ -2,6 +2,7 @@
 
 import json
 import textwrap
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +14,12 @@ from tools import workspace as workspace_tools
 from tools.polish import polish_draft
 from muse.agent import MuseAgent
 from muse.review_session import ReviewSession
+
+# v6.5.3: 写作输出上限硬约束（token）。目标正文 3000~4000 中文字 ≈ 5000~8000 token。
+# v6.5.6 修订：保留思考模式（思维链质量保障）后思考与正文共享预算，
+# 10000 会被 low 强度思考（约 2~4k）+ 正文（5~8k）顶满，故放宽到 16000 双保险；
+# 正文失控由 writing_workflow.MAX_BODY_CHARS 段落截断拖底（非 max_tokens 截断）。
+WRITE_MAX_TOKENS = 16000
 
 
 class MuseStopped(Exception):
@@ -157,22 +164,60 @@ class MuseWorkflow:
 
     # ---- v5.2 I/O 辅助 ----
 
-    def _confirm(self, prompt: str) -> bool:
-        """y/n 确认，尊重 _auto_approve"""
+    def _confirm(self, prompt: str, kind: str = "muse_confirm",
+                 payload: dict | None = None) -> bool:
+        """y/n 确认，尊重 _auto_approve
+    
+        v6.5.3: GUI 模式（bus 注入）通过事件总线 request_confirm 阻塞等待
+        用户在前端确认卡片上的操作（通过/打回）；CLI 模式保持 stdin 行为。
+        v6.5.9: 终止信号即时生效——确认前检查 stop，超时/被取消直接抛出 MuseStopped。
+        """
         if self._auto_approve:
             return True
+        if self.bus is not None:
+            self._check_stopped()
+            try:
+                resp = self.bus.request_confirm(
+                    kind, payload or {"prompt": prompt}, source="muse")
+                # v6.5.9: 超时或被终止取消——直接终止流程（不当作“打回”进入修正循环）
+                if resp.get("_timeout") or resp.get("_stopped"):
+                    raise MuseStopped("妙笔任务已终止（确认超时/用户取消）")
+                return resp.get("action") == "approve"
+            except MuseStopped:
+                raise
+            except Exception as e:
+                # 确认通道异常：不静默放行，终止流程以免错误内容进入写作
+                raise RuntimeError(f"确认请求失败：{e}")
         print(prompt)
         try:
             return input().strip().lower() == "y"
         except EOFError:
-            # 不静默：输入流结束不可当作"确认放行"（无 TTY 时终止流程而非自动通过）
+            # 不静默：输入流结束不可当作“确认放行”（无 TTY 时终止流程而非自动通过）
             raise RuntimeError("输入流已结束（EOF），无法进行人工确认，流程终止。")
         # KeyboardInterrupt 不捕获：Ctrl+C 直接中断（run() 兜底会清理 drain 线程）
 
-    def _input(self, prompt: str = "") -> str:
-        """读取输入，_auto_approve 时返回空"""
+    def _input(self, prompt: str = "", kind: str = "muse_input",
+               payload: dict | None = None) -> str:
+        """读取输入，_auto_approve 时返回空
+
+        v6.5.3: GUI 模式返回确认卡片上用户填写的 reason（打回理由）。
+        v6.5.9: 终止信号即时生效——超时/被取消直接抛出 MuseStopped。
+        """
         if self._auto_approve:
             return ""
+        if self.bus is not None:
+            self._check_stopped()
+            try:
+                resp = self.bus.request_confirm(
+                    kind, payload or {"prompt": prompt}, source="muse")
+                # v6.5.9: 超时或被终止取消——直接终止流程
+                if resp.get("_timeout") or resp.get("_stopped"):
+                    raise MuseStopped("妙笔任务已终止（确认超时/用户取消）")
+                return str(resp.get("reason", "")).strip()
+            except MuseStopped:
+                raise
+            except Exception as e:
+                raise RuntimeError(f"确认请求失败：{e}")
         if prompt:
             print(prompt)
         try:
@@ -320,18 +365,25 @@ class MuseWorkflow:
                 print("正在根据反馈增量修正先验知识...")
                 self.prior_knowledge = self._revise_prior_knowledge(reason)
                 self.io.save_prior_knowledge(self.prior_knowledge)
+                self._emit_prep_done("prior_knowledge", self.prior_knowledge)
                 reason = ""
             else:
                 print("正在生成先验知识...")
                 self.prior_knowledge = self._run_researcher()
                 self.io.save_prior_knowledge(self.prior_knowledge)
+                # v6.5.8: 全局总线直接发射定稿（不依赖 agent 私有 bus→drain 转发，
+                # 避免 agent_loop 结束时竞态丢事件）——前端据此标记进度条完成
+                self._emit_prep_done("prior_knowledge", self.prior_knowledge)
             print("\n" + "=" * 40)
             print("先验知识：")
             print(self.prior_knowledge)
             print("\n确认知识准备通过？[y/n]")
-            if self._confirm(""):
+            # v6.5.3: 确认内容随卡片展示给用户审阅（GUI 模式）
+            if self._confirm("", kind="muse_prior_knowledge",
+                              payload={"title": "先验知识", "text": self.prior_knowledge}):
                 break
-            reason = self._input("请输入打回理由：")
+            reason = self._input("", kind="muse_prior_knowledge_reason",
+                                 payload={"title": "先验知识", "text": self.prior_knowledge})
             if not reason:
                 reason = "（未提供具体理由，请根据展示内容自行修正明显问题）"
 
@@ -343,21 +395,40 @@ class MuseWorkflow:
                 print("正在根据反馈增量修正前情提要...")
                 self.plot_summary = self._revise_plot_summary(reason)
                 self.io.save_plot_summary(self.plot_summary)
+                self._emit_prep_done("plot_summary", self.plot_summary)
                 reason = ""
             else:
                 print("正在生成前情提要...")
                 self.plot_summary = self._run_plot_summary()
                 self.io.save_plot_summary(self.plot_summary)
+                # v6.5.8: 全局总线直接发射定稿（同先验知识）
+                self._emit_prep_done("plot_summary", self.plot_summary)
             print("\n" + "=" * 40)
             print("前情提要：")
             self.plot_summary = textwrap.dedent(self.plot_summary)
             print(self.plot_summary)
             print("\n确认前情提要通过？[y/n]")
-            if self._confirm(""):
+            # v6.5.3: 确认内容随卡片展示给用户审阅（GUI 模式）
+            if self._confirm("", kind="muse_plot_summary",
+                              payload={"title": "前情提要", "text": self.plot_summary}):
                 break
-            reason = self._input("请输入打回理由：")
+            reason = self._input("", kind="muse_plot_summary_reason",
+                                 payload={"title": "前情提要", "text": self.plot_summary})
             if not reason:
                 reason = "（未提供具体理由，请根据展示内容自行修正明显问题）"
+
+    def _emit_prep_done(self, kind: str, text: str):
+        """v6.5.8: 知识准备定稿产物用全局总线直接发射 OUTPUT 事件（携带 kind）
+
+        不走 agent 私有 bus→drain 转发链路：agent_loop 结束时 drain 线程
+        可能因 stop 竞态丢弃队列尾部事件，导致前端永远收不到定稿、
+        进度条无法标记完成（此前只有 TOKEN 流，streaming 永远为 true）。
+        """
+        if self.bus is not None and text:
+            try:
+                self.bus.emit(EventType.OUTPUT, {"kind": kind, "text": text}, source="muse")
+            except Exception:
+                pass
 
     @staticmethod
     def _check_word_count(text: str) -> list[dict]:
@@ -510,7 +581,20 @@ class MuseWorkflow:
             # 推进前端进度条到“写作中”（前端此时清空准备过程文本，开始展示正文流）
             self._emit_step(2, f"写作（第 {round_count} 轮）")
             self.current_draft = self._run_writer()
+            # v6.5.8: 修改轮结果展示——run_revise 已发射 MUSE_EDITS（雾霾蓝标注清单），
+            # 写作区此时渲染"修改后全文+高亮标注"。GUI 模式短暂停留让用户看清修改处
+            # 再进入审阅（首轮无编辑标注不停留；不可 re-emit step=2，会清空前端高亮）。
+            if round_count >= 2 and self.bus is not None:
+                time.sleep(4)
             polished = polish_draft(self.current_draft)
+            # v6.5.6: 修改轮产出为空（如 LLM 思考耗尽输出上限被截断）时不能带空稿继续审阅：
+            # 否则审阅 agent 会报告 0 级“正文为空”并循环打回，前端表现为卡死+空白。
+            # 改为抛错终止本轮，由服务层提示用户重试（保留已保存的上一轮产物）。
+            if not polished:
+                raise RuntimeError(
+                    "妙笔写作未产出正文（LLM 思考过长被输出上限截断）。"
+                    "已保留上一轮成果，请降低目标章节字数要求或重试。"
+                )
             self.io.save_draft(polished)
             # 更新 current_draft 为润色版，供下一轮重写时传入
             self.current_draft = polished
@@ -573,11 +657,13 @@ class MuseWorkflow:
                     print(f"已达最大轮次（{self.MAX_WRITING_ROUNDS}），强制通过。")
                     self.io.save_final(polished)
                     break
-                if self._confirm(""):
+                if self._confirm("", kind="muse_final",
+                                  payload={"title": "最终正文", "text": polished}):
                     self.io.save_final(polished)
                     break
                 else:
-                    user_feedback = self._input("请输入修改意见（可选，直接回车跳过）：")
+                    user_feedback = self._input("", kind="muse_final_reason",
+                                                payload={"title": "最终正文", "text": polished})
                     self.issues = review_result["issues"]
                     if user_feedback:
                         self.issues.append({
@@ -620,6 +706,8 @@ class MuseWorkflow:
             writer_skill_text=writer_skill_text,
             cli=None,
             bus=self.bus,  # GUI 模式注入总线：写作正文逐 token 推送前端实时展示
+            # v6.5.6: 注入终止信号——写作流式循环内即时打断，不等 LLM 调用结束
+            stop_event=self.stop_event,
         )
 
         last_chapter = self._get_last_chapter_full()
@@ -637,6 +725,8 @@ class MuseWorkflow:
                 last_chapter=last_chapter,
                 change_log=self.change_log if self.change_log else None,
                 memory_block=memory_block,
+                # v6.5.3: 修改轮输出上限同样硬约束（防全文重写超长）
+                max_tokens=WRITE_MAX_TOKENS,
             )
             self.change_log = changes  # 保存变更日志供审阅者参考
             self.io.save_session_log([{"role": "assistant", "content": new_draft}])
@@ -654,6 +744,9 @@ class MuseWorkflow:
                 review_issues=self.issues if self.issues else None,
                 previous_draft="",
                 memory_block=memory_block,
+                # v6.5.3: 写作轮输出上限硬约束（skill 字数约束是软约束，
+                # 不截断时 LLM 常写 6000+ 字；max_tokens 兜底截断）
+                max_tokens=WRITE_MAX_TOKENS,
             )
             self.change_log = []  # R1 无变更日志
             self.io.save_session_log([{"role": "assistant", "content": result}])
@@ -761,9 +854,14 @@ class MuseWorkflow:
 
         # 轻量级消费线程：排干队列，避免事件累积；确认类事件自动放行
         def _drain():
-            while not stop_event.is_set():
+            # v6.5.8: 停止信号后先把队列排干再退出——原逻辑 stop 置位即退出循环，
+            # agent_loop 结束时最后入队的 OUTPUT 定稿事件会被竞态丢弃，
+            # 前端进度条因此永远收不到定稿（无法标记完成、停止“撰写中”闪烁）
+            while True:
                 evt = bus.get(timeout=0.2)
                 if evt is None:
+                    if stop_event.is_set():
+                        break  # 队列已空且收到停止信号 → 退出
                     continue
                 if evt.type == EventType.CONFIRM_REQUEST:
                     cid = evt.data.get("confirm_id", "")
@@ -789,7 +887,15 @@ class MuseWorkflow:
             skills_dir=self.skills_dir,
             bus=bus,
             chapter_ceiling=self.chapter_ceiling,
+            # v6.5.6: 注入终止信号——agent_loop 流式循环内即时检查
+            stop_event=self.stop_event,
         )
+        # v6.5.7: 妙笔全流程（知识准备/审阅）思考强度统一 low——
+        # api.py 默认 high，审阅 agent 走 agent_loop 时思考 token 巨大
+        # （思维链"长得离谱"，且高频 REASONING 事件曾撑爆 SSE 队列），
+        # 写作由 writing_workflow 显式 low 已正常；此处覆盖 agent.llm 实例，
+        # 经 dispatch 传入的 Knowledge/PlotWorkflow（共享 llm 实例）一并生效
+        agent.llm.reasoning_effort = "low"
         # 保存 drain 线程引用，供 agent_loop 结束后清理（P1-19：异常时统一清理）
         agent._drain_thread = drain_thread
         agent._drain_stop = stop_event

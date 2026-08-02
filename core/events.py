@@ -29,6 +29,7 @@ class EventType(str, Enum):
     # 工作流
     STEP_CHANGE = "step_change"    # 妙笔步骤切换
     PLAN_READY = "plan_ready"      # 提取计划生成
+    MUSE_EDITS = "muse_edits"      # v6.5.8 妙笔修改轮编辑标注（前端高亮被 edit 的字段）
 
     # 确认请求（需要用户响应）
     CONFIRM_REQUEST = "confirm_request"
@@ -51,6 +52,58 @@ class Event:
     data: dict                     # 确认类事件包含 confirm_id、confirm_type、payload
     timestamp: float = field(default_factory=time.time)
     source: str = ""               # "jianzhi" | "muse" | "system"
+
+
+class StreamBatcher:
+    """流式事件批量发射器——把高频逐 chunk 事件聚合成低频批量事件
+
+    v6.5.7: SSE 订阅者队列容量有限（2000），妙笔流程思考+正文逐 token 发射时
+    事件速率可达每秒数十个，长任务（多轮写作/审阅）累计上万事件，慢消费者
+    （SSE 每 50ms 取一个）队列会被填满 → 后续事件（含确认请求）被静默丢弃，
+    前端表现为“弹窗不出现 / 输出不更新”（卡死）。
+    批量发射把 N 个 chunk 合并为 1 个事件，事件总量降为 1/N。
+    用法：with StreamBatcher(bus, EventType.TOKEN, 16) as b: b.add(text, kind)
+    """
+
+    def __init__(self, bus, event_type, batch_size=32, source="muse"):
+        self.bus = bus
+        self.event_type = event_type
+        self.batch_size = max(1, batch_size)
+        self.source = source
+        self._buf: list[str] = []
+        self._kind: str | None = None
+
+    def add(self, text: str, kind: str | None = None):
+        """累积一个 chunk；达到批量阈值即发射一次"""
+        if not text:
+            return
+        self._buf.append(text)
+        if kind:
+            self._kind = kind
+        if len(self._buf) >= self.batch_size:
+            self.flush()
+
+    def flush(self):
+        """发射当前缓冲（流结束/批量满时调用）"""
+        if not self._buf:
+            return
+        text = "".join(self._buf)
+        kind = self._kind
+        self._buf = []
+        self._kind = None
+        try:
+            data = {"text": text}
+            if kind:
+                data["kind"] = kind
+            self.bus.emit(self.event_type, data, source=self.source)
+        except Exception:
+            pass  # 事件上报失败不阻断主流程
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.flush()
 
 
 class EventBus:
@@ -119,6 +172,17 @@ class EventBus:
             if evt:
                 self._confirm_results[confirm_id] = response
                 evt.set()
+
+    def cancel_confirms(self, response: dict):
+        """取消所有挂起的确认请求（终止任务时调用，立即唤醒阻塞线程）
+
+        v6.5.9: /api/muse/stop 设置 stop_event 后调用此方法，
+        使阻塞在 request_confirm 上的工作流线程立即醒来并走终止路径。
+        """
+        with self._lock:
+            ids = list(self._pending_confirms.keys())
+        for cid in ids:
+            self.resolve_confirm(cid, response)
 
     def get(self, timeout: float = 0.1) -> Event | None:
         """消费者获取事件（带超时，避免死等）
