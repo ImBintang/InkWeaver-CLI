@@ -115,6 +115,14 @@ async def open_book(req: BookOpenReq) -> dict:
         print(f"[books] ⚠ session bind failed: {e}")
         state.current_session_id = None
         session_data = None
+    # v6.5.3: 工作区记忆 — 打开成功后写入配置，下次启动自动恢复
+    try:
+        from commands.common import load_config, save_config
+        config = load_config()
+        config.setdefault("workspace", {})["last"] = req.name
+        save_config(config)
+    except Exception as e:
+        print(f"[books] ⚠ workspace last persist failed: {e}")
     return {"ok": True, "name": req.name, "session": session_data}
 
 

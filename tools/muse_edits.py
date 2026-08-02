@@ -162,7 +162,7 @@ def rewrite_paragraph(draft: str, paragraph_ref: str, new_text: str) -> tuple[st
 # ── 主入口：应用编辑指令列表 ─────────────────────────────────────────────────
 
 
-def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
+def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str], list[dict]]:
     """应用 Writer 的编辑指令列表
 
     Args:
@@ -173,10 +173,13 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
             {"tool": "rewrite_paragraph", "paragraph_ref": "...", "new_text": "..."}
 
     Returns:
-        (新草稿, 变更日志列表)
+        (新草稿, 变更日志列表, 成功应用的编辑结构化列表)
         变更日志每条描述一个成功/失败的操作
+        v6.5.8: applied 每条为 {"tool", "old_text", "new_text"}（仅成功项），
+        供前端定位被修改的字段并做高亮标注。
     """
     changes: list[str] = []
+    applied: list[dict] = []
     result = draft
 
     for i, edit in enumerate(edits):
@@ -195,6 +198,7 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
                 changes.append(f"[替换] \"{old_text[:30]}...\" → \"{new_text[:30]}...\""
                                if len(old_text) > 30 else
                                f"[替换] \"{old_text}\" → \"{new_text}\"")
+                applied.append({"tool": tool, "old_text": old_text, "new_text": new_text})
             else:
                 # Fuzzy 匹配
                 span = fuzzy_find(result, old_text)
@@ -205,6 +209,7 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
                     changes.append(f"[替换(fuzzy)] \"{matched_text[:30]}...\" → \"{new_text[:30]}...\""
                                    if len(matched_text) > 30 else
                                    f"[替换(fuzzy)] \"{matched_text}\" → \"{new_text}\"")
+                    applied.append({"tool": tool, "old_text": matched_text, "new_text": new_text})
                 else:
                     changes.append(f"[失败] edit#{i+1} replace_text: 未找到匹配 \"{old_text[:40]}...\"")
 
@@ -219,6 +224,7 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
                 changes.append(f"[删除] \"{old_text[:40]}...\""
                                if len(old_text) > 40 else
                                f"[删除] \"{old_text}\"")
+                applied.append({"tool": tool, "old_text": old_text, "new_text": ""})
             else:
                 span = fuzzy_find(result, old_text)
                 if span:
@@ -228,6 +234,7 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
                     changes.append(f"[删除(fuzzy)] \"{matched_text[:40]}...\""
                                    if len(matched_text) > 40 else
                                    f"[删除(fuzzy)] \"{matched_text}\"")
+                    applied.append({"tool": tool, "old_text": matched_text, "new_text": ""})
                 else:
                     changes.append(f"[失败] edit#{i+1} delete_text: 未找到匹配 \"{old_text[:40]}...\"")
 
@@ -243,13 +250,14 @@ def apply_writer_edits(draft: str, edits: list[dict]) -> tuple[str, list[str]]:
                 changes.append(f"[重写段落] \"{paragraph_ref[:30]}...\""
                                if len(paragraph_ref) > 30 else
                                f"[重写段落] \"{paragraph_ref}\"")
+                applied.append({"tool": tool, "old_text": paragraph_ref, "new_text": new_text})
             else:
                 changes.append(f"[失败] edit#{i+1} rewrite_paragraph: 未定位到段落 \"{paragraph_ref[:30]}...\"")
 
         else:
             changes.append(f"[跳过] edit#{i+1}: 未知工具 \"{tool}\"")
 
-    return result, changes
+    return result, changes, applied
 
 
 # ── JSON 解析辅助 ────────────────────────────────────────────────────────────
@@ -308,3 +316,60 @@ def parse_edits_response(response: str) -> tuple[list[dict] | None, str]:
 
     # 全部失败 → 视为全文输出
     return None, "fulltext"
+
+
+# ── 段落 diff 辅助（v6.5.8：fallback 全文模式的修改高亮）─────────────────────
+
+
+def diff_paragraphs(old_text: str, new_text: str, max_items: int = 30) -> list[dict]:
+    """段落级 diff：返回新稿中相对旧稿发生变化（新增/重写）的段落清单
+
+    修改轮 LLM 输出全文（fallback 模式，未输出 edits JSON）时，
+    仍据此生成高亮清单——前端把新稿中发生变化的段落用雾霾蓝底色标注，
+    用户能直观看到这一轮改了什么。
+
+    匹配策略：按段落序号对齐为主，位置漂移时用文本归一化/包含兜底
+    （段落被改写后序号对齐已能覆盖绝大多数情况）。
+
+    Args:
+        old_text: 旧稿全文
+        new_text: 新稿全文
+        max_items: 最多返回的高亮段落数（防止全稿重写时整片高亮）
+
+    Returns:
+        applied 风格列表：[{"tool": "rewrite_paragraph", "old_text": ..., "new_text": 新段落全文}]
+    """
+    def split_paras(text: str) -> list[str]:
+        return [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", "", s)
+
+    old_paras = split_paras(old_text)
+    new_paras = split_paras(new_text)
+    if not old_paras or not new_paras:
+        return []
+
+    changed: list[dict] = []
+    for i, np_ in enumerate(new_paras):
+        if i < len(old_paras):
+            op = old_paras[i]
+            norm_op = norm(op)
+            norm_np = norm(np_)
+            # 归一化后相同（仅换行/空白差异）不算修改；包含关系视为同一段落
+            if norm_op != norm_np and norm_np not in norm_op and norm_op not in norm_np:
+                changed.append({
+                    "tool": "rewrite_paragraph",
+                    "old_text": op[:500],
+                    "new_text": np_,
+                })
+        else:
+            # 新稿多出的段落（新增或拆分导致的位置漂移）
+            changed.append({
+                "tool": "rewrite_paragraph",
+                "old_text": "",
+                "new_text": np_,
+            })
+        if len(changed) >= max_items:
+            break
+    return changed

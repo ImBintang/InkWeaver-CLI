@@ -28,14 +28,22 @@ class BaseAgent(ABC):
     v6.0: I/O 交互通过 EventBus 解耦，不再直接引用 cli 对象。
     """
 
-    def __init__(self, config: dict, workspace: Path, bus: EventBus):
+    def __init__(self, config: dict, workspace: Path, bus: EventBus, stop_event=None):
         self.config = config
         self.workspace = workspace
         self.bus = bus
+        # v6.5.6: 宿主注入的终止信号（threading.Event）。妙笔任务终止时由
+        # agent_loop 流式循环内即时检查，无需等当前 LLM 调用自然结束
+        self.stop_event = stop_event
         self.llm = LLMClient(config["api"])
         self.messages: list = []
         self._last_usage = {}
         self._token_accum = {"input": 0, "output": 0, "total": 0}
+        # v6.5.3: 任务级 token 隔离 — 每次任务开始前由宿主（server/router/chat.py）
+        # 快照基线到 _token_base 并标记 _session_tag；_accumulate_tokens 发射
+        # 的 delta 即为本次任务增量，结束后宿主 diff 持久化到对应会话
+        self._token_base = {"input": 0, "output": 0, "total": 0}
+        self._session_tag = None
         # token 统计按工作区（书）聚合：_persist_token_record 读取此字段写入 book 列，
         # 此前从未赋值导致所有记录 book 为空、按工作区查询恒为 0（token 统计“没同步”根因）
         self._book_name = workspace.name
@@ -122,12 +130,19 @@ class BaseAgent(ABC):
         self._token_accum["output"] += output_tokens
         self._token_accum["total"] += total
 
-        # 通过事件总线广播 token 统计
+        # 通过事件总线广播 token 统计（v6.5.3: 附带会话标签与任务增量，
+        # 前端可据此按会话隔离展示；无会话归属的任务（如妙笔）delta 恒为 0）
         self.bus.emit(EventType.TOKEN_STATS, {
             "input": input_tokens,
             "output": output_tokens,
             "total": total,
             "accum": dict(self._token_accum),
+            "session_id": getattr(self, "_session_tag", None),
+            "delta": {
+                "input": self._token_accum["input"] - self._token_base["input"],
+                "output": self._token_accum["output"] - self._token_base["output"],
+                "total": self._token_accum["total"] - self._token_base["total"],
+            },
         }, source=getattr(self, "_agent_name", "system"))
 
         # 持久化到全局 token_stats.db

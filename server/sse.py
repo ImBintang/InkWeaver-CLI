@@ -22,6 +22,12 @@ _buf_lock = threading.Lock()
 _subscribers: set[queue.Queue] = set()
 _subs_lock = threading.Lock()
 _stop_consumer = threading.Event()
+# v6.5.7: 订阅队列容量与消费间隔——原 2000 容量 + 50ms 消费间隔在妙笔
+# 逐 token 事件风暴下会被填满并丢弃后续事件（含确认请求，弹窗不出现/卡死）。
+# 批量发射治理（见 core.events.StreamBatcher）后事件量降为 1/16~1/64，
+# 此处再加大容量、加快消费，双保险防丢。
+_SUB_QUEUE_MAX = 50000
+_POLL_INTERVAL = 0.005
 
 
 def _broadcast(evt: dict):
@@ -131,7 +137,7 @@ def _ensure_consumer():
 @router.get("/api/events/stream")
 async def event_stream():
     _ensure_consumer()
-    sub: queue.Queue = queue.Queue(maxsize=2000)
+    sub: queue.Queue = queue.Queue(maxsize=_SUB_QUEUE_MAX)
     with _subs_lock:
         _subscribers.add(sub)
 
@@ -142,7 +148,7 @@ async def event_stream():
                 try:
                     evt = sub.get_nowait()
                 except queue.Empty:
-                    await asyncio_sleep(0.05)
+                    await asyncio_sleep(_POLL_INTERVAL)
                     continue
                 payload = {k: v for k, v in evt.items() if k != "type"}
                 yield _sse_event(evt["type"], payload)

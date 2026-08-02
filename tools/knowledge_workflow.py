@@ -12,12 +12,14 @@ from api import LLMClient
 class KnowledgeWorkflow:
     """先验知识 Workflow — 参数校验 + 内容解析 + 纯 chat 调用"""
 
-    def __init__(self, llm: LLMClient, workspace: Path, cli=None, bus=None):
+    def __init__(self, llm: LLMClient, workspace: Path, cli=None, bus=None, stop_event=None):
         self.llm = llm
         self.workspace = workspace
         self.cli = cli
         # GUI 模式注入事件总线：撰写过程逐 token 实时推送前端（source=muse）
         self.bus = bus
+        # v6.5.6: 宿主注入的终止信号——流式循环内即时检查，直接打断生成
+        self.stop_event = stop_event
         self._last_usage = {}
 
     def _log(self, tag: str, text: str):
@@ -175,27 +177,39 @@ class KnowledgeWorkflow:
         self._log("KNOWLEDGE_WF_START", f"wiki_only={len(wiki_only_yaml)}, wiki_full={len(wiki_full)}, rules={len(rules)}")
 
         # 6. 调用 LLM：GUI 模式（注入 bus）流式推送 token/思考，CLI 模式一次性返回
-        from core.events import EventType
+        from core.events import EventType, StreamBatcher
 
         messages = [{"role": "user", "content": user_content}]
         if self.bus is not None:
             result_parts = []
+            # v6.5.7: 批量发射（事件风暴治理）——TOKEN 16 个合并一次、REASONING 64 个合并一次
+            token_batcher = StreamBatcher(self.bus, EventType.TOKEN, 16, source="muse")
+            reason_batcher = StreamBatcher(self.bus, EventType.REASONING, 64, source="muse")
             for chunk in self.llm.chat_stream(
                 messages=messages,
                 system_prompt=system_prompt,
                 tools=None,
             ):
+                # v6.5.6: 用户终止时即时打断（不等流式调用自然结束）
+                if self.stop_event is not None and self.stop_event.is_set():
+                    token_batcher.flush()
+                    reason_batcher.flush()
+                    from muse.workflow import MuseStopped
+                    raise MuseStopped("妙笔任务已终止")
                 ctype = chunk.get("type")
                 try:
                     if ctype == "token":
                         result_parts.append(chunk.get("text", ""))
-                        self.bus.emit(EventType.TOKEN, {"text": chunk.get("text", "")}, source="muse")
+                        # v6.5.5: 携带 kind=prior_knowledge，前端据此把流式内容实时渲染到先验知识卡片
+                        token_batcher.add(chunk.get("text", ""), kind="prior_knowledge")
                     elif ctype == "reasoning":
-                        self.bus.emit(EventType.REASONING, {"text": chunk.get("text", "")}, source="muse")
+                        reason_batcher.add(chunk.get("text", ""))
                     elif ctype == "done" and chunk.get("usage"):
                         self._last_usage = chunk["usage"]
                 except Exception:
                     pass  # 事件上报失败不阻断写作主流程
+            token_batcher.flush()
+            reason_batcher.flush()
             result = "".join(result_parts).strip()
         else:
             response = self.llm.chat(
@@ -207,4 +221,6 @@ class KnowledgeWorkflow:
                 self._last_usage = response["usage"]
             result = response.get("content", "").strip()
         self._log("KNOWLEDGE_WF_END", result[:200])
+        # 定稿 OUTPUT 事件由 workflow 主流程（_step_knowledge_prep._emit_prep_done）
+        # 经全局总线直接发射（v6.5.8），此处不再重复发射，避免同 kind 事件重复。
         return result

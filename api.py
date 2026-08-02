@@ -121,13 +121,23 @@ class LLMClient:
         self.max_tokens = config.get("output_max_tokens", 128000)
         self.reasoning_effort = config.get("reasoning_effort", "high")
 
-    def chat(self, messages: list, system_prompt: str, tools: list = None) -> dict:
+    def chat(self, messages: list, system_prompt: str, tools: list = None,
+              max_tokens: int | None = None, thinking: bool = True,
+              reasoning_effort: str | None = None) -> dict:
         """单次 LLM 调用 — 原生 OpenAI 格式
 
         Args:
             messages: 对话历史（OpenAI 格式）
             system_prompt: 系统提示词
             tools: OpenAI 格式的 tool definitions
+            max_tokens: v6.5.3 按调用覆盖输出上限（如妙笔写作字数约束），
+                None 时回退到实例配置 output_max_tokens
+            thinking: v6.5.6 是否开启思考模式。False 时不传 extra_body/reasoning_effort，
+                全部输出预算留给正文（写作类任务防思考吃光 max_tokens）
+            reasoning_effort: v6.5.6 思考强度覆盖（"low"/"high"/"max"）。
+                None 时回退实例配置 reasoning_effort。妙笔写作保留思考但用 "low"
+                压低思考 token 消耗（deepseek-v4-flash 的 low 档真实生效），
+                配合提高 max_tokens 保证正文预算
 
         Returns:
             {
@@ -142,10 +152,11 @@ class LLMClient:
         kwargs = dict(
             model=self.model,
             messages=full_messages,
-            max_tokens=self.max_tokens,
-            extra_body={"thinking": {"type": "enabled"}},
-            reasoning_effort=self.reasoning_effort,
+            max_tokens=max_tokens or self.max_tokens,
         )
+        if thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            kwargs["reasoning_effort"] = reasoning_effort or self.reasoning_effort
         if tools:
             kwargs["tools"] = tools
 
@@ -204,7 +215,9 @@ class LLMClient:
             "usage": dict(response.usage) if response.usage else {},
         }
 
-    def chat_stream(self, messages: list, system_prompt: str, tools: list = None):
+    def chat_stream(self, messages: list, system_prompt: str, tools: list = None,
+                     max_tokens: int | None = None, thinking: bool = True,
+                     reasoning_effort: str | None = None):
         """流式 LLM 调用 — 生成器，逐 chunk 产出
 
         用于 GUI 流式渲染。CLI 继续使用 chat()。
@@ -213,6 +226,10 @@ class LLMClient:
             messages: 对话历史（OpenAI 格式）
             system_prompt: 系统提示词
             tools: OpenAI 格式的 tool definitions
+            max_tokens: v6.5.3 按调用覆盖输出上限，None 时回退实例配置
+            thinking: v6.5.6 是否开启思考模式。False 时全部输出预算留给正文
+            reasoning_effort: v6.5.6 思考强度覆盖（"low"/"high"/"max"），
+                None 时回退实例配置 reasoning_effort
 
         Yields:
             {"type": "token", "text": "..."}             # 文本 token
@@ -224,12 +241,13 @@ class LLMClient:
         kwargs = dict(
             model=self.model,
             messages=full_messages,
-            max_tokens=self.max_tokens,
+            max_tokens=max_tokens or self.max_tokens,
             stream=True,
             stream_options={"include_usage": True},
-            extra_body={"thinking": {"type": "enabled"}},
-            reasoning_effort=self.reasoning_effort,
         )
+        if thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+            kwargs["reasoning_effort"] = reasoning_effort or self.reasoning_effort
         if tools:
             kwargs["tools"] = tools
 

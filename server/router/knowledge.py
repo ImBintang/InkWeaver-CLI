@@ -75,7 +75,15 @@ async def list_wiki_cards(book: str, category: str | None = None) -> list[dict]:
             summary = ""
             if ver:
                 summary = ver.get("description") or ver.get("content") or ""
-            result.append({"name": m["name"], "category": cat_name, "summary": summary})
+            # v6.5.6: 携带创建章节/当前章节（updated_chapter 为最近出现的章节），
+            # 前端知识库卡片下方显示小灰色注释
+            result.append({
+                "name": m["name"],
+                "category": cat_name,
+                "summary": summary,
+                "created_chapter": m.get("created_chapter", 0),
+                "updated_chapter": m.get("updated_chapter", 0),
+            })
         return result
     except Exception as e:
         print(f"[WARN] 获取 wiki 列表失败 (book={book}): {e}")

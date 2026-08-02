@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from server.router.books import router as books_router
 from server.router.chat import router as chat_router
@@ -16,7 +17,25 @@ from server.router.stats import router as stats_router
 from server.sse import router as sse_router
 from tools.session_manager import SessionFullError, SessionNotFound
 
-app = FastAPI(title="InkWeaver Server", version="6.3.1")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期：启动时恢复上次打开的工作区（工作区记忆）"""
+    try:
+        from commands.common import load_config
+        from server.router.books import BookOpenReq, open_book
+        config = load_config()
+        last = config.get("workspace", {}).get("last", "")
+        if last:
+            await open_book(BookOpenReq(name=last))
+            print(f"[server] 已恢复上次工作区：{last}")
+    except Exception as e:
+        # 恢复失败不阻断服务启动（工作区可能已被删除/重命名）
+        print(f"[server] ⚠ 恢复上次工作区失败（忽略）: {e}")
+    yield
+
+
+app = FastAPI(title="InkWeaver Server", version="6.3.1", lifespan=lifespan)
 
 
 # ─── 领域异常 → HTTP 响应 ────────────────────────────────────────

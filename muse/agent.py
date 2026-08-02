@@ -21,8 +21,8 @@ class MuseAgent(BaseAgent):
     _agent_name = "muse"
 
     def __init__(self, config: dict, workspace: Path, skills_dir: Path, bus,
-                 chapter_ceiling: int | None = None):
-        super().__init__(config, workspace, bus)
+                 chapter_ceiling: int | None = None, stop_event=None):
+        super().__init__(config, workspace, bus, stop_event=stop_event)
         self.skills = SkillRegistry(skills_dir)
         self.todo = TodoManager()
         self.review_session = None
@@ -392,7 +392,9 @@ class MuseAgent(BaseAgent):
                 },
             }, source="muse")
             # 注入私有总线：撰写过程经 drain 线程转发到全局总线 → SSE → 前端实时展示
-            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus)
+            # v6.5.6: 注入 stop_event——用户终止时 workflow 的 LLM 流式循环内即时打断
+            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus,
+                                   stop_event=self.stop_event)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 # 校验失败，返回错误信息让 LLM 修正后重试，不终止循环
@@ -413,7 +415,9 @@ class MuseAgent(BaseAgent):
                 },
             }, source="muse")
             # 注入私有总线：撰写过程经 drain 线程转发到全局总线 → SSE → 前端实时展示
-            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus)
+            # v6.5.6: 注入 stop_event——用户终止时 workflow 的 LLM 流式循环内即时打断
+            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus,
+                              stop_event=self.stop_event)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 return result
