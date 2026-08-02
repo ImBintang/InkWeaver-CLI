@@ -35,6 +35,16 @@ async def muse_start(req: MuseStartReq) -> dict:
     return {"ok": True}
 
 
+@router.post("/api/muse/stop")
+async def muse_stop() -> dict:
+    """终止妙笔任务（步骤边界生效，当前 LLM 调用完成后停止）"""
+    evt = state.muse_stop_event
+    if evt is None:
+        raise HTTPException(404, detail="妙笔任务未在运行")
+    evt.set()
+    return {"ok": True}
+
+
 def _map_opinions(issues: list) -> list:
     """将审阅 issue（level/quote/description/suggestion）映射为前端 MuseOpinion 结构"""
     level_sev = {0: "error", 1: "error", 2: "warning", 3: "info"}
@@ -57,7 +67,10 @@ def _run_muse(outline: str, chapter_num: int | None):
     wf = None
     try:
         from Muse import MuseWorkflow
+        from muse.workflow import MuseStopped
         config = load_config()
+        stop_event = threading.Event()
+        state.muse_stop_event = stop_event
         wf = MuseWorkflow(
             config=config,
             workspace=state.workspace_path,
@@ -67,8 +80,14 @@ def _run_muse(outline: str, chapter_num: int | None):
             auto_approve=True,  # API 模式无 stdin，自动通过所有确认
             chapter=chapter_num,
             bus=state.bus,  # 注入全局事件总线：准备/写作/审阅过程实时推送前端
+            stop_event=stop_event,  # v6.5.3: 用户终止信号
         )
         wf.run()
+    except MuseStopped:
+        # 用户主动终止：通知前端（TASK_DONE 携带 stopped 标记）
+        state.bus.emit(EventType.INFO, {"text": "妙笔任务已终止"}, source="muse")
+        state.bus.emit(EventType.TASK_DONE, {"stopped": True}, source="muse")
+        return
     except SystemExit as e:
         state.bus.emit(
             EventType.ERROR,
@@ -78,6 +97,8 @@ def _run_muse(outline: str, chapter_num: int | None):
     except Exception as e:
         state.bus.emit(EventType.ERROR, {"text": str(e)}, source="muse")
     finally:
+        # 任务结束：无论正常/异常/终止，都清理终止信号
+        state.muse_stop_event = None
         # TASK_DONE 携带审阅结果回传前端（此前为空 {} 导致前端拿不到意见/分数/定稿）
         payload: dict = {}
         if wf is not None:

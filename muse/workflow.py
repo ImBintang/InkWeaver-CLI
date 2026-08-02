@@ -15,6 +15,10 @@ from muse.agent import MuseAgent
 from muse.review_session import ReviewSession
 
 
+class MuseStopped(Exception):
+    """妙笔任务被用户终止（服务层捕获后以 TASK_DONE(stopped) 通知前端）"""
+
+
 class MuseWorkflow:
     """妙笔工作流——四步状态机
 
@@ -30,12 +34,14 @@ class MuseWorkflow:
 
     def __init__(self, config: dict, workspace: Path, skills_dir: Path, workspaces_dir: Optional[Path] = None,
                  io=None, outline_text: str = "", auto_approve: bool = False,
-                 chapter: int | None = None, bus=None):
+                 chapter: int | None = None, bus=None, stop_event=None):
         self.workspace = workspace
         self.skills_dir = skills_dir
         self.workspaces_dir = workspaces_dir
         self.llm_config = config["api"]
         self.io = MuseIO(workspace)
+        # v6.5.3: 用户终止信号（服务层注入 threading.Event，步骤边界检查）
+        self.stop_event = stop_event
         self.outline: str = outline_text
         self.prior_knowledge: str = ""
         self.plot_summary: str = ""
@@ -59,6 +65,11 @@ class MuseWorkflow:
         # P1-19: 追踪已创建的 agent，异常路径统一清理 drain 消费线程
         self._agents: list = []
 
+    def _check_stopped(self):
+        """步骤边界检查终止信号：已设置则抛出 MuseStopped 中止任务"""
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise MuseStopped("妙笔任务已终止")
+
     def _emit_step(self, step: int, detail: str = ""):
         """发射 STEP_CHANGE 推进前端进度条（仅注入了 bus 的 GUI 模式生效）"""
         if self.bus is not None:
@@ -80,8 +91,10 @@ class MuseWorkflow:
 
         P1-19：整体兜底——任一步骤异常时仍清理已创建 agent 的 drain 线程，
         然后重新抛出（错误层层上报，由消费端决定如何展示）。
+        v6.5.3：步骤边界检查终止信号（用户点击“终止妙笔任务”）。
         """
         try:
+            self._check_stopped()
             self._resolve_chapter_anchor()
             if not self.outline:
                 self._step_input_outline()
@@ -301,6 +314,7 @@ class MuseWorkflow:
         # ---- 先验知识 ----
         reason = ""
         while True:
+            self._check_stopped()
             if reason:
                 # 修正轮：基于当前内容 + 打回理由增量修正，不重新全量生成
                 print("正在根据反馈增量修正先验知识...")
@@ -324,6 +338,7 @@ class MuseWorkflow:
         # ---- 前情提要 ----
         reason = ""
         while True:
+            self._check_stopped()
             if reason:
                 print("正在根据反馈增量修正前情提要...")
                 self.plot_summary = self._revise_plot_summary(reason)
@@ -408,6 +423,7 @@ class MuseWorkflow:
 
     def _run_researcher(self) -> str:
         """运行 Researcher Agent 生成先验知识"""
+        self._check_stopped()
         agent = self._create_agent(["muse_knowledge.skill.md"])
         messages = [{"role": "user", "content": f"以下是大纲/草稿：\n\n{self.outline}"}]
         messages = agent_loop(agent, messages)
@@ -422,6 +438,7 @@ class MuseWorkflow:
 
     def _run_plot_summary(self) -> str:
         """运行 Plot Summary Agent 生成前情提要"""
+        self._check_stopped()
         agent = self._create_agent(["muse_plot.skill.md"])
         messages = [{"role": "user", "content": f"以下是大纲/草稿：\n\n{self.outline}"}]
         messages = agent_loop(agent, messages)
@@ -485,6 +502,7 @@ class MuseWorkflow:
         round_count = 0
         previous_review_result: dict | None = None  # v5.4: 保存上轮审阅结果
         while True:
+            self._check_stopped()
             round_count += 1
             # ③ 润色写作
             print("=" * 40)
@@ -585,6 +603,7 @@ class MuseWorkflow:
         v5.4: R1 走 wf.run()（全文创作）；R2+ 走 wf.run_revise()（手术刀编辑）。
         修改轮输出 edits JSON，后端 apply 到 draft 上，大幅减少 output token。
         """
+        self._check_stopped()
         from tools.writing_workflow import WritingWorkflow
         from agent.skill import SkillRegistry
 
@@ -649,6 +668,7 @@ class MuseWorkflow:
         上下文：上一章全文 → 大纲 → 正文
         v5.4 R2+：额外注入修改记录 + 上轮审阅意见（增量审阅模式）。
         """
+        self._check_stopped()
         agent = self._create_restricted_agent(
             skill_names=["muse_reviewer.skill.md"],
             allowed_tools=["agent_output", "report_issue", "review_done"],

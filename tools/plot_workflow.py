@@ -14,10 +14,12 @@ from api import LLMClient
 class PlotWorkflow:
     """前情提要 Workflow — 参数校验 + 内容解析 + 纯 chat 调用"""
 
-    def __init__(self, llm: LLMClient, workspace: Path, cli=None):
+    def __init__(self, llm: LLMClient, workspace: Path, cli=None, bus=None):
         self.llm = llm
         self.workspace = workspace
         self.cli = cli
+        # GUI 模式注入事件总线：撰写过程逐 token 实时推送前端（source=muse）
+        self.bus = bus
         self._last_usage = {}
 
     def _log(self, tag: str, text: str):
@@ -114,17 +116,37 @@ class PlotWorkflow:
 
         self._log("PLOT_WF_START", f"only_yaml={len(plot_only_yaml)}, full={len(plot_full)}")
 
-        # 5. 纯 chat 调用
+        # 5. 调用 LLM：GUI 模式（注入 bus）流式推送 token/思考，CLI 模式一次性返回
+        from core.events import EventType
+
         messages = [{"role": "user", "content": user_content}]
-        response = self.llm.chat(
-            messages=messages,
-            system_prompt=system_prompt,
-            tools=None,
-        )
-
-        if "usage" in response:
-            self._last_usage = response["usage"]
-
-        result = response.get("content", "").strip()
+        if self.bus is not None:
+            result_parts = []
+            for chunk in self.llm.chat_stream(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=None,
+            ):
+                ctype = chunk.get("type")
+                try:
+                    if ctype == "token":
+                        result_parts.append(chunk.get("text", ""))
+                        self.bus.emit(EventType.TOKEN, {"text": chunk.get("text", "")}, source="muse")
+                    elif ctype == "reasoning":
+                        self.bus.emit(EventType.REASONING, {"text": chunk.get("text", "")}, source="muse")
+                    elif ctype == "done" and chunk.get("usage"):
+                        self._last_usage = chunk["usage"]
+                except Exception:
+                    pass  # 事件上报失败不阻断写作主流程
+            result = "".join(result_parts).strip()
+        else:
+            response = self.llm.chat(
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=None,
+            )
+            if "usage" in response:
+                self._last_usage = response["usage"]
+            result = response.get("content", "").strip()
         self._log("PLOT_WF_END", result[:200])
         return result

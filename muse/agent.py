@@ -382,24 +382,43 @@ class MuseAgent(BaseAgent):
         # Workflow 调用 — 输出存入 _last_subagent_output，供 Workflow 取用
         if name == "call_knowledge_workflow":
             from tools.knowledge_workflow import KnowledgeWorkflow
-            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace)
+            # v6.5.3: 先发射计划事件（前端渲染可浏览的写作计划卡片），再流式执行
+            self.bus.emit(EventType.PLAN_READY, {
+                "kind": "knowledge",
+                "items": {
+                    "wiki_only_yaml": args.get("wiki_only_yaml", []),
+                    "wiki_full": args.get("wiki_full", []),
+                    "rules": args.get("rules", []),
+                },
+            }, source="muse")
+            # 注入私有总线：撰写过程经 drain 线程转发到全局总线 → SSE → 前端实时展示
+            wf = KnowledgeWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 # 校验失败，返回错误信息让 LLM 修正后重试，不终止循环
                 return result
             self._last_subagent_output = result
-            self.bus.emit(EventType.OUTPUT, {"text": result}, source="muse")
+            self.bus.emit(EventType.OUTPUT, {"text": result, "kind": "prior_knowledge"}, source="muse")
             self._stop_agent_loop = True
             return "(先验知识已生成)"
 
         if name == "call_plot_workflow":
             from tools.plot_workflow import PlotWorkflow
-            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace)
+            # v6.5.3: 先发射计划事件（前端渲染可浏览的写作计划卡片），再流式执行
+            self.bus.emit(EventType.PLAN_READY, {
+                "kind": "plot",
+                "items": {
+                    "plot_only_yaml": args.get("plot_only_yaml", []),
+                    "plot_full": args.get("plot_full", []),
+                },
+            }, source="muse")
+            # 注入私有总线：撰写过程经 drain 线程转发到全局总线 → SSE → 前端实时展示
+            wf = PlotWorkflow(llm=self.llm, workspace=self.workspace, bus=self.bus)
             result = wf.validate_and_run(**args)
             if result.startswith("错误"):
                 return result
             self._last_subagent_output = result
-            self.bus.emit(EventType.OUTPUT, {"text": result}, source="muse")
+            self.bus.emit(EventType.OUTPUT, {"text": result, "kind": "plot_summary"}, source="muse")
             self._stop_agent_loop = True
             return "(前情提要已生成)"
 

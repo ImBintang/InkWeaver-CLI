@@ -20,6 +20,8 @@ class ServerState:
             self.workspaces_dir.mkdir(parents=True, exist_ok=True)
         self.agent_thread: threading.Thread | None = None
         self.agent_lock = threading.Lock()
+        # v6.5.3: 妙笔任务终止信号（/api/muse/stop 设置，步骤边界生效）
+        self.muse_stop_event: threading.Event | None = None
         self.jianzhi = None  # 持久化鉴知 Agent 实例（多轮上下文）
         # ─── Session management (v6.2) ───
         self.current_session_id: str | None = None
