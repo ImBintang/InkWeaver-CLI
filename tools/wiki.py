@@ -164,10 +164,10 @@ def wiki_list(workspace: Path, category: str, page: int = 1, page_size: int = 20
             total_pages = int(m.group(2))
             page = int(m.group(1))
             if total_pages > 1 and page < total_pages:
-                result += f"\n\n⚠️ 当前只显示第 {page} 页（共 {total_pages} 页），如需查找某个词条请继续翻页查看（传入 page={page + 1}）。"
+                result += f"\n\n[提示] 当前只显示第 {page} 页（共 {total_pages} 页），如需查找某个词条请继续翻页查看（传入 page={page + 1}）。"
                 result += f"\n   不要因为本页没看到就下结论说词条不存在，先翻完所有页再判断！"
             elif total_pages > 1 and page >= total_pages:
-                result += f"\n\n✅ 已是最后一页。"
+                result += f"\n\n[提示] 已是最后一页。"
     return result
 
 
@@ -306,21 +306,21 @@ def check_wiki_yaml(workspace: Path, category: str = "",
         issues = []
 
         if not body or body.strip() in ("", "None"):
-            issues.append("❌ 正文为空")
+            issues.append("[错误] 正文为空")
         else:
             if len(body.strip()) < 20:
-                issues.append(f"⚠️ 正文过短（仅 {len(body.strip())} 字符）")
+                issues.append(f"[警告] 正文过短（仅 {len(body.strip())} 字符）")
             if not re.search(r"^##\s+\S", body, re.MULTILINE):
-                issues.append("⚠️ 正文缺少 Markdown 章节标题（##）")
+                issues.append("[警告] 正文缺少 Markdown 章节标题（##）")
 
         # 检查必要字段
         meta_full = proxy.read_doc("wiki", doc_name, category=cat_name, yaml_only=True)
         if not meta_full.startswith("错误"):
             meta, _ = _parse_frontmatter(meta_full)
             if "title" not in meta:
-                issues.append("⚠️ frontmatter 缺少 title 字段")
+                issues.append("[警告] frontmatter 缺少 title 字段")
             if "type" not in meta:
-                issues.append("⚠️ frontmatter 缺少 type 字段")
+                issues.append("[警告] frontmatter 缺少 type 字段")
 
         if issues:
             issue_count += 1

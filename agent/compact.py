@@ -1,19 +1,75 @@
 """上下文管理：Token 估算、压缩追踪、/context 报告（参照 s06）"""
 
 import json
+import os
+import threading
 from pathlib import Path
 
-import tiktoken
+# ─── tiktoken 词表缓存策略 ─────────────────────────────────────────
+# 首次 get_encoding 需联网下载 BPE 词表，其内部 requests.get 无超时，
+# 网络异常时会无限阻塞。因此：
+# 1. 缓存目录固化到项目内 .tiktoken_cache/：首次下载成功后永久离线复用，
+#    之后每次启动零网络、零等待（tiktoken 按 sha1(URL) 命中缓存即直读）；
+# 2. 模块导入期不初始化（避免阻塞传导到 server 启动路径），首次调用时
+#    在子线程中带超时加载，失败降级为字符粗估（P1-11 原则）。
+_TIKTOKEN_CACHE_DIR = Path(__file__).resolve().parent.parent / ".tiktoken_cache"
+_TIKTOKEN_URL = "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
+_TIKTOKEN_TIMEOUT = 10.0  # 秒；仅首次无缓存下载时最多等待时长
+
+_ENCODER = None
+_ENCODER_LOCK = threading.Lock()
 
 
-# 使用 cl100k_base 编码（OpenAI GPT-4 标准，中文估算相对准确）
-_ENCODER = tiktoken.get_encoding("cl100k_base")
+def _load_encoder():
+    """在子线程中执行：优先读项目内缓存（纯离线），无缓存时联网下载一次
+
+    下载成功后 tiktoken 自动写入 TIKTOKEN_CACHE_DIR（文件名 = sha1(URL)），
+    此后所有启动直接从缓存读取，不再发起任何网络请求。
+    """
+    try:
+        os.environ.setdefault("TIKTOKEN_CACHE_DIR", str(_TIKTOKEN_CACHE_DIR))
+        _TIKTOKEN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        import tiktoken
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+def _get_encoder():
+    """带超时的懒加载；不可用返回 None（调用方降级为字符粗估）"""
+    global _ENCODER
+    if _ENCODER is not None:
+        return _ENCODER
+    with _ENCODER_LOCK:
+        if _ENCODER is not None:
+            return _ENCODER
+        result = {}
+
+        def worker():
+            result["enc"] = _load_encoder()
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout=_TIKTOKEN_TIMEOUT)
+        if t.is_alive():
+            # 下载卡住：放弃（daemon 线程随进程退出，不会阻塞主流程）
+            # 注意：不能用 ⚠ 等 GBK 无法编码的符号，Windows 控制台会抛 UnicodeEncodeError
+            print("[compact] tiktoken 词表下载超时，Token 估算降级为字符粗估")
+            _ENCODER = None
+        else:
+            _ENCODER = result.get("enc")
+            if _ENCODER is None:
+                print("[compact] tiktoken 不可用，Token 估算降级为字符粗估")
+    return _ENCODER
 
 
 def estimate_tokens(messages: list) -> int:
-    """使用 tiktoken 估算 token 数"""
+    """使用 tiktoken 估算 token 数；不可用时降级为字符粗估"""
     text = json.dumps(messages, default=str, ensure_ascii=False)
-    return len(_ENCODER.encode(text))
+    enc = _get_encoder()
+    if enc is None:
+        return len(text) // 2
+    return len(enc.encode(text))
 
 
 class ContextManager:

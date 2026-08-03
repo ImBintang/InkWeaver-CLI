@@ -535,6 +535,147 @@ def check_plot_range(workspace: Path, docs: list[LintDoc]) -> list[dict]:
     return auto_fixes
 
 
+# ── v6.5.10: Markdown 语法检查与自动修复 ────────────────────────────
+
+
+# 水平分割线（---、***、___ 及其带空格变体）：列表空格修复时需排除
+_MD_HR_PATTERN = re.compile(r"^\s*([-_*])(\s*\1){2,}\s*$")
+# 畸形 wikilink：[[目标] 只闭合了一个右括号
+_MD_BAD_WIKILINK_PATTERN = re.compile(r"\[\[([^\[\]\n]+?)\](?!\])")
+# 未闭合 wikilink：[[目标 行内无任何闭合
+_MD_UNCLOSED_WIKILINK_PATTERN = re.compile(r"\[\[[^\[\]\n]+$")
+
+
+def _fix_markdown_text(text: str) -> tuple[str, list[str]]:
+    """对单个文档正文执行 markdown 语法自动修复
+
+    Returns:
+        (修复后文本, 已应用的修复描述列表)
+
+    修复项（均为保守修复，不改语义）：
+    1. 标题 # 后缺空格（##标题 → ## 标题）
+    2. 列表标记后缺空格（-项目 → - 项目，含有序列表）
+    3. 行尾空白
+    4. 未闭合加粗 **（奇数个时在行尾补闭合）
+    5. 畸形 wikilink（[[目标] → [[目标]]）
+    6. 连续多个空行压缩为一个空行
+    7. 代码块围栏未闭合（文档末尾补 ```）
+    """
+    applied: list[str] = []
+    lines = text.split("\n")
+    out_lines: list[str] = []
+    in_fence = False
+
+    for line in lines:
+        # 代码围栏状态跟踪（围栏内的行不做任何修改）
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out_lines.append(line.rstrip())
+            continue
+        if in_fence:
+            out_lines.append(line.rstrip())
+            continue
+
+        # 1. 标题 # 后缺空格
+        line = re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", line)
+        # 2. 列表标记后缺空格（排除水平分割线）
+        if not _MD_HR_PATTERN.match(line):
+            line = re.sub(r"^(\s*[-+])([^\s])", r"\1 \2", line)
+            line = re.sub(r"^(\s*\d+\.)([^\s])", r"\1 \2", line)
+        # 3. 行尾空白
+        line = line.rstrip()
+        # 4. 未闭合加粗：屏蔽行内代码后统计 ** 个数为奇数则行尾补闭合
+        masked = re.sub(r"`[^`]*`", "", line)
+        if len(re.findall(r"\*\*", masked)) % 2 == 1:
+            line = line + "**"
+        # 5. 畸形 wikilink 补全右括号
+        line = _MD_BAD_WIKILINK_PATTERN.sub(r"[[\1]]", line)
+
+        out_lines.append(line)
+
+    new_text = "\n".join(out_lines)
+
+    # 逐项统计修复类型（用于报告展示）
+    orig_lines = text.split("\n")
+    fixed_pairs = list(zip(orig_lines, new_text.split("\n")))
+    for old_l, new_l in fixed_pairs:
+        if old_l == new_l:
+            continue
+        if re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", old_l) != old_l:
+            applied.append("标题#后补空格")
+        elif _MD_BAD_WIKILINK_PATTERN.search(old_l):
+            applied.append("wikilink补全括号")
+        elif new_l.endswith("**") and not old_l.endswith("**"):
+            applied.append("补闭合加粗标记")
+        elif old_l != old_l.rstrip():
+            applied.append("移除行尾空白")
+        else:
+            applied.append("列表标记后补空格")
+
+    # 6. 连续多个空行压缩
+    collapsed = re.sub(r"\n{3,}", "\n\n", new_text)
+    if collapsed != new_text:
+        applied.append("压缩多余空行")
+        new_text = collapsed
+
+    # 7. 代码块围栏未闭合：文档末尾补闭合围栏
+    fence_count = sum(1 for l in new_text.split("\n") if l.lstrip().startswith("```"))
+    if fence_count % 2 == 1:
+        new_text = new_text.rstrip("\n") + "\n```\n"
+        applied.append("补闭合代码块围栏")
+
+    # 去重保持顺序
+    seen: set[str] = set()
+    applied = [x for x in applied if not (x in seen or seen.add(x))]
+    return new_text, applied
+
+
+def check_markdown_syntax(workspace: Path, docs: list[LintDoc]) -> tuple[list[dict], list[dict]]:
+    """v6.5.10: markdown 语法检查与自动修复
+
+    LLM 生成的词条常见语法瑕疵（标题缺空格、加粗未闭合、畸形 wikilink 等），
+    此前只能靠审阅阶段 LLM 人工发现；此处纯规则检测并自动修复，修复项计入 lint 报告。
+    无法安全自动修复的问题（如未闭合 wikilink）作为债务上报。
+
+    Returns:
+        (auto_fixes, debts)
+    """
+    from tools.editor import _get_proxy
+    proxy = _get_proxy(workspace)
+    fixes: list[dict] = []
+    debts: list[dict] = []
+
+    for d in docs:
+        if not d.content:
+            continue
+        label = f"{d.doc_type}/{d.name}"
+
+        # 未闭合 wikilink（[[目标 行内无闭合）无法安全推断意图，上报债务不自动改
+        for line_no, line in enumerate(d.content.split("\n"), 1):
+            if _MD_UNCLOSED_WIKILINK_PATTERN.search(line):
+                debts.append({
+                    "type": "md_unclosed_wikilink",
+                    "file": label,
+                    "detail": f"第{line_no}行存在未闭合的 [[wikilink：「{line.strip()[:40]}」",
+                    "auto_fixed": False,
+                })
+
+        new_content, applied = _fix_markdown_text(d.content)
+        if new_content != d.content:
+            proxy.update_doc(doc_type=d.doc_type, name=d.name,
+                             category=d.category or None,
+                             content=new_content, chapter=0)
+            d.content = new_content
+            fixes.append({
+                "type": "markdown_syntax_fixed",
+                "file": label,
+                "detail": f"markdown 语法已自动修复：{'、'.join(applied)}",
+                "auto_fixed": True,
+            })
+
+    return fixes, debts
+
+
 # ── 未结束剧情卡片检测 ──────────────────────────────────────────
 
 UNENDED_PLOT_GAP = 10  # 卡片最大章节比最新章节落后超过此值即判定可收尾
@@ -863,12 +1004,15 @@ def run_lint(workspace: Path, chapters: str | None = None,
                 "broken_links": [], "state_missing": [], "state_verbose": [],
                 "length_overage": [], "desc_verbose": [],
                 "plot_broken_links": [], "appearance": [], "file_errors": [],
-                "unended_plots": [], "importance_scores": {},
+                "unended_plots": [], "importance_scores": {}, "markdown_debts": [],
             }, f, ensure_ascii=False, indent=2)
         return "（无文档需要检查）"
 
     # 1. 正文结构
     content_debts = check_content(workspace, docs)
+
+    # 1.2 v6.5.10: markdown 语法检查与自动修复（先于断链检查：修复畸形 wikilink 后链接提取才准确）
+    md_fixes, md_debts = check_markdown_syntax(workspace, docs)
 
     # 1.5 短名→全名 wikilink 自动修复（在断链检查之前执行）
     short_name_fixes = auto_fix_short_name_wikilinks(workspace, docs)
@@ -928,6 +1072,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
         "file_errors": [d for d in content_debts if d.get("auto_fixed") is not True],
         "unended_plots": unended_plot_debts,
         "importance_scores": importance_scores,
+        "markdown_debts": md_debts,
     }
 
     # 写入 debt JSON
@@ -947,7 +1092,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
 
     # ── 格式化摘要 ──
     lines = [
-        "📋 Lint 检查报告",
+        "Lint 检查报告",
         f"检查时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"检查文档数：{len(docs)}",
         "",
@@ -955,13 +1100,13 @@ def run_lint(workspace: Path, chapters: str | None = None,
 
     # 自动修复汇总（只统计真正完成的自动修复）
     all_fixes = short_name_fixes + rules_fixes + state_fixes + category_fixes + \
-        [f for f in plot_range_fixes if f.get("auto_fixed")] + importance_unlink_fixes
+        [f for f in plot_range_fixes if f.get("auto_fixed")] + importance_unlink_fixes + md_fixes
     total_fixed = len(all_fixes)
     if all_fixes:
         lines.append("## 代码 lint 完成\n")
         lines.append(f"### 自动修复（{total_fixed} 项）")
         for fix in all_fixes:
-            lines.append(f"  ✅ {fix['file']}: {fix['detail']}")
+            lines.append(f"  [已修复] {fix['file']}: {fix['detail']}")
         lines.append("")
 
     # 断链重要性评估摘要
@@ -971,15 +1116,15 @@ def run_lint(workspace: Path, chapters: str | None = None,
         level0 = {t: s for t, s in importance_scores.items() if s["level"] == 0}
         lines.append("### 断链重要性评估")
         if forced:
-            lines.append(f"🔴 强制债务（等级≥2，{len(forced)} 项 — 必须创建）")
+            lines.append(f"[强制债务]（等级≥2，{len(forced)} 项 — 必须创建）")
             for t, s in sorted(forced.items(), key=lambda x: (-x[1]["level"], -x[1]["frequency"])):
                 lines.append(f"  {t}（等级{s['level']} / {s['mention_count']}条目提及 / 词频{s['frequency']} / 覆盖{s['chapter_count']}章）")
         if level1:
-            lines.append(f"🟡 LLM判断（等级1，{len(level1)} 项）")
+            lines.append(f"[待判断] LLM判断（等级1，{len(level1)} 项）")
             for t, s in sorted(level1.items(), key=lambda x: -x[1]["frequency"]):
                 lines.append(f"  {t}（{s['mention_count']}条目 / 词频{s['frequency']} / {s['chapter_count']}章）")
         if level0:
-            lines.append(f"⚪ 已自动unlink（等级0，{len(level0)} 项）：{', '.join(sorted(level0.keys())[:10])}")
+            lines.append(f"[自动] 已自动unlink（等级0，{len(level0)} 项）：{', '.join(sorted(level0.keys())[:10])}")
             if len(level0) > 10:
                 lines.append(f"  ... 另有 {len(level0) - 10} 项")
         lines.append("")
@@ -994,6 +1139,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
         ("plot_broken_links", plot_link_debts),
         ("unended_plots", unended_plot_debts),
         ("plot_range_invalid", [d for d in plot_range_fixes if d.get("type") == "plot_range_invalid"]),
+        ("markdown_debts", md_debts),
     ]
     all_debt_items = []
     for _, items in debt_groups:
@@ -1007,16 +1153,16 @@ def run_lint(workspace: Path, chapters: str | None = None,
                 lines.append(f"**{debt_type}**（{len(items)} 项）")
                 for item in items:
                     detail = item.get("detail", item.get("target", ""))
-                    lines.append(f"  ⚠️ {detail}")
+                    lines.append(f"  [警告] {detail}")
         lines.append("")
 
     if plot_range_fixes:
         lines.append(f"### 剧情范围修正（{len(plot_range_fixes)} 处）")
         for d in plot_range_fixes:
             if d.get("auto_fixed"):
-                lines.append(f"  🔧 {d['file']}：{d['detail']}")
+                lines.append(f"  [已修正] {d['file']}：{d['detail']}")
             else:
-                lines.append(f"  ⚠️ {d['file']}：{d['detail']}")
+                lines.append(f"  [警告] {d['file']}：{d['detail']}")
         lines.append("")
 
     # 出场统计
@@ -1029,7 +1175,7 @@ def run_lint(workspace: Path, chapters: str | None = None,
     lines.append(f"总计：自动修复 {total_fixed} 处，待处理债务 {total_debts} 项")
 
     if relation_error:
-        lines.append(f"\n⚠️ 关系图更新失败：{relation_error}")
+        lines.append(f"\n[警告] 关系图更新失败：{relation_error}")
 
     return "\n".join(lines)
 
@@ -1043,24 +1189,24 @@ def read_debt(workspace: Path) -> str:
     with open(debt_fp, "r", encoding="utf-8") as f:
         debt_data = json.load(f)
 
-    lines = ["📋 Lint Debt 报告", ""]
+    lines = ["Lint Debt 报告", ""]
 
     sections = [
-        ("broken_links", "断链", "🔗"),
-        ("state_missing", "State 缺失", "📌"),
-        ("state_verbose", "State 过长", "📌"),
-        ("length_overage", "正文过长", "📏"),
-        ("desc_verbose", "description 过长", "📝"),
-        ("plot_broken_links", "剧情断链", "🎬"),
-        ("file_errors", "文件错误", "❌"),
+        ("broken_links", "断链"),
+        ("state_missing", "State 缺失"),
+        ("state_verbose", "State 过长"),
+        ("length_overage", "正文过长"),
+        ("desc_verbose", "description 过长"),
+        ("plot_broken_links", "剧情断链"),
+        ("file_errors", "文件错误"),
     ]
 
     has_any = False
-    for key, label, icon in sections:
+    for key, label in sections:
         items = debt_data.get(key, [])
         if items:
             has_any = True
-            lines.append(f"{icon}【{label}】共 {len(items)} 处")
+            lines.append(f"【{label}】共 {len(items)} 处")
             for item in items[:10]:
                 file = item.get("file", item.get("page", "?"))
                 detail = item.get("detail", item.get("context", ""))
@@ -1073,10 +1219,10 @@ def read_debt(workspace: Path) -> str:
     if appearances:
         has_any = True
         active = sum(1 for r in appearances if r.get("recent_activity"))
-        lines.append(f"👤【出场统计】活跃 {active}/{len(appearances)} 个词条")
+        lines.append(f"[出场统计] 活跃 {active}/{len(appearances)} 个词条")
         lines.append("")
 
     if not has_any:
-        lines.append("✅ 未发现任何债务问题。")
+        lines.append("未发现任何债务问题。")
 
     return "\n".join(lines)

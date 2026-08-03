@@ -201,14 +201,20 @@ class _CLIConsumer:
             if confirmed:
                 self.bus.resolve_confirm(confirm_id, {"action": "approve"})
             else:
-                self.io.print_info("请输入打回理由：")
-                reason = self.io.read_line() or ""
-                self.bus.resolve_confirm(confirm_id, {"action": "reject", "reason": reason})
+                # v6.5.8: 驳回原因必填
+                reason = ""
+                while not reason.strip():
+                    self.io.print_info("请输入打回理由（必填）：")
+                    reason = self.io.read_line() or ""
+                    if not reason.strip():
+                        self.io.print_info("[警告] 驳回原因必填，请重新输入")
+                self.bus.resolve_confirm(confirm_id, {"action": "reject", "reason": reason.strip()})
 
         elif confirm_type == "forced_debt":
             items = payload.get("items", [])
             self.io.print_info("")
-            self.io.print_info("⚠️ 以下断链实体重要性等级≥2，进入强制债务审核：")
+            # v6.5.8: 仅关键实体（重要性等级>2）进入弹窗审核，文案同步调整
+            self.io.print_info("[警告] 以下关键实体（重要性等级>2）需要审核：")
             for i, item in enumerate(items, 1):
                 self.io.print_info(
                     f"  [{i}] {item['target']}"
@@ -227,9 +233,38 @@ class _CLIConsumer:
                     reject_ids = {int(x.strip()) - 1 for x in response.split(",") if x.strip()}
                 except ValueError:
                     # 不静默：解析失败按全部拒绝处理（fail-safe，与 P1-18 超时默认拒绝一致）
-                    self.io.print_info("⚠️ 拒绝编号解析失败（需为数字，如 \"2\" 或 \"1,2\"），已按全部拒绝处理")
+                    self.io.print_info("[警告] 拒绝编号解析失败（需为数字，如 \"2\" 或 \"1,2\"），已按全部拒绝处理")
                     reject_ids = set(range(len(items)))
-                self.bus.resolve_confirm(confirm_id, {"rejected_indices": list(reject_ids)})
+                # v6.5.8: 拒绝原因必填（注入 INFO 事件供日志/前端展示）
+                reason = ""
+                while not reason.strip():
+                    self.io.print_info("请输入驳回原因（必填）：")
+                    reason = self.io.read_line() or ""
+                    if not reason.strip():
+                        self.io.print_info("[警告] 驳回原因必填，请重新输入")
+                self.bus.resolve_confirm(confirm_id, {
+                    "rejected_indices": list(reject_ids),
+                    "reason": reason.strip(),
+                })
+
+        elif confirm_type == "forced_debt_waive":
+            # v6.5.8: 豁免请求确认——通过取消链接，拒绝时原因必填
+            targets = payload.get("targets", [])
+            self.io.print_info("")
+            self.io.print_info("[警告] LLM 请求豁免以下强制债务（通过后将取消对应链接）：")
+            for t in targets:
+                self.io.print_info(f"  - {t}")
+            confirmed = self.io.confirm("是否批准豁免？(y/n)")
+            if confirmed:
+                self.bus.resolve_confirm(confirm_id, {"action": "approve"})
+            else:
+                reason = ""
+                while not reason.strip():
+                    self.io.print_info("请输入驳回原因（必填）：")
+                    reason = self.io.read_line() or ""
+                    if not reason.strip():
+                        self.io.print_info("[警告] 驳回原因必填，请重新输入")
+                self.bus.resolve_confirm(confirm_id, {"action": "reject", "reason": reason.strip()})
 
         else:
             # 未知确认类型，默认通过
@@ -272,12 +307,12 @@ def _handle_slash(cmd: str, io, jianzhi, config: dict, ws) -> bool:
                 try:
                     n = int(args[idx + 1])
                 except ValueError:
-                    io.print_info(f"⚠️ 章节数「{args[idx + 1]}」不是有效整数，使用默认值 {n}")
+                    io.print_info(f"[警告] 章节数「{args[idx + 1]}」不是有效整数，使用默认值 {n}")
         elif args:
             try:
                 n = int(args[0])
             except ValueError:
-                io.print_info(f"⚠️ 章节数「{args[0]}」不是有效整数，使用默认值 {n}")
+                io.print_info(f"[警告] 章节数「{args[0]}」不是有效整数，使用默认值 {n}")
         from tools import workspace as workspace_tools
         io.print_info(workspace_tools.list_latest_chapters(ws, n))
 

@@ -183,10 +183,13 @@ def test_model(model_id: str) -> dict:
 
 @router.get("/api/settings/assignments")
 async def get_model_assignments() -> dict:
-    """获取模型分配"""
+    """获取模型分配（v6.5.8：extract 已并入 chat，读取时过滤旧 extract 键）"""
     try:
         config = load_config()
-        return config.get("assignments", {})
+        assignments = config.get("assignments", {})
+        # 鉴知统一：剔除旧 extract 分配，前端只展示 chat/write/review 三角色
+        assignments.pop("extract", None)
+        return assignments
     except Exception as e:
         # 不静默：返回 500 而非空对象，避免前端误以为"没有分配"
         raise HTTPException(500, detail=f"读取模型分配失败：{e}")
@@ -194,10 +197,13 @@ async def get_model_assignments() -> dict:
 
 @router.put("/api/settings/assignments/{role}")
 async def set_model_assignment(role: str, req: AssignmentReq) -> dict:
-    """设置模型分配"""
+    """设置模型分配（v6.5.8：extract 映射到 chat，与 resolve_api_config 一致）"""
     try:
         config = load_config()
+        if role == "extract":
+            role = "chat"
         assignments = config.setdefault("assignments", {})
+        assignments.pop("extract", None)  # 写入时顺带清理旧 extract 键
         assignments[role] = req.model_id
         save_config(config)
         return {"ok": True}

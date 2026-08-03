@@ -151,7 +151,7 @@ def end_plot(workspace: Path, name: str, end_notes: str = "") -> str:
         except Exception as e:
             # 不静默：end_plot 本身成功，但提取记录写入失败必须告知消费端
             # （LLM 可见的告警），避免日志与 DB 状态不一致被当作正常
-            result += f"\n⚠️ 已结束卡片，但提取记录写入失败（不影响结果）：{e}"
+            result += f"\n[警告] 已结束卡片，但提取记录写入失败（不影响结果）：{e}"
     return result
 
 

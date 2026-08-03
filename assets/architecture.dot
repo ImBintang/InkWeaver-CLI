@@ -1,0 +1,59 @@
+digraph inkweaver_arch {
+  rankdir=TB;
+  bgcolor="transparent";
+  pad=0.5;
+  nodesep=0.4;
+  ranksep=0.6;
+
+  node [fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif", fontsize=12, shape=box, style="rounded,filled", fillcolor="#EAF3F7", color="#3A6B8F", fontcolor="#223A4E", penwidth=1.2, margin="0.18,0.12"];
+  edge [fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif", fontsize=10, color="#7A9BB0", arrowsize=0.8];
+
+  subgraph cluster_user {
+    label="用户入口";
+    fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"; fontsize=13; fontcolor="#3A6B8F";
+    color="#8FB2C6"; style="rounded,setlinewidth(1)";
+    TERM [label="inkweaver 命令行\nTyper + Rich"];
+    GUI [label="InkWeaver-GUI 桌面端\nPyWebView + Vue 3"];
+  }
+
+  subgraph cluster_service {
+    label="服务层";
+    fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"; fontsize=13; fontcolor="#3A6B8F";
+    color="#8FB2C6"; style="rounded,setlinewidth(1)";
+    CMD [label="命令体系\nworkspace · chapter · kb\nchat · ask · extract · muse · serve"];
+    API [label="FastAPI HTTP + SSE\n/api/books · /api/chat · /api/muse\n/api/knowledge · /api/settings · /api/stats"];
+  }
+
+  subgraph cluster_agent {
+    label="Agent 层";
+    fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"; fontsize=13; fontcolor="#3A6B8F";
+    color="#8FB2C6"; style="rounded,setlinewidth(1)";
+    BUS [label="事件总线 EventBus\n异步队列 + 确认通道"];
+    JZ [label="鉴知 Agent\n对话 · 知识提取"];
+    MU [label="妙笔 Agent\n四步写作状态机"];
+    SK [label="Skill 库\nwriter · reviewer\nplot · category"];
+  }
+
+  subgraph cluster_data {
+    label="工具与数据层";
+    fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"; fontsize=13; fontcolor="#3A6B8F";
+    color="#8FB2C6"; style="rounded,setlinewidth(1)";
+    TOOLS [label="工具函数库\nwiki · plot · rule · memory\nlint · editor · muse_edits"];
+    DB [label="SQLite\n章节 · 知识库 · 记忆\n草稿 · 版本时间线", shape=cylinder];
+    LLM [label="LLM API\nOpenAI 兼容 · 流式\n多模型 · 思考模式"];
+  }
+
+  TERM -> CMD;
+  GUI -> API;
+  CMD -> BUS;
+  API -> BUS;
+  BUS -> JZ;
+  BUS -> MU;
+  JZ -> SK;
+  MU -> SK;
+  JZ -> TOOLS;
+  MU -> TOOLS;
+  TOOLS -> DB;
+  JZ -> LLM;
+  MU -> LLM;
+}

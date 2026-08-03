@@ -137,7 +137,7 @@ class CLI:
         # 显示缺失字段警告
         warnings = plan_summary.get("warnings", [])
         if warnings:
-            lines = ["⚠️  计划字段缺失警告："]
+            lines = ["[警告] 计划字段缺失警告："]
             for w in warnings:
                 lines.append(f"  • {w}")
             lines.append("")
@@ -146,44 +146,44 @@ class CLI:
 
         lines += [
             "=" * 50,
-            f"📋 知识提取计划 — 范围：第 {plan_summary.get('scope', '?')} 章",
+            f"知识提取计划 — 范围：第 {plan_summary.get('scope', '?')} 章",
             "=" * 50,
         ]
 
         if plan.get("new_category"):
-            lines.append(f"\n📁 新增类别 ({len(plan['new_category'])} 个)：")
+            lines.append(f"\n新增类别 ({len(plan['new_category'])} 个)：")
             for item in plan["new_category"]:
                 lines.append(f"  • {item['name']} — {item.get('reason', '')}")
 
         if plan.get("new_wiki"):
-            lines.append(f"\n📝 新增 Wiki ({len(plan['new_wiki'])} 个)：")
+            lines.append(f"\n新增 Wiki ({len(plan['new_wiki'])} 个)：")
             for item in plan["new_wiki"]:
                 lines.append(f"  • [{item['category']}] {item['name']}")
                 lines.append(f"    章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
 
         if plan.get("edit_wiki"):
-            lines.append(f"\n✏️  修改 Wiki ({len(plan['edit_wiki'])} 个)：")
+            lines.append(f"\n修改 Wiki ({len(plan['edit_wiki'])} 个)：")
             for item in plan["edit_wiki"]:
                 lines.append(f"  • [{item['category']}] {item['name']}")
                 lines.append(f"    章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
 
         if plan.get("new_rule"):
-            lines.append(f"\n📄 新增规则 ({len(plan['new_rule'])} 个)：")
+            lines.append(f"\n新增规则 ({len(plan['new_rule'])} 个)：")
             for item in plan["new_rule"]:
                 lines.append(f"  • {item['name']} — {item.get('reason', '')}")
 
         if plan.get("edit_rule"):
-            lines.append(f"\n📄 修改规则 ({len(plan['edit_rule'])} 个)：")
+            lines.append(f"\n修改规则 ({len(plan['edit_rule'])} 个)：")
             for item in plan["edit_rule"]:
                 lines.append(f"  • {item['name']} — {item.get('reason', '')}")
 
         if plan.get("new_plot"):
-            lines.append(f"\n🎬 新增剧情卡片 ({len(plan['new_plot'])} 个)：")
+            lines.append(f"\n新增剧情卡片 ({len(plan['new_plot'])} 个)：")
             for item in plan["new_plot"]:
                 lines.append(f"  • {item['name']} — 章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
 
         if plan.get("edit_plot"):
-            lines.append(f"\n🎬 修改剧情卡片 ({len(plan['edit_plot'])} 个)：")
+            lines.append(f"\n修改剧情卡片 ({len(plan['edit_plot'])} 个)：")
             for item in plan["edit_plot"]:
                 lines.append(f"  • {item['name']} — 章节：{item.get('chapters', '?')} | 理由：{item.get('reason', '')}")
 

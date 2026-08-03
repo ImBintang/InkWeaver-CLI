@@ -1,29 +1,40 @@
-# InkWeaver-CLI
+# InkWeaver-CLI（墨笔）
 
-**墨笔（InkWeaver）** — 终端里的写作智能体。基于 LLM Agent 架构，为网文作者提供章节管理、知识提取（Wiki + 剧情卡片 + 规则）、关系图构建与智能写作辅助的一站式 CLI 工具。
+> **让 AI 成为你的创作伙伴：一部小说从导入、建库到智能写作，全流程自动化。**
 
-当前版本：**v6.5.4**
+**墨笔（InkWeaver）** 是面向网文作者的 LLM Agent 写作工具，终端即工作台。它不只帮你写——它先**读懂**你的小说：自动提取人物、势力、功法、剧情线，构建可查询、可关联、可演进的知识库；再基于这份"世界记忆"，与你对话答疑、按大纲续写章节，并以审阅循环保证质量。
+
+当前版本：**v6.5.8**（事件总线架构 · FastAPI 后端 · 妙笔四步写作工作流）
 
 ---
 
-## 快速开始
+## 产品特性
+
+| 能力 | 说明 |
+|------|------|
+| **鉴知对话** | 基于全书知识库的智能问答，回答引用词条、剧情、规则，而非凭空猜测 |
+| **知识提取** | 一键扫描章节，自动生成人物/势力/地图词条、剧情卡片与世界观规则，全程可审阅 |
+| **妙笔写作** | 大纲 → 知识准备 → 写作 → 审阅打回的完整创作闭环，支持章节锚定与版本追溯 |
+| **关系网络** | `[[双链]]` 自动构建实体关系图，断链自动检测并按重要性分级处理 |
+| **持久记忆** | 偏好/观察/纠正/风格四类结构化记忆，Agent 可读可写，越用越懂你 |
+| **HTTP API** | 内置 FastAPI 服务 + SSE 流式事件，为 GUI 桌面端与第三方客户端提供能力 |
+
+---
+
+## 快速开始（5 分钟上手）
 
 ### 1. 安装
 
 ```bash
 cd InkWeaver-CLI
-pip install -e .
-```
-
-或仅安装依赖：
-
-```bash
+pip install -e .        # 完整安装（推荐）
+# 或仅安装依赖：
 pip install -r requirements.txt
 ```
 
-### 2. 配置 API
+### 2. 配置模型
 
-编辑 `.env/config.yaml`（多模型格式）：
+编辑 `.env/config.yaml`（多模型 + 角色分配，兼容任意 OpenAI 格式的 LLM）：
 
 ```yaml
 models:
@@ -46,19 +57,40 @@ workspace:
   last: ""
 ```
 
-支持任何 OpenAI 兼容格式的 LLM，可按角色分配不同模型。`.env/` 目录已被 `.gitignore` 排除。
+四个角色可分别绑定不同模型（例如写作用强模型、对话用快模型）。`.env/` 已被 `.gitignore` 排除，密钥不会入库。
 
-> 向下兼容：旧版扁平 `api:` 格式仍可使用，`resolve_api_config()` 会自动适配。
-
-### 3. 使用
+### 3. 完成第一次创作闭环
 
 ```bash
-# 查看帮助
-inkweaver --help
+# ① 新建工作区并导入小说
+inkweaver workspace create 我的小说
+inkweaver chapter import novel.txt -w 我的小说 --yes
 
-# 或直接运行（等价于 inkweaver chat）
-python main.py
+# ② 提取全书知识（自动分析章节范围）
+inkweaver extract -w 我的小说 --yes
+
+# ③ 问它任何书内问题（基于知识库回答）
+inkweaver ask "林凡的修炼体系是什么？" -w 我的小说
+
+# ④ 按大纲续写下一章（自动锚定最新章节）
+inkweaver muse --outline-file 大纲.txt -w 我的小说 --yes
+
+# ⑤ 进入沉浸式对话工作台
+inkweaver chat -w 我的小说
 ```
+
+> 提示：`--yes` 跳过确认进入全自动模式；去掉后每个关键步骤（提取计划、写作大纲）都会先征求你的意见。
+
+---
+
+## 系统架构
+
+<img src="assets/architecture.svg" alt="InkWeaver 系统架构图" width="760">
+
+**线程模型与确认机制：**
+
+- `Thread-Main` 用户输入 / UI 交互；`Thread-Agent` Agent 主循环（工具调用天然串行）；`Thread-Consumer` 事件消费（CLI 打印 / GUI 推送）
+- Agent 需要决策时通过 `bus.request_confirm()` 阻塞等待，消费线程把确认请求展示给用户，响应后唤醒 Agent——**每一步关键操作都由你把关**
 
 ---
 
@@ -66,11 +98,11 @@ python main.py
 
 ```
 inkweaver
-├── chat                        # 进入鉴知对话 REPL
+├── chat                        # 进入鉴知对话 REPL（自然语言 + 斜杠指令）
 ├── ask <question>              # 单轮提问（完整 Agent loop）
-├── extract                     # 单轮知识提取
-├── muse                        # 单轮妙笔写作
-├── serve                       # 启动 FastAPI HTTP 后端
+├── extract                     # 单轮知识提取（规划 → 确认 → 执行 → 审阅）
+├── muse                        # 单轮妙笔写作（大纲 → 知识准备 → 写作 → 审阅）
+├── serve                       # 启动 FastAPI HTTP 后端（端口 8000）
 │
 ├── workspace                   # 工作区管理
 │   ├── list                    # 列出所有工作区
@@ -81,25 +113,25 @@ inkweaver
 │   └── move <path>             # 迁移目录
 │
 ├── chapter                     # 章节管理
-│   ├── import <path>           # 导入小说文件
-│   ├── list                    # 列出章节号+标题
+│   ├── import <path>           # 导入小说文件（自动分章）
+│   ├── list                    # 列出章节号 + 标题
 │   ├── show <num>              # 查看某章内容
 │   ├── export                  # 合并导出 txt
 │   └── status                  # 章节处理状态
 │
-└── kb                          # 知识库查询（wiki/rule/plot/memory 四合一）
+└── kb                          # 知识库查询（wiki / rule / plot / memory 四合一）
     ├── list                    # 列出条目
     ├── show <name>             # 查看详情
     ├── categories              # 类别列表
     ├── relation <name>         # 关联查询
-    └── memory [--category]     # 查看记忆（v5.3+）
+    └── memory [--category]     # 查看记忆
 ```
 
 ### 通用 Flag
 
 | Flag | 短写 | 适用范围 | 作用 |
 |------|------|---------|------|
-| `--json` | | 所有命令 | 输出机器可读 JSON |
+| `--json` | | 所有命令 | 输出机器可读 JSON（脚本/管道友好） |
 | `--yes` | `-y` | extract, muse, chapter import/export, workspace delete | 跳过交互确认 |
 | `--workspace` | `-w` | 所有命令 | 指定工作区名 |
 
@@ -109,7 +141,7 @@ inkweaver
 |------|------|------|
 | `extract` | `--chapters <range>` | 手动指定范围如 `21-30`，默认自动计算 |
 | `muse` | `--outline-file <path>` | 大纲文件路径（必填） |
-| `muse` | `--chapter / -c <num>` | 指定创作章节号（v5.3+），默认最新章节+1 |
+| `muse` | `--chapter / -c <num>` | 指定创作章节号，默认最新章节 + 1 |
 | `chapter import` | `--append` | 增量导入（不覆盖已有章节） |
 | `chapter list` | `-n <num>` | 显示最新 N 章（默认 50） |
 | `kb list` | `--type <wiki\|plot\|rule>` | 按类型过滤 |
@@ -118,44 +150,9 @@ inkweaver
 
 ---
 
-## 使用示例
+## Chat 模式：自然语言工作台
 
-```bash
-# 创建工作区并导入小说
-inkweaver workspace create 我的小说
-inkweaver chapter import novel.txt -w 我的小说 --yes
-
-# 知识提取（自动计算范围，跳过确认）
-inkweaver extract -w 我的小说 --yes
-
-# 手动指定提取范围
-inkweaver extract -w 我的小说 --chapters 11-20 --yes
-
-# 查询知识库
-inkweaver kb list -w 我的小说 --type wiki --json
-inkweaver kb show 林凡 -w 我的小说
-inkweaver kb relation 林凡 -w 我的小说
-
-# 查看记忆
-inkweaver kb memory -w 我的小说
-inkweaver kb memory -w 我的小说 --category correction
-
-# 单轮提问
-inkweaver ask "林凡的修为体系是什么？" -w 我的小说 --json
-
-# 妙笔写作（全自动，指定章节锚定）
-inkweaver muse --outline-file draft.txt -w 我的小说 --yes
-inkweaver muse --outline-file draft.txt -w 我的小说 --chapter 6 --yes
-
-# 进入对话模式
-inkweaver chat -w 我的小说
-```
-
----
-
-## Chat 模式
-
-`inkweaver chat` 进入鉴知对话 REPL，支持自然语言交互和斜杠指令：
+`inkweaver chat` 进入鉴知对话 REPL。直接问自然语言即可——它会自动调用工具查章节、查词条、查关系；同时支持斜杠指令：
 
 ```
 会话控制：
@@ -177,74 +174,69 @@ inkweaver chat -w 我的小说
 
 操作：
   /extract           触发知识提取
-  /remember <text>   写入偏好记忆（v5.3+）
-  /forget <id>       软删除记忆（v5.3+）
+  /remember <text>   写入偏好记忆
+  /forget <id>       软删除记忆
 ```
-
-输入规则：单行输入回车发送，支持 `\n` 转义为实际换行。
 
 ---
 
 ## 核心功能
 
-### 知识提取
+### 妙笔写作：四步创作闭环
 
-Agent 自动分析章节内容，生成提取计划（新增/编辑词条、剧情卡片、规则），确认后执行：
+<img src="assets/muse-workflow.svg" alt="妙笔四步写作工作流" width="900">
 
-1. **规划阶段**：分析章节 → 对比现有知识库 → 生成计划 → 用户确认（`--yes` 跳过）
-2. **执行阶段**：写入 SQLite DB → 构建关系图 → 记录 log.json → 运行 lint 检查
-3. **审阅阶段**：lint 断链检测 → 重要性评分 → 分级处理 → Review Agent 语义审核
+- `--yes` 全自动：审阅分数 < 85 自动打回重写（最多 3 轮）
+- `--chapter N` 章节锚定：知识版本硬切，只使用 ≤ N-1 章的知识，避免"未来剧透"
+- R2+ 修改轮采用手术刀式 JSON 编辑（replace_text / delete_text / rewrite_paragraph），不全文重写，保留思维链
+- 审阅器增量模式：只验证上轮 issues 是否修复与新引入问题，实时评分（100 - 分级扣分）
+- 输出保存在 `{workspace}/muse/YYYY-MM-DD_NNN/`，成稿可一键发布为正式章节
 
-### 妙笔写作
+### 知识提取：三阶段流水线
 
-四步状态机工作流：
+1. **规划**：Agent 分析章节 → 对比现有知识库 → 生成新增/编辑计划 → 用户确认（`--yes` 跳过）
+2. **执行**：写入 SQLite → 构建关系图 → 记录 log.json → lint 检查
+3. **审阅**：断链检测 → 三维重要性评分（提及数/词频/章节范围）→ 分级处理（自动解链 / LLM 判断 / 强制创建）
 
-```
-① 大纲输入（从文件读取）→ ② 知识准备 → ③ 润色写作 → ④ 审阅循环
-```
-
-- `--yes` 全自动模式：审阅分数 < 85 自动打回重写（最多 3 轮）
-- `--chapter N` 章节锚定：知识版本硬切（仅展示 ≤ N-1 章的 wiki/rule/plot 版本）
-- R2+ 修改轮使用手术刀式 JSON 编辑指令（replace_text / delete_text / rewrite_paragraph），避免全文重写
-- R2+ 审阅器增量模式：注入上轮 issues + change_log，只验证修复与新引入问题
-- 输出保存在 `{workspace}/muse/YYYY-MM-DD_NNN/` 目录
-
-### 记忆系统（v5.3+）
-
-结构化记忆存储于 SQLite `memories` 表，Agent 可读写：
-
-| 分类 | 用途 |
-|------|------|
-| preference | 用户偏好（chat prompt 注入） |
-| observation | 观察记录 |
-| correction | 纠正信息（计划打回时触发） |
-| style | 写作风格（muse prompt 注入） |
-
-Agent 工具：`memory_query` / `memory_write` / `memory_update` / `memory_forget`
-
-### 知识系统
-
-三类结构化知识，统一存储于 SQLite（`wiki.db`）：
+### 知识系统：三类结构化知识
 
 | 类型 | 说明 |
 |------|------|
-| **Wiki** | 按类别组织的实体词条（人物/势力/地图/功法等），含状态字段和版本时间线 |
+| **Wiki** | 按类别组织的实体词条（人物/势力/地图/功法等），含状态字段与版本时间线 |
 | **Plot** | 剧情卡片，绑定章节区间，有「未结束/已结束」生命周期 |
 | **Rule** | 世界观规则文档（如境界体系） |
 
-所有类型通过 `[[wikilink]]` 交叉引用，自动构建关系图。
+全部通过 `[[wikilink]]` 交叉引用，自动构建关系图，支持 `kb relation` 查询。
 
-### 断链检测与重要性评分（v5.4+）
+### 记忆系统：四类结构化记忆
 
-lint 阶段对断链实体自动计算三维重要性等级（0~3）：
+| 分类 | 用途 |
+|------|------|
+| preference | 用户偏好（对话 prompt 注入） |
+| observation | 观察记录 |
+| correction | 纠正信息（计划打回时触发） |
+| style | 写作风格（妙笔 prompt 注入） |
 
-| 维度 | 阈值 | 含义 |
+Agent 工具：`memory_query` / `memory_write` / `memory_update` / `memory_forget`
+
+---
+
+## HTTP API（供 GUI 与第三方客户端使用）
+
+`inkweaver serve` 启动 FastAPI 后端，同时托管前端静态文件（前后端一体化）：
+
+| 模块 | 接口 | 说明 |
 |------|------|------|
-| 提及条目数 | ≥3 | 多少个已有词条引用了该断链目标 |
-| 词频 | ≥10 | 在提取章节正文中的出现次数 |
-| 章节范围 | ≥3 | 在多少章正文中出现 |
+| 工作区 | `/api/books` | 列出/创建/重命名/删除/打开，章节与草稿 CRUD |
+| 对话 | `/api/chat` | 发送消息、响应确认、压缩上下文、上下文占用 |
+| 会话 | `/api/sessions` | 会话 CRUD、激活、归档、token 统计 |
+| 妙笔 | `/api/muse` | 启动/终止写作工作流、运行状态 |
+| 知识库 | `/api/knowledge` | 类别、wiki 词条、规则、剧情卡片 |
+| 设置 | `/api/settings` | 配置、模型管理、角色分配、连通性测试 |
+| 统计 | `/api/stats` | Token 消耗汇总与历史 |
+| 事件流 | `/api/events/stream` | SSE 长连接推送 Agent 实时事件 |
 
-分级处理：等级 0 自动 unlink / 等级 1 交 LLM 判断 / 等级≥2 强制债务（用户审核后必须创建）。
+完整接口文档见 [API.md](API.md)。
 
 ---
 
@@ -254,7 +246,7 @@ lint 阶段对断链实体自动计算三维重要性等级（0~3）：
 workingArea/
 ├── 我的小说/
 │   ├── wiki.db              # SQLite 数据库（章节 + 知识库 + 记忆 + 草稿）
-│   ├── session/             # 对话日志归档
+│   ├── session/             # 对话日志归档（JSONL，按会话）
 │   ├── muse/                # 妙笔输出目录
 │   ├── log.json             # 提取记录 & 文档哈希
 │   ├── relations.yaml       # 关系图
@@ -264,131 +256,63 @@ workingArea/
 
 ---
 
-## 项目结构
-
-```
-InkWeaver-CLI/
-├── main.py                 # typer app 入口
-├── commands/               # 子命令实现
-│   ├── common.py           # 公共工具（配置加载、多模型解析、工作区解析）
-│   ├── workspace.py        # workspace 子命令组
-│   ├── chapter.py          # chapter 子命令组
-│   ├── kb.py               # kb 子命令组（含 memory）
-│   ├── chat.py             # chat REPL + _CLIConsumer 事件消费
-│   ├── ask.py              # 单轮提问
-│   ├── extract.py          # 知识提取
-│   └── muse_cmd.py         # 妙笔写作
-├── core/                   # 核心层
-│   ├── events.py           # EventBus 事件总线（v6.0+）
-│   ├── io.py               # IOChannel 统一 I/O 通道
-│   ├── output.py           # OutputFormatter（人类/JSON 双模式）
-│   └── session.py          # SessionLogger 会话日志
-├── agent/                  # Agent 核心
-│   ├── base.py             # BaseAgent 基类（bus 驱动）
-│   ├── loop.py             # agent_loop 主循环（流式 chat_stream）
-│   ├── compact.py          # 上下文压缩
-│   ├── knowledge.py        # 知识提取子代理
-│   ├── permission.py       # 权限管理
-│   ├── skill.py            # Skill 注册
-│   └── todo.py             # TODO 管理
-├── tools/                  # 工具函数
-│   ├── db/                 # SQLite 数据层
-│   │   ├── service.py      # SQL 操作（含 memories/drafts CRUD）
-│   │   ├── schema.py       # 表结构定义
-│   │   ├── proxy.py        # 缓存代理
-│   │   ├── token_stats.py  # Token 统计服务（v6.0+）
-│   │   └── version_manager.py  # 版本管理
-│   ├── workspace.py        # 工作区操作
-│   ├── chapter.py          # 章节工具
-│   ├── wiki.py             # Wiki 工具
-│   ├── plot.py             # 剧情卡片
-│   ├── rules.py            # 规则文档
-│   ├── relation.py         # 关系查询
-│   ├── memory.py           # 记忆系统（DB 读写）
-│   ├── editor.py           # 统一编辑器
-│   ├── lint.py             # Lint 检查（含断链评分）
-│   ├── muse_edits.py       # 手术刀编辑后端（v5.4+）
-│   ├── name_utils.py       # 多名称统一统计（v5.4+）
-│   ├── writing_workflow.py # 写作工作流（含 run_revise）
-│   ├── knowledge_task.py   # 知识提取 Subagent
-│   ├── plot_task.py        # 剧情提取 Subagent
-│   └── review.py           # 审核 Subagent
-├── skills/                 # Skill 文件（注入 system prompt）
-├── auto/                   # 自动化（关系提取）
-├── api.py                  # LLMClient（含 chat_stream 流式）
-├── Jianzhi.py              # 鉴知 Agent
-├── Muse.py                 # 向后兼容入口（re-export muse/ 包）
-├── cli.py                  # 向后兼容入口（re-export core/ SessionLogger）
-├── muse/                   # 妙笔子包
-│   ├── __init__.py         # 导出 ReviewSession / MuseAgent / MuseWorkflow
-│   ├── review_session.py   # 审阅状态管理
-│   ├── agent.py            # MuseAgent 工具分发 + 版本硬切
-│   └── workflow.py         # 四步写作状态机
-├── server/                 # FastAPI HTTP 服务
-│   ├── main.py             # FastAPI 应用实例 + 异常处理器
-│   ├── state.py            # 服务器全局状态（含 session 管理）
-│   ├── sse.py              # SSE 事件推送 + 会话消息缓冲
-│   └── router/             # API 路由
-│       ├── books.py        # 工作区/章节/草稿
-│       ├── chat.py         # 鉴知对话
-│       ├── muse.py         # 妙笔写作
-│       ├── knowledge.py    # 知识库查询
-│       ├── sessions.py     # 会话 CRUD
-│       ├── settings.py     # 配置/模型管理
-│       └── stats.py        # Token 统计
-└── pyproject.toml          # 包定义 + entry_points
-```
-
----
-
-## 架构（v6.0 事件总线）
-
-```
-Agent → self.bus.emit(EventType.XXX, data) → EventBus(queue.Queue)
-                                                  ├─ CLI: _CLIConsumer 线程 → IOChannel → 终端
-                                                  └─ GUI: EventConsumer 线程 → evaluate_js → 前端
-```
-
-**线程模型：**
-- Thread-Main：用户输入 / UI 交互
-- Thread-Agent：Agent 循环（同步阻塞，工具调用天然串行）
-- Thread-Consumer：事件消费（CLI 打印 / GUI 推送）
-
-**确认机制：**
-- Agent 线程调用 `bus.request_confirm()` → 阻塞等待
-- 消费线程收到 CONFIRM_REQUEST → 展示给用户 → 用户响应
-- 消费线程调用 `bus.resolve_confirm(id, response)` → 唤醒 Agent 线程
-
----
-
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
 | 语言 | Python 3.10+ |
 | CLI 框架 | typer（基于 rich） |
-| LLM 接口 | OpenAI SDK（兼容任意 OpenAI 格式推理模型，支持流式） |
-| 数据存储 | SQLite（章节 + 知识库 + 版本时间线 + 记忆 + 草稿） |
+| LLM 接口 | OpenAI SDK（兼容任意 OpenAI 格式推理模型，流式 + 思考模式） |
+| 数据存储 | SQLite（章节 + 知识库 + 版本时间线 + 记忆 + 草稿 + 会话） |
 | 配置 | YAML（多模型 + 角色分配） |
 | Token 估算 | tiktoken（cl100k_base） |
-| 事件总线 | queue.Queue + threading.Event（线程安全） |
-| GUI | PyWebView + Vue 3（独立仓库 InkWeaver-GUI） |
+| 事件总线 | queue.Queue + threading.Event（线程安全，批量发射防风暴） |
+| HTTP 服务 | FastAPI + uvicorn + SSE |
+| GUI | PyWebView + Vue 3（独立仓库 [InkWeaver-GUI](../InkWeaver-GUI)） |
 
 ---
 
-## Session 日志
-
-每次命令执行自动写入 `{workspace}/session/session_YYYYMMDD_HHMMSS.log`：
+## 项目结构
 
 ```
-[META] mode=single-turn cmd=ask
-[USER] 林凡的修为体系是什么？
-[THINK] 已思考（耗时 3 秒）
-[TOOL] read_wiki 林凡 -> 成功
-[AGENT] 林凡的修为体系为...
+InkWeaver-CLI/
+├── main.py                 # typer app 入口
+├── commands/               # 子命令实现
+│   ├── workspace.py / chapter.py / kb.py
+│   ├── chat.py             # chat REPL + 事件消费
+│   ├── ask.py / extract.py / muse_cmd.py
+│   └── serve.py            # FastAPI 启动
+├── core/                   # 核心层
+│   ├── events.py           # EventBus + StreamBatcher（v6.5.7）
+│   ├── io.py               # IOChannel 统一 I/O 通道
+│   ├── output.py           # OutputFormatter（人类/JSON 双模式）
+│   └── session.py          # SessionLogger 会话日志
+├── agent/                  # Agent 核心
+│   ├── base.py             # BaseAgent（bus 驱动 + token 任务级隔离）
+│   ├── loop.py             # agent_loop 主循环（流式 chat_stream）
+│   ├── compact.py / permission.py / skill.py / todo.py
+│   └── knowledge.py        # 知识提取子代理
+├── tools/                  # 工具函数
+│   ├── db/                 # SQLite 数据层（service/schema/proxy/token_stats/version_manager）
+│   ├── workspace.py / chapter.py / wiki.py / plot.py / rules.py
+│   ├── relation.py / memory.py / editor.py / lint.py / name_utils.py
+│   ├── muse_edits.py       # 手术刀编辑后端
+│   ├── writing_workflow.py # 写作工作流（max_tokens 硬约束）
+│   ├── knowledge_task.py / plot_task.py / review.py   # Subagent
+│   └── knowledge_workflow.py / plot_workflow.py       # 知识准备工作流
+├── skills/                 # Skill 文件（注入 system prompt）
+├── muse/                   # 妙笔子包
+│   ├── agent.py            # MuseAgent 工具分发 + 版本硬切
+│   ├── workflow.py         # 四步写作状态机（WRITE_MAX_TOKENS）
+│   └── review_session.py   # 审阅状态管理
+├── server/                 # FastAPI HTTP 服务
+│   ├── main.py             # 应用实例 + 静态托管 + 健康检查
+│   ├── state.py / sse.py   # 全局状态 / SSE 推送
+│   └── router/             # books/chat/muse/knowledge/sessions/settings/stats
+├── api.py                  # LLMClient（chat/chat_stream，支持 max_tokens）
+├── Jianzhi.py              # 鉴知 Agent
+└── pyproject.toml          # 包定义 + entry_points
 ```
-
-META 首行标注调用模式：`chat` / `single-turn cmd=ask|extract|muse`。
 
 ---
 
@@ -397,10 +321,16 @@ META 首行标注调用模式：`chat` / `single-turn cmd=ask|extract|muse`。
 | 版本 | 主题 |
 |------|------|
 | v5.2 | 标准 CLI 化（typer 重构、子命令体系、JSON 输出） |
-| v5.3 | 妙笔章节锚定（`--chapter`）+ 记忆系统重做（DB 存储、/remember、/forget） |
-| v5.4 | 妙笔稳定性重构：手术刀编辑 + 增量审阅 + 断链重要性评分与分级处理 |
-| v6.0 | 事件总线架构改造 + GUI 桌面端（PyWebView + Vue 3，独立仓库） |
-| v6.0.1 | 代码审查缺陷修复（线程安全、事件总线健壮性、配置持久化） |
-| v6.2 | FastAPI 后端迁移（server/ 包、HTTP API、SSE 流式） |
-| v6.3 | Code Review 全量修复 + Muse.py 拆分基建 + cli/core 统一 + 安全加固 |
-| v6.5.4 | v6.5.3 反馈集中修复：工作区记忆 + 鉴知 token 隔离/卡片分页/知识库切书 + 妙笔审核插入/字数硬约束/审阅实时评分 + 图标编译 + 章节标题 |
+| v5.3 | 妙笔章节锚定 + 记忆系统重做（DB 存储） |
+| v5.4 | 妙笔稳定性重构：手术刀编辑 + 增量审阅 + 断链重要性评分 |
+| v6.0 | 事件总线架构改造 + GUI 桌面端（独立仓库） |
+| v6.2 | FastAPI 后端迁移（HTTP API、SSE 流式） |
+| v6.3 | Code Review 全量修复 + 安全加固 |
+| v6.5.x | 前后端联动迭代：确认卡片、实时评分、token 按会话隔离、知识准备两步视图、写作链路质量加固、事件风暴治理、修改标注 |
+
+---
+
+## 相关项目
+
+- [InkWeaver-GUI](../InkWeaver-GUI) — 墨笔桌面端 / Web 界面（青花瓷·水墨风），基于本仓库 FastAPI 后端
+- [API 文档](API.md) — HTTP 接口完整参考

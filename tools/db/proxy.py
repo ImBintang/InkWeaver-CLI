@@ -244,7 +244,7 @@ class ProxyService:
         doc.end_notes = end_notes
         doc.is_dirty = True
 
-        msg = f"✅ 剧情卡片「{name}」已标记为结束"
+        msg = f"剧情卡片「{name}」已标记为结束"
         if end_notes:
             msg += f"\n收尾语：{end_notes}"
         return msg

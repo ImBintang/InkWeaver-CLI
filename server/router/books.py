@@ -112,7 +112,7 @@ async def open_book(req: BookOpenReq) -> dict:
         session_data = state.load_or_create_session()
         state.current_session_id = session_data["id"]
     except Exception as e:
-        print(f"[books] ⚠ session bind failed: {e}")
+        print(f"[books] [警告] session bind failed: {e}")
         state.current_session_id = None
         session_data = None
     # v6.5.3: 工作区记忆 — 打开成功后写入配置，下次启动自动恢复
@@ -122,7 +122,7 @@ async def open_book(req: BookOpenReq) -> dict:
         config.setdefault("workspace", {})["last"] = req.name
         save_config(config)
     except Exception as e:
-        print(f"[books] ⚠ workspace last persist failed: {e}")
+        print(f"[books] [警告] workspace last persist failed: {e}")
     return {"ok": True, "name": req.name, "session": session_data}
 
 
@@ -149,7 +149,7 @@ def _close_jianzhi_quietly():
             if close:
                 close()
         except Exception as e:
-            print(f"[books] ⚠ 关闭鉴知连接失败: {e}")
+            print(f"[books] [警告] 关闭鉴知连接失败: {e}")
     state.jianzhi = None
 
 
@@ -184,7 +184,7 @@ async def rename_book(req: BookRenameReq) -> dict:
         try:
             state.bind_session_manager()
         except Exception as e:
-            print(f"[books] ⚠ rename 后重绑会话失败: {e}")
+            print(f"[books] [警告] rename 后重绑会话失败: {e}")
     return {"ok": True, "name": new_name}
 
 
@@ -217,9 +217,14 @@ def _get_db(book: str) -> SQLiteService:
 
 @router.get("/api/books/{book}/chapters")
 async def list_chapters(book: str) -> list[dict]:
-    """列出某工作区下的所有章节"""
+    """列出某工作区下的所有章节（含 extracted 提取状态）"""
     db = None
     try:
+        # v6.5.8：读取 log.json 已处理范围，标注每章是否已提取——
+        # 新创建/导入的书籍 log.json 不存在，全部显示未提取
+        from tools.chapter import _load_processed_ranges, _is_processed
+        ws_path = _safe_book_path(book)
+        processed_ranges = _load_processed_ranges(ws_path)
         db = _get_db(book)
         rows = db.chapter_list_all_with_count()
         return [
@@ -229,6 +234,7 @@ async def list_chapters(book: str) -> list[dict]:
                 "word_count": r["word_count"],
                 "imported_at": r.get("imported_at"),
                 "draft_count": r.get("draft_count", 0),
+                "extracted": _is_processed(r["chapter_num"], processed_ranges),
             }
             for r in rows
         ]
@@ -377,7 +383,7 @@ def _rebuild_jianzhi():
                 if close:
                     close()
             except Exception as e:
-                print(f"[books] ⚠ 关闭旧鉴知实例失败: {e}")
+                print(f"[books] [警告] 关闭旧鉴知实例失败: {e}")
         from Jianzhi import JianzhiAgent
         config = load_config()
         state.jianzhi = JianzhiAgent(
@@ -388,5 +394,5 @@ def _rebuild_jianzhi():
         )
     except Exception as e:
         # 不静默：重建失败原因打印到服务端日志（GUI 会在下次调用时感知 jianzhi 为空）
-        print(f"[books] ⚠ 重建鉴知失败: {e}")
+        print(f"[books] [警告] 重建鉴知失败: {e}")
         state.jianzhi = None

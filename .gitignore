@@ -19,6 +19,9 @@ venv/
 .task_outputs/
 .transcripts/
 
+# tiktoken BPE 词表缓存（首次下载后离线复用，1.7MB）
+.tiktoken_cache/
+
 # OS
 Thumbs.db
 .DS_Store

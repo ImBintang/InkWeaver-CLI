@@ -1,0 +1,27 @@
+digraph muse_workflow {
+  rankdir=LR;
+  bgcolor="transparent";
+  pad=0.5;
+  nodesep=0.45;
+  ranksep=0.7;
+
+  node [fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif", fontsize=12, shape=box, style="rounded,filled", fillcolor="#EAF3F7", color="#3A6B8F", fontcolor="#223A4E", penwidth=1.2, margin="0.18,0.12"];
+  edge [fontname="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif", fontsize=10, color="#7A9BB0", arrowsize=0.8];
+
+  start [label="① 大纲输入\noutline-file · 对话"];
+  prep [label="② 知识准备\n先验知识 + 前情提要"];
+  confirm [label="审核确认\n通过 / 打回重做", shape=diamond, fillcolor="#F7EFE3", color="#C8A45C"];
+  write [label="③ 润色写作\nmax_tokens 硬约束\n约 3000~4000 字"];
+  review [label="④ 审阅循环\n实时评分\n100 - 分级扣分"];
+  revise [label="手术刀修改轮\nreplace / delete / rewrite\n最多 3 轮", fillcolor="#F3E9F0", color="#8A5A7A"];
+  done [label="成稿入库\nmuse/YYYY-MM-DD_NNN/", fillcolor="#E3F0E4", color="#4A8B5C"];
+
+  start -> prep;
+  prep -> confirm;
+  confirm -> prep [label="打回"];
+  confirm -> write [label="通过"];
+  write -> review;
+  review -> revise [label="分数 < 85"];
+  revise -> review [label="增量审阅\n只验修复项"];
+  review -> done [label="分数 >= 85"];
+}

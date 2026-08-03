@@ -173,7 +173,7 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
         # 错误不静默：失败原因随结果回传，由 LLM/用户决定如何处理
         lint_note = f" | lint 刷新失败：{e}"
 
-    return (f"✅ 任务已完成。已记录：{len(chapter_nums)} 章、"
+    return (f"任务已完成。已记录：{len(chapter_nums)} 章、"
             f"{len(new_wiki + updated_wiki)} 个 wiki 词条、"
             f"{len(new_rules + updated_rules)} 个规则、"
             f"{len(new_plots + updated_plots)} 个剧情卡片"

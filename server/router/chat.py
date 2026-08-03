@@ -3,7 +3,7 @@
 import time
 import threading
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from server.state import state
 from server.router.books import _rebuild_jianzhi
@@ -19,9 +19,14 @@ class ChatSendReq(BaseModel):
 
 
 class ConfirmResReq(BaseModel):
-    """确认响应请求体（透传给 EventBus.resolve_confirm）"""
+    """确认响应请求体（透传给 EventBus.resolve_confirm）
+
+    v6.5.9: 改用 pydantic v2 的 model_config 保留额外字段——
+    此前 __pydantic_config__ 在 v2 无效，reason/rejected_indices 被静默丢弃。
+    """
+
+    model_config = ConfigDict(extra="allow")
     action: str = "approve"
-    __pydantic_config__ = {"extra": "allow"}
 
 
 # ─── 对话 ──────────────────────────────────────────────────────────
@@ -208,7 +213,7 @@ async def chat_clear(session_id: str | None = Query(default=None)) -> dict:
             try:
                 state.session_manager.clear_session(target)
             except Exception as e:
-                print(f"[chat] ⚠ session clear failed: {e}")
+                print(f"[chat] [警告] session clear failed: {e}")
         return {"ok": True, "session_id": target}
     except Exception as e:
         raise HTTPException(500, detail=str(e))

@@ -64,12 +64,12 @@ def _read_lint_report(workspace: Path, agent=None) -> str:
                 for target, info in list(items.items())[:20]:
                     if isinstance(info, dict):
                         lines.append(
-                            f"  🔶 {target}（等级{info.get('level', '?')} / "
+                            f"  [关键] {target}（等级{info.get('level', '?')} / "
                             f"{info.get('mention_count', '?')}条目提及 / "
                             f"词频{info.get('frequency', '?')} / "
                             f"覆盖{info.get('chapter_count', '?')}章）")
                     else:
-                        lines.append(f"  🔶 {target}：{info}")
+                        lines.append(f"  [关键] {target}：{info}")
                 lines.append("")
                 continue
             if not isinstance(items, list):
@@ -79,19 +79,19 @@ def _read_lint_report(workspace: Path, agent=None) -> str:
             lines.append(f"### {debt_type}（{len(items)} 项）")
             for item in items:
                 if not isinstance(item, dict):
-                    lines.append(f"  ⚠️ {item}")
+                    lines.append(f"  [警告] {item}")
                     continue
                 if debt_type in ("broken_links", "plot_broken_links"):
-                    lines.append(f"  ⚠️ {item.get('target', '?')} → {item.get('file', '?')}")
+                    lines.append(f"  [警告] {item.get('target', '?')} → {item.get('file', '?')}")
                 elif debt_type in ("state_missing", "state_verbose", "length_overage",
                                    "desc_verbose", "file_errors"):
-                    lines.append(f"  ⚠️ {item.get('file', '?')}（{item.get('detail', '')}）")
+                    lines.append(f"  [警告] {item.get('file', '?')}（{item.get('detail', '')}）")
                 elif debt_type == "unended_plots":
-                    lines.append(f"  ⚠️ {item.get('name', '?')}（{item.get('detail', '')}）")
+                    lines.append(f"  [警告] {item.get('name', '?')}（{item.get('detail', '')}）")
                 elif debt_type == "appearance":
                     lines.append(f"  {item.get('file', '?')}（{item.get('detail', '')}）")
                 else:
-                    lines.append(f"  ⚠️ {json.dumps(item, ensure_ascii=False)}")
+                    lines.append(f"  [警告] {json.dumps(item, ensure_ascii=False)}")
             lines.append("")
         report = "\n".join(lines) if len(lines) > 1 else "（lint 报告为空，无债务）"
         return report + lint_warning
@@ -203,16 +203,16 @@ class JianzhiAgent(BaseAgent):
             "6. 只有以上无法满足需求时，才用 read_chapters 读取章节原文",
             "",
             "**禁止行为**：",
-            "- ❌ 跳过知识库直接 read_chapters 全文阅读",
-            "- ❌ 已有知识库词条的情况下，不查知识库就去翻原文",
-            "- ❌ 把知识库能解答的问题变成大段章节阅读",
+            "- 禁止：跳过知识库直接 read_chapters 全文阅读",
+            "- 禁止：已有知识库词条的情况下，不查知识库就去翻原文",
+            "- 禁止：把知识库能解答的问题变成大段章节阅读",
             "",
             "# 工作流模式",
             "本 Agent 使用计划驱动的工作流模式，分为两个阶段：",
             "",
             "### 阶段一：规划阶段（planning）— 默认状态",
-            "- ✅ 允许：所有只读工具（read_chapters / wiki_list / read_wiki / 等）",
-            "- ❌ 禁止：所有写工具（new_wiki / edit_wiki / batch_create_wiki / 等）",
+            "- 允许：所有只读工具（read_chapters / wiki_list / read_wiki / 等）",
+            "- 禁止：所有写工具（new_wiki / edit_wiki / batch_create_wiki / 等）",
             "- 请先阅读章节和已有知识库，制定提取计划",
             "- 通过 submit_plan 提交计划，等待用户审阅",
             "",
@@ -223,10 +223,18 @@ class JianzhiAgent(BaseAgent):
             "- 执行阶段：系统自动加载基础版本（≤ scope 最大章节的最近版本），无需手动指定",
             "- flush 时系统自动决定插入新版本或覆盖同章节版本",
             "",
-            "### 🔴 计划提交强制规则（重要）",
+            "### [强制] 计划提交强制规则（重要）",
             "当你完成分析、准备好知识提取计划后，**必须**调用 submit_plan 工具提交计划（传入 plan_json 字符串），",
             "**禁止**将计划内容以文本形式直接输出。",
             "直接输出文本会导致工作流断裂——用户无法通过系统流程审阅和确认计划，权限也无法切换到执行阶段。",
+            "",
+            "**计划 JSON 结构规范（违反会导致词条静默丢失）**：",
+            "1. 每个字段（new_wiki / new_rule / new_plot / edit_wiki / edit_rule / edit_plot / new_category）在 JSON 中**只能出现一次**！",
+            "   所有同类条目必须合并进同一个数组，用 category 区分类别；",
+            "   禁止拆成多个同名键——JSON 重复键后值覆盖前值，系统只会收到最后一个数组，前面的词条全部丢失！",
+            "2. new_wiki 数量没有上限，单批可提交 30-60 条，覆盖范围内所有新出现的重要实体（人物/势力/地点/物品/功法/组织等），不要只建几条；",
+            "3. new_plot 每批控制在 4 张以内，只收录主线关键事件（开篇冲突/转折/高潮/结局），避免堆砌次要事件；",
+            "4. new_rule 只建真正的体系性规则（境界/力量体系/世界底层设定/禁忌等）；地点、势力、组织一律作为 wiki 词条，不要建规则文档。",
             "",
             "### 阶段二：执行阶段（executing）— 用户确认后",
             "- 所有写工具放行，但仅限计划白名单内的操作",
@@ -234,7 +242,7 @@ class JianzhiAgent(BaseAgent):
             "- 使用 batch_create_wiki / batch_edit_wiki 批量操作",
             "- 完成后调用 review_workflow 进入审核",
             "",
-            "### ✍️ 写作质量要求（执行阶段必须遵守）",
+            "### [写作] 写作质量要求（执行阶段必须遵守）",
             "**先调用 read_index(类别名) 获取该类别的 writing_guide，按规范结构撰写正文。**",
             "| 字段 | 最低要求 | 说明 |",
             "|------|---------|------|",
@@ -243,10 +251,10 @@ class JianzhiAgent(BaseAgent):
             "| content | ≥300字 | 按类别 writing_guide 分段撰写，使用 [[wikilink]] 交叉引用 |",
             "",
             "**禁止行为**：",
-            "- ❌ description 只写「叶家少主」「赤云城家族」等 ≤15字的标签式描述",
-            "- ❌ state 只写「肉仙五重」「存在」等 ≤10字的片段",
-            "- ❌ content 不参考 writing_guide 结构，只写 2-3 句流水账",
-            "- ❌ 跳过 read_index 直接凭记忆写作",
+            "- 禁止：description 只写「叶家少主」「赤云城家族」等 ≤15字的标签式描述",
+            "- 禁止：state 只写「肉仙五重」「存在」等 ≤10字的片段",
+            "- 禁止：content 不参考 writing_guide 结构，只写 2-3 句流水账",
+            "- 禁止：跳过 read_index 直接凭记忆写作",
             "",
             "### Review 审核模式（review_workflow）",
             "- 进入后上下文清空，只能读取计划内的章节/wiki/plot",
@@ -965,6 +973,13 @@ class JianzhiAgent(BaseAgent):
                                 "计划 JSON 包括：scope（提取范围）, mode（可选，\"extract\" 或 \"re-extract\"）, "
                                 "new_category, new_wiki, edit_wiki, new_rule, edit_rule, new_plot, edit_plot。"
                                 "重新提取时 mode=\"re-extract\"，系统自动加载基础版本。"
+                                "【JSON 结构硬性规范】每个字段（new_wiki/new_rule/new_plot 等）在 JSON 中只能出现一次！"
+                                "所有同类条目必须合并进同一个数组（用 category 区分类别），禁止拆成多个同名键——"
+                                "JSON 重复键后值覆盖前值，词条会被静默丢弃（用户审阅时只见最后一个数组）。"
+                                "new_wiki 单批可 30-60 条，覆盖范围内所有新出现的重要实体，不要只建几条；"
+                                "new_plot 每批不超过 4 张，只收录主线关键事件；"
+                                "new_rule 只建真正的体系性规则（境界体系/世界底层设定/禁忌等），"
+                                "地点、势力、组织一律作为 wiki 词条，不要放进规则文档。"
                                 "每项字段说明："
                                 "new_wiki/edit_wiki 每项需含 category（类别）, name（词条名）, chapters（章节号）, reason（理由）；"
                                 "new_rule/edit_rule 每项需含 name（规则名）, reason（规则说明）；"
@@ -1154,7 +1169,21 @@ class JianzhiAgent(BaseAgent):
                     plan = result_data.get("plan", {})
                     if self.permission.mode == "review":
                         # 审核阶段：合并到现有白名单，不重置
-                        return self.permission.submit_review_plan(plan)
+                        review_result = self.permission.submit_review_plan(plan)
+                        # v6.5.10: unlink_debts——强制债务中与规则挂钩、需取消链接并拉黑的目标，
+                        # 作为提交计划的一项随计划审批；只有在此处通过后，
+                        # finish_task 才不再对这些债务拦截（执行 unlink+黑名单+移出强制债务清单）
+                        if not str(review_result).startswith("错误"):
+                            unlink_targets = [t for t in plan.get("unlink_debts", [])
+                                              if isinstance(t, str) and t.strip()]
+                            if unlink_targets:
+                                try:
+                                    self._apply_unlink_debts(unlink_targets)
+                                except Exception as e:
+                                    self.bus.emit(EventType.ERROR,
+                                                  {"text": f"unlink_debts 执行异常：{e}"},
+                                                  source="jianzhi")
+                        return review_result
                     else:
                         try:
                             self.permission.submit_plan(plan)
@@ -1221,7 +1250,9 @@ class JianzhiAgent(BaseAgent):
             except Exception as e:
                 # 错误不静默：失败原因随审核上下文注入，供 LLM 感知并处置
                 lint_result = f"（lint 检查异常：{e}）"
-            # v5.4.2：断链重要性等级3审核节点
+            # v5.4.2：断链重要性审核节点
+            # v6.5.8：拆分审核范围——重要性等级=2 的断链直接通过（不再询问通过与驳回），
+            # 仅对关键实体（重要性等级>2）弹窗审核，并以卡片形式渲染
             forced_debts_approved = []
             forced = []
             try:
@@ -1230,10 +1261,21 @@ class JianzhiAgent(BaseAgent):
                 # 强制债务读取失败不静默：原因注入 lint 结果，本次跳过强制审核
                 lint_result += f"\n（强制债务读取失败：{e}，本次已跳过强制债务审核）"
             if forced:
-                approved, rejected = self._audit_forced_debts(forced)
-                if rejected:
-                    self._unlink_rejected(rejected)
-                forced_debts_approved = approved
+                auto_debts = [item for item in forced if item.get("level", 0) <= 2]
+                key_entities = [item for item in forced if item.get("level", 0) > 2]
+                if auto_debts:
+                    # 断链直接通过：自动批准（保留链接并补建词条），不打扰用户
+                    names = ", ".join(item["target"] for item in auto_debts)
+                    self.bus.emit(EventType.INFO,
+                                  {"text": f"断链已自动通过（重要性等级2）：{names}，将自动补建词条。"},
+                                  source="jianzhi")
+                    forced_debts_approved.extend(auto_debts)
+                if key_entities:
+                    # 关键实体（重要性等级>2）：弹窗审核，用户可部分/全部拒绝并填写原因
+                    approved, rejected = self._audit_forced_debts(key_entities)
+                    if rejected:
+                        self._unlink_rejected(rejected)
+                    forced_debts_approved.extend(approved)
             # 标记等待 chat() 清理上下文（不清 self.messages，避免 agent_loop 的 tool result 链断裂）
             self._review_pending = {"lint_result": lint_result, "forced_debts": forced_debts_approved}
             # v5.4.2 fix：强制债务独立存储，供 finish_task 校验（_review_pending 会在 chat() 中被 del）
@@ -1252,8 +1294,9 @@ class JianzhiAgent(BaseAgent):
                     "message": (
                         f"强制债务未解决：{', '.join(forced_unresolved)}。"
                         f"请先通过 submit_plan 申请白名单扩展并创建对应词条；"
-                        f"若确无法创建（如实体实为规则概念、创建反复失败），"
-                        f"可调用 waive_forced_debt 请求用户豁免该债务。"
+                        f"若债务与规则挂钩（规则文档已覆盖的概念），可通过 submit_plan 的 "
+                        f"unlink_debts 字段申请取消链接并拉黑（用户批准后自动执行）；"
+                        f"若确无法创建，可调用 waive_forced_debt 请求用户豁免该债务。"
                     )
                 }, ensure_ascii=False)
             # 沿用旧 finish_task 逻辑：校验存在性 + 记录 log.json + 构建关系图
@@ -1589,7 +1632,11 @@ class JianzhiAgent(BaseAgent):
             raise RuntimeError(f"读取 lint-debt.json 失败：{e}") from e
 
     def _audit_forced_debts(self, forced: list[dict]) -> tuple[list[dict], list[dict]]:
-        """通过事件总线请求用户审核：返回 (approved, rejected)"""
+        """通过事件总线请求用户审核：返回 (approved, rejected)
+
+        v6.5.8：仅审核关键实体（重要性等级>2），用户可部分拒绝（rejected_indices）
+        并填写驳回原因（reason，注入 INFO 事件供日志/前端展示）。
+        """
         # 发射确认请求，阻塞等待用户响应
         response = self.bus.request_confirm("forced_debt", {"items": forced}, source="jianzhi")
 
@@ -1597,7 +1644,7 @@ class JianzhiAgent(BaseAgent):
         # 不强行创建高重要性实体；全部拒绝即全部 unlink，成为豁免出口
         if not response or response.get("_timeout"):
             self.bus.emit(EventType.INFO,
-                          {"text": "强制债务审核超时/无响应，默认全部拒绝并取消链接。"},
+                          {"text": "关键实体审核超时/无响应，默认全部拒绝并取消链接。"},
                           source="jianzhi")
             return [], forced
 
@@ -1616,7 +1663,11 @@ class JianzhiAgent(BaseAgent):
 
         if rejected:
             names = ", ".join(item["target"] for item in rejected)
-            self.bus.emit(EventType.INFO, {"text": f"已拒绝：{names}，将自动取消链接。"}, source="jianzhi")
+            msg = f"已拒绝：{names}，将自动取消链接。"
+            reason = (response.get("reason") or "").strip()
+            if reason:
+                msg += f" 原因：{reason}"
+            self.bus.emit(EventType.INFO, {"text": msg}, source="jianzhi")
 
         return approved, rejected
 
@@ -1660,6 +1711,29 @@ class JianzhiAgent(BaseAgent):
                     category=doc.category or None,
                     content=new_content, chapter=0
                 )
+
+    def _apply_unlink_debts(self, targets: list[str]):
+        """v6.5.10: 执行随提交计划批准的 unlink_debts
+
+        对每个目标：① 遍历 proxy 缓存 unlink 所有指向它的 wikilink；
+        ② 写入 unlink 黑名单（后续 lint 不再报断链）；
+        ③ 移出强制债务清单（finish_task 不再拦截）。
+        """
+        from tools.editor import _save_unlink_blacklist
+        self._unlink_rejected([{"target": t} for t in targets])
+        for t in targets:
+            _save_unlink_blacklist(self.workspace, t)
+        pending = getattr(self, '_forced_debts_pending', None) or []
+        tset = set(targets)
+        self._forced_debts_pending = [
+            d for d in pending
+            if not ((d.get("target") if isinstance(d, dict) else d) in tset)
+        ]
+        self.bus.emit(
+            EventType.INFO,
+            {"text": f"已按计划取消链接并拉黑债务目标：{', '.join(targets)}（finish_task 不再拦截）"},
+            source="jianzhi",
+        )
 
     def _check_forced_debt_resolved(self) -> list[str]:
         """检查强制债务是否已解决，返回未解决的 target 列表"""
@@ -1714,7 +1788,7 @@ class JianzhiAgent(BaseAgent):
         if hasattr(self, '_review_pending') and self._review_pending:
             forced_debts = self._review_pending.get("forced_debts", [])
         if forced_debts:
-            parts.append("### 🚨🚨🚨 强制债务（最高优先级 — 必须首先处理）")
+            parts.append("### [强制债务]（最高优先级 — 必须首先处理）")
             parts.append("")
             parts.append("**以下实体已经用户审核确认，必须创建词条。这是不可跳过的硬性要求。**")
             parts.append("**你必须在处理其他任何债务之前，先完成以下所有实体的创建。**")
@@ -1737,7 +1811,13 @@ class JianzhiAgent(BaseAgent):
             parts.append("2. 用户确认后，逐个调用 `new_wiki` 创建词条（内容≥300字）")
             parts.append("3. 创建完成后才可继续处理其他债务")
             parts.append("")
-            parts.append("❗❗ finish_task 会校验上述实体是否已全部创建。任何一个未创建都将阻塞任务结束。")
+            parts.append("[重要] finish_task 会校验上述实体是否已全部创建。任何一个未创建都将阻塞任务结束。")
+            parts.append("")
+            parts.append("**例外：与规则挂钩的强制债务** — 若某个强制债务实为规则文档已覆盖的概念（如通用境界名、")
+            parts.append("通用设定），不应建词条，则不要将其放入 new_wiki，而是在同一份 submit_plan 中将其加入")
+            parts.append("`unlink_debts` 字段（字符串数组）。用户批准计划后系统自动执行取消链接+拉黑，")
+            parts.append("finish_task 不再拦截这些债务。注意：unlink_debts 只能用于规则已覆盖的概念，")
+            parts.append("真正的重要实体仍必须走 new_wiki 创建流程。")
             parts.append("")
 
         parts.append("### 断链（broken_link）处理规则")
@@ -1757,7 +1837,8 @@ class JianzhiAgent(BaseAgent):
         parts.append("   → 使用 `edit_doc_wikilink(mode=\"unlink\", remember=false)` 取消链接，**不**记入黑名单。")
         parts.append("")
         if forced_debts:
-            parts.append("**禁止**：上方「强制债务」清单中的实体不适用④，不得 unlink，必须走③流程创建。违反将导致 finish_task 永久阻塞。")
+            parts.append("**禁止**：上方「强制债务」清单中的实体不适用④；真正的重要实体必须走③流程创建，")
+            parts.append("仅当债务与规则挂钩（规则文档已覆盖的概念）时才可将其列入 submit_plan 的 `unlink_debts` 字段。违反将导致 finish_task 永久阻塞。")
             parts.append("")
         parts.append("### 未结束剧情卡片处理规则")
         parts.append("lint 报告的 unended_plots 表示剧情卡片章节范围已结束但未标记收尾。")

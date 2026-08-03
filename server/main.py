@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
             print(f"[server] 已恢复上次工作区：{last}")
     except Exception as e:
         # 恢复失败不阻断服务启动（工作区可能已被删除/重命名）
-        print(f"[server] ⚠ 恢复上次工作区失败（忽略）: {e}")
+        print(f"[server] [警告] 恢复上次工作区失败（忽略）: {e}")
     yield
 
 

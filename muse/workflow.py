@@ -627,7 +627,7 @@ class MuseWorkflow:
             review_md_lines = [
                 f"# 审阅报告",
                 f"**分数**：{review_result['score']} / 100",
-                f"**判定**：{'✅ 通过' if review_result['pass'] else '❌ 未通过（< 85）'}",
+                f"**判定**：{'通过' if review_result['pass'] else '未通过（< 85）'}",
                 f"**问题数量**：{len(review_result['issues'])}",
                 "",
             ]
@@ -896,6 +896,10 @@ class MuseWorkflow:
         # 写作由 writing_workflow 显式 low 已正常；此处覆盖 agent.llm 实例，
         # 经 dispatch 传入的 Knowledge/PlotWorkflow（共享 llm 实例）一并生效
         agent.llm.reasoning_effort = "low"
+        # v6.5.10: 暴露全局总线供 dispatch 中的 Knowledge/PlotWorkflow 直接发射流式事件。
+        # 此前知识准备依赖私有 bus→drain 线程转发链路，转发不及时/竞态时先验知识、
+        # 前情提要的中间输出丢失（前端实时渲染失效）；改为与写作同路径直接注入全局 bus
+        agent._global_bus = self.bus
         # 保存 drain 线程引用，供 agent_loop 结束后清理（P1-19：异常时统一清理）
         agent._drain_thread = drain_thread
         agent._drain_stop = stop_event

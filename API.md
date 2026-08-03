@@ -1,8 +1,8 @@
 # InkWeaver-CLI HTTP API 接口文档
 
-> **版本**: v6.3.0  
+> **版本**: v6.5.8  
 > **基础路径**: `http://localhost:8000`  
-> **启动方式**: `inkweaver serve`
+> **启动方式**: `inkweaver serve`（或 `python -m server.main`）
 
 ---
 
@@ -34,6 +34,8 @@ InkWeaver HTTP API 基于 FastAPI 构建，为 GUI 前端和第三方客户端�
 - 书签式路径参数 `{book}` 标识工作区
 - SSE 长连接推送 Agent 实时事件
 - 配置和模型管理通过 HTTP API 完成
+- `GET /api/health` 健康检查（桌面端端口探测用，返回 `{"status":"ok","app":"InkWeaver"}`）
+- 生产模式自动托管前端静态文件（`frontend/dist/`，HTML 路由回退到 index.html）
 
 ### Content-Type
 
@@ -171,6 +173,65 @@ Content-Type: application/json
   "ok": true
 }
 ```
+
+---
+
+### 重命名工作区
+
+```http
+POST /api/books/rename
+Content-Type: application/json
+
+{
+  "name": "旧名称",
+  "new_name": "新名称"
+}
+```
+
+**请求体**:
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `name` | string | 是 | 旧工作区名称 |
+| `new_name` | string | 是 | 新工作区名称（仅中文、字母、数字、下划线、连字符） |
+
+**响应示例**:
+
+```json
+{
+  "ok": true,
+  "name": "新名称"
+}
+```
+
+若重命名的是当前打开的工作区，服务器会自动重绑 Agent 与 SessionManager。
+
+**可能的错误**:
+
+| HTTP 状态码 | 说明 |
+|-------------|------|
+| 400 | 新名称非法或已存在 |
+| 404 | 工作区不存在 |
+
+---
+
+### 删除工作区
+
+```http
+DELETE /api/books/{name}
+```
+
+> ⚠️ **危险操作**：删除整个工作区目录（含 wiki.db），前端需二次确认。
+
+**响应示例**:
+
+```json
+{
+  "ok": true
+}
+```
+
+若删除的是当前工作区，服务器自动关闭 Agent 并清空会话状态。
 
 ---
 
@@ -462,10 +523,16 @@ POST /api/chat/compact?session_id=sess_xxx
 ### 获取上下文占用
 
 ```http
-GET /api/chat/context
+GET /api/chat/context?session_id=sess_xxx
 ```
 
-**响应示例**:
+**Query 参数** (v6.5.4+):
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | 否 | 指定会话（默认当前会话）；无会话时返回基础统计 |
+
+**响应示例**（v6.5.4+，含会话级 token 统计）:
 
 ```json
 {
@@ -473,9 +540,22 @@ GET /api/chat/context
   "message_count": 15,
   "input_tokens": 45000,
   "output_tokens": 12000,
-  "total_tokens": 57000
+  "total_tokens": 57000,
+  "saved_input": 40000,
+  "saved_output": 11000,
+  "saved_total": 51000,
+  "runtime_input": 5000,
+  "runtime_output": 1000,
+  "model_usage": {
+    "deepseek-v4-flash": {
+      "input": 45000,
+      "output": 12000
+    }
+  }
 }
 ```
+
+字段说明：`saved_*` 为该会话历史落盘统计（`session_manager.save_usage` 持久化），`runtime_*` 为当前任务未结束部分的实时增量，前端按 `saved + runtime` 叠加展示。
 
 ---
 
@@ -566,7 +646,7 @@ GET /api/books/{book}/wiki/{name}
 }
 ```
 
-词条不存在时返回 `{}`。
+词条不存在时返回 `{}`（v6.5.x：未命中时自动回退查询规则/剧情卡片，供详情页复用）。
 
 ---
 
@@ -834,6 +914,32 @@ Content-Type: application/json
 
 ---
 
+### 终止妙笔任务
+
+```http
+POST /api/muse/stop
+```
+
+立即终止当前妙笔任务（v6.5.6+）：流式循环即时打断 + 挂起的确认请求立即唤醒并拒绝。
+
+**响应示例**:
+
+```json
+{
+  "ok": true
+}
+```
+
+**可能的错误**:
+
+| HTTP 状态码 | `detail` | 说明 |
+|-------------|----------|------|
+| 404 | `"妙笔任务未在运行"` | 当前无运行中的任务 |
+
+终止后 SSE 会收到 `task_done`（`stopped` 标记），前端据此回到可编辑状态。
+
+---
+
 ### 获取妙笔运行状态
 
 ```http
@@ -979,6 +1085,41 @@ DELETE /api/settings/models/{model_id}
 
 ---
 
+### 模型连通性测试
+
+```http
+POST /api/settings/models/{model_id}/test
+```
+
+使用该模型配置发起一次最小请求（`max_tokens=5`，不带 thinking 参数，兼容所有 OpenAI 兼容供应商），用于验证 api_key / base_url / model 是否可用。
+
+**响应示例**（成功）:
+
+```json
+{
+  "ok": true,
+  "message": "连接成功",
+  "model": "deepseek-v4-flash"
+}
+```
+
+**响应示例**（失败，返回 200 而非 500）:
+
+```json
+{
+  "ok": false,
+  "error": "401 Unauthorized ..."
+}
+```
+
+**可能的错误**:
+
+| HTTP 状态码 | 说明 |
+|-------------|------|
+| 404 | 模型不存在 |
+
+---
+
 ### 获取模型分配
 
 ```http
@@ -1015,6 +1156,26 @@ Content-Type: application/json
 
 {
   "model_id": "model_002"
+}
+```
+
+---
+
+### 获取工作区存储大小
+
+```http
+GET /api/settings/workspace/size
+```
+
+计算工作区根目录（`config.workspace.dir`）下所有文件总大小。
+
+**响应示例**:
+
+```json
+{
+  "ok": true,
+  "bytes": 125829120,
+  "dir": "D:\\Code\\InkWeaver-CLI-workspace\\workingArea"
 }
 ```
 
@@ -1121,10 +1282,11 @@ data: {"type":"token","data":{"data":{"id":123,"text":"林"}},"source":"jianzhi"
 | `tool_call` | 工具调用 | `{"name": "read_wiki", "args": {...}}` |
 | `tool_result` | 工具结果 | `{"name": "read_wiki", "result": {...}}` |
 | `step_change` | 妙笔步骤切换 | `{"step": 2, "name": "知识准备"}` |
+| `muse_edits` | 妙笔修改轮编辑标注（v6.5.8+） | `{"edits": [{"tool": "rewrite_paragraph", "old_text": "...", "new_text": "..."}]}` |
 | `plan_ready` | 提取计划生成 | `{"plan": [...]}` |
 | `confirm_request` | 需要用户确认 | `{"confirm_id": "uuid", "confirm_type": "plan", "payload": {...}}` |
 | `confirm_resolved` | 确认已响应 | `{"confirm_id": "uuid"}` |
-| `token_stats` | Token 用量更新 | `{"input": 100, "output": 50}` |
+| `token_stats` | Token 用量更新（v6.5.4+ 带会话与任务增量） | `{"input": 100, "output": 50, "session_id": "sess_xxx", "delta": {"input": 30, "output": 10, "total": 40}}` |
 | `task_start` | 任务开始 | `{}` |
 | `task_done` | 任务完成 | `{"session_id": "sess_xxx"}` |
 | `error` | 错误 | `{"text": "错误描述"}` |
@@ -1181,6 +1343,7 @@ data: {"type":"token","data":{"data":{"id":123,"text":"林"}},"source":"jianzhi"
 | `"非法工作区名"` | 名称包含特殊字符 | 仅使用中文、字母、数字、下划线、连字符 |
 | `"路径超出工作区范围"` | 路径遍历攻击防护 | 使用合法工作区名 |
 | `"模型 xxx 不存在"` | 模型 ID 错误 | 先调用 `/api/settings/models` 获取有效 ID |
+| `"妙笔任务未在运行"` | 无运行中的妙笔任务 | 先调用 `/api/muse/start` |
 
 ### Agent 运行时错误
 
@@ -1278,6 +1441,18 @@ curl http://localhost:8000/api/books/我的小说/wiki
 curl -X POST http://localhost:8000/api/muse/start \
   -H "Content-Type: application/json" \
   -d '{"outline":"本章剧情...","chapter_num":51}'
+
+# 终止妙笔
+curl -X POST http://localhost:8000/api/muse/stop
+
+# 健康检查
+curl http://localhost:8000/api/health
+
+# 模型连通性测试
+curl -X POST http://localhost:8000/api/settings/models/model_001/test
+
+# 工作区存储大小
+curl http://localhost:8000/api/settings/workspace/size
 ```
 
 ### 典型调用流程
@@ -1293,4 +1468,4 @@ curl -X POST http://localhost:8000/api/muse/start \
 
 ---
 
-*文档生成时间: 2026-07-30*
+*文档生成时间: 2026-08-03*

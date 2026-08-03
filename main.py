@@ -6,6 +6,7 @@ import typer
 from commands.workspace import app as workspace_app
 from commands.chapter import app as chapter_app
 from commands.kb import app as kb_app
+from commands.settings import app as settings_app
 from commands.chat import chat
 from commands.ask import ask
 from commands.extract import extract
@@ -22,6 +23,7 @@ app = typer.Typer(
 app.add_typer(workspace_app, name="workspace", help="工作区管理")
 app.add_typer(chapter_app, name="chapter", help="章节管理")
 app.add_typer(kb_app, name="kb", help="知识库查询（wiki/rule/plot）")
+app.add_typer(settings_app, name="settings", help="配置管理（模型/分配）")
 
 # 注册顶级命令
 app.command(name="chat")(chat)

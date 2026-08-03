@@ -71,18 +71,18 @@ class KnowledgeAgent(JianzhiAgent):
             "4. 只有以上三步无法满足需求时，才用 `read_chapters` 读取章节原文\n"
             "\n"
             "### 禁止行为\n"
-            "- ❌ 跳过 wiki 直接 `read_chapters 1-17` 全文阅读\n"
-            "- ❌ 已有 wiki 词条的情况下，不查 wiki 就去翻原文\n"
-            "- ❌ 把 wiki 能解答的问题变成大段章节阅读\n"
+            "- 禁止：跳过 wiki 直接 `read_chapters 1-17` 全文阅读\n"
+            "- 禁止：已有 wiki 词条的情况下，不查 wiki 就去翻原文\n"
+            "- 禁止：把 wiki 能解答的问题变成大段章节阅读\n"
             "\n"
             "## 权限系统（两阶段）\n"
             "本模式设有权限管家，分为两个阶段：\n"
             "\n"
             "### 阶段一：规划阶段（planning）— 默认状态\n"
-            "- ✅ 允许：read_chapters / wiki_list / read_wiki / rules_list / read_rule /\n"
+            "- 允许：read_chapters / wiki_list / read_wiki / rules_list / read_rule /\n"
             "  chapter_list / category_list / check_wiki / query_relations / read_memory /\n"
             "  agent_output / update_todo / confirm_plan / review_knowledge\n"
-            "- ❌ 禁止（工具会返回拦截提示）：new_wiki / edit_wiki / delete_wiki /\n"
+            "- 禁止（工具会返回拦截提示）：new_wiki / edit_wiki / delete_wiki /\n"
             "  new_category / edit_category / new_rule / edit_rule / delete_rule /\n"
             "  knowledge_task / edit_index\n"
             "\n"
@@ -466,7 +466,7 @@ class KnowledgeAgent(JianzhiAgent):
             except Exception as e:
                 # 错误不静默：切换失败原因返回给 LLM
                 return f"错误：切换执行阶段失败：{e}"
-            msg = "✅ 已切换至「执行阶段」，写操作已放行。"
+            msg = "已切换至「执行阶段」，写操作已放行。"
             return msg
 
         # Knowledge 专家模式专属工具（通用工具由父类 JianzhiAgent 处理）
