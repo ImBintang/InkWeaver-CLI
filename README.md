@@ -2,9 +2,33 @@
 
 > **让 AI 成为你的创作伙伴：一部小说从导入、建库到智能写作，全流程自动化。**
 
-**墨笔（InkWeaver）** 是面向网文作者的 LLM Agent 写作工具，终端即工作台。它不只帮你写——它先**读懂**你的小说：自动提取人物、势力、功法、剧情线，构建可查询、可关联、可演进的知识库；再基于这份"世界记忆"，与你对话答疑、按大纲续写章节，并以审阅循环保证质量。
+**墨笔（InkWeaver）** 是面向网文作者的 LLM Agent 写作工具。它不只帮你写——它先**读懂**你的小说：自动提取人物、势力、功法、剧情线，构建可查询、可关联、可演进的知识库；再基于这份"世界记忆"，与你对话答疑、按大纲续写章节，并以审阅循环保证质量。
 
-当前版本：**v6.5.8**（事件总线架构 · FastAPI 后端 · 妙笔四步写作工作流）
+当前版本：**v7.0.0**（MCP 服务器 · 三通路接入 · 事件总线架构 · 妙笔四步写作工作流）
+
+---
+
+## 三种接入方式（v7.0.0）
+
+v7.0.0 起，InkWeaver 的全部能力通过三条通路对外提供，任选其一或组合使用：
+
+| 通路 | 启动命令 | 面向场景 | 文档 |
+|------|----------|----------|------|
+| **CLI** | `inkweaver chat / ask / extract / muse ...` | 终端工作台，作者直接使用 | [README-CLI.md](README-CLI.md) |
+| **HTTP API** | `inkweaver serve` | GUI 桌面端 / 第三方客户端（RESTful + SSE） | [README-API.md](README-API.md) |
+| **MCP Server** | `inkweaver mcp` | 任意支持 MCP 的 Agent（Qoder / Claude Desktop / Cursor 等）即插即用 | [README-MCP.md](README-MCP.md) |
+
+三条通路共用同一套核心（鉴知 Agent、妙笔工作流、SQLite 知识库），行为一致、数据互通。
+
+```
+                    ┌──────────────┐
+   终端作者 ──CLI──►│              │
+                    │  InkWeaver   │──► SQLite 知识库（wiki/rule/plot/memory）
+  GUI/客户端 ─API──►│  核心引擎     │──► 章节库 / 草稿 / 会话
+                    │              │
+  coding Agent─MCP─►│              │──► 妙笔产物目录（muse/）
+                    └──────────────┘
+```
 
 ---
 
@@ -18,6 +42,7 @@
 | **关系网络** | `[[双链]]` 自动构建实体关系图，断链自动检测并按重要性分级处理 |
 | **持久记忆** | 偏好/观察/纠正/风格四类结构化记忆，Agent 可读可写，越用越懂你 |
 | **HTTP API** | 内置 FastAPI 服务 + SSE 流式事件，为 GUI 桌面端与第三方客户端提供能力 |
+| **MCP Server** | 31 个 MCP 工具 + 4 个标准 Agent Skills 包，任意 coding Agent 即插即用（v7.0.0） |
 
 ---
 
@@ -81,6 +106,24 @@ inkweaver chat -w 我的小说
 
 > 提示：`--yes` 跳过确认进入全自动模式；去掉后每个关键步骤（提取计划、写作大纲）都会先征求你的意见。
 
+### 4. 接入 coding Agent（v7.0.0 新增）
+
+以 Qoder 为例，在 `%APPDATA%\QoderCN\SharedClientCache\mcp.json` 注册：
+
+```json
+{
+  "mcpServers": {
+    "inkweaver": {
+      "command": "<python 解释器绝对路径>",
+      "args": ["main.py", "mcp"],
+      "cwd": "<InkWeaver-CLI 目录绝对路径>"
+    }
+  }
+}
+```
+
+之后在 Qoder 中直接说"帮我给《补天纪》续写一章"即可。完整指南见 [README-MCP.md](README-MCP.md)。
+
 ---
 
 ## 系统架构
@@ -89,94 +132,8 @@ inkweaver chat -w 我的小说
 
 **线程模型与确认机制：**
 
-- `Thread-Main` 用户输入 / UI 交互；`Thread-Agent` Agent 主循环（工具调用天然串行）；`Thread-Consumer` 事件消费（CLI 打印 / GUI 推送）
-- Agent 需要决策时通过 `bus.request_confirm()` 阻塞等待，消费线程把确认请求展示给用户，响应后唤醒 Agent——**每一步关键操作都由你把关**
-
----
-
-## 命令体系
-
-```
-inkweaver
-├── chat                        # 进入鉴知对话 REPL（自然语言 + 斜杠指令）
-├── ask <question>              # 单轮提问（完整 Agent loop）
-├── extract                     # 单轮知识提取（规划 → 确认 → 执行 → 审阅）
-├── muse                        # 单轮妙笔写作（大纲 → 知识准备 → 写作 → 审阅）
-├── serve                       # 启动 FastAPI HTTP 后端（端口 8000）
-│
-├── workspace                   # 工作区管理
-│   ├── list                    # 列出所有工作区
-│   ├── switch <name>           # 切换
-│   ├── create <name>           # 新建并切换
-│   ├── rename <name>           # 重命名
-│   ├── delete                  # 删除
-│   └── move <path>             # 迁移目录
-│
-├── chapter                     # 章节管理
-│   ├── import <path>           # 导入小说文件（自动分章）
-│   ├── list                    # 列出章节号 + 标题
-│   ├── show <num>              # 查看某章内容
-│   ├── export                  # 合并导出 txt
-│   └── status                  # 章节处理状态
-│
-└── kb                          # 知识库查询（wiki / rule / plot / memory 四合一）
-    ├── list                    # 列出条目
-    ├── show <name>             # 查看详情
-    ├── categories              # 类别列表
-    ├── relation <name>         # 关联查询
-    └── memory [--category]     # 查看记忆
-```
-
-### 通用 Flag
-
-| Flag | 短写 | 适用范围 | 作用 |
-|------|------|---------|------|
-| `--json` | | 所有命令 | 输出机器可读 JSON（脚本/管道友好） |
-| `--yes` | `-y` | extract, muse, chapter import/export, workspace delete | 跳过交互确认 |
-| `--workspace` | `-w` | 所有命令 | 指定工作区名 |
-
-### 命令专属 Flag
-
-| 命令 | Flag | 说明 |
-|------|------|------|
-| `extract` | `--chapters <range>` | 手动指定范围如 `21-30`，默认自动计算 |
-| `muse` | `--outline-file <path>` | 大纲文件路径（必填） |
-| `muse` | `--chapter / -c <num>` | 指定创作章节号，默认最新章节 + 1 |
-| `chapter import` | `--append` | 增量导入（不覆盖已有章节） |
-| `chapter list` | `-n <num>` | 显示最新 N 章（默认 50） |
-| `kb list` | `--type <wiki\|plot\|rule>` | 按类型过滤 |
-| `kb list` | `--category <name>` | 按类别过滤 |
-| `kb memory` | `--category <name>` | 按分类过滤记忆（preference/observation/correction/style） |
-
----
-
-## Chat 模式：自然语言工作台
-
-`inkweaver chat` 进入鉴知对话 REPL。直接问自然语言即可——它会自动调用工具查章节、查词条、查关系；同时支持斜杠指令：
-
-```
-会话控制：
-  /exit              退出
-  /help              帮助
-  /clear             清空上下文
-  /compact           压缩上下文
-  /context           上下文占用报告
-  /token             token 用量统计
-
-快速查询：
-  /chapters [-n]     章节列表
-  /show <num>        查看章节
-  /status            处理状态
-  /wiki <name>       查看词条
-  /rule [name]       查看规则
-  /relation <name>   查询关联
-  /memory            查看记忆
-
-操作：
-  /extract           触发知识提取
-  /remember <text>   写入偏好记忆
-  /forget <id>       软删除记忆
-```
+- `Thread-Main` 用户输入 / UI 交互；`Thread-Agent` Agent 主循环（工具调用天然串行）；`Thread-Consumer` 事件消费（CLI 打印 / GUI 推送 / MCP 进度轨迹）
+- Agent 需要决策时通过 `bus.request_confirm()` 阻塞等待，消费侧把确认请求展示给用户（CLI 交互 / GUI 卡片 / MCP `task_confirm`），响应后唤醒 Agent——**每一步关键操作都由你把关**
 
 ---
 
@@ -221,25 +178,6 @@ Agent 工具：`memory_query` / `memory_write` / `memory_update` / `memory_forge
 
 ---
 
-## HTTP API（供 GUI 与第三方客户端使用）
-
-`inkweaver serve` 启动 FastAPI 后端，同时托管前端静态文件（前后端一体化）：
-
-| 模块 | 接口 | 说明 |
-|------|------|------|
-| 工作区 | `/api/books` | 列出/创建/重命名/删除/打开，章节与草稿 CRUD |
-| 对话 | `/api/chat` | 发送消息、响应确认、压缩上下文、上下文占用 |
-| 会话 | `/api/sessions` | 会话 CRUD、激活、归档、token 统计 |
-| 妙笔 | `/api/muse` | 启动/终止写作工作流、运行状态 |
-| 知识库 | `/api/knowledge` | 类别、wiki 词条、规则、剧情卡片 |
-| 设置 | `/api/settings` | 配置、模型管理、角色分配、连通性测试 |
-| 统计 | `/api/stats` | Token 消耗汇总与历史 |
-| 事件流 | `/api/events/stream` | SSE 长连接推送 Agent 实时事件 |
-
-完整接口文档见 [API.md](API.md)。
-
----
-
 ## 工作区结构
 
 ```
@@ -268,6 +206,7 @@ workingArea/
 | Token 估算 | tiktoken（cl100k_base） |
 | 事件总线 | queue.Queue + threading.Event（线程安全，批量发射防风暴） |
 | HTTP 服务 | FastAPI + uvicorn + SSE |
+| MCP 服务 | mcp SDK（FastMCP，stdio / streamable-http，v7.0.0） |
 | GUI | PyWebView + Vue 3（独立仓库 [InkWeaver-GUI](../InkWeaver-GUI)） |
 
 ---
@@ -278,12 +217,13 @@ workingArea/
 InkWeaver-CLI/
 ├── main.py                 # typer app 入口
 ├── commands/               # 子命令实现
-│   ├── workspace.py / chapter.py / kb.py
+│   ├── workspace.py / chapter.py / kb.py / settings.py
 │   ├── chat.py             # chat REPL + 事件消费
 │   ├── ask.py / extract.py / muse_cmd.py
-│   └── serve.py            # FastAPI 启动
+│   ├── serve.py            # FastAPI 启动
+│   └── mcp_cmd.py          # MCP Server 启动（v7.0.0）
 ├── core/                   # 核心层
-│   ├── events.py           # EventBus + StreamBatcher（v6.5.7）
+│   ├── events.py           # EventBus + StreamBatcher
 │   ├── io.py               # IOChannel 统一 I/O 通道
 │   ├── output.py           # OutputFormatter（人类/JSON 双模式）
 │   └── session.py          # SessionLogger 会话日志
@@ -300,7 +240,8 @@ InkWeaver-CLI/
 │   ├── writing_workflow.py # 写作工作流（max_tokens 硬约束）
 │   ├── knowledge_task.py / plot_task.py / review.py   # Subagent
 │   └── knowledge_workflow.py / plot_workflow.py       # 知识准备工作流
-├── skills/                 # Skill 文件（注入 system prompt）
+├── skills/                 # 内部 Skill 文件（注入 system prompt）
+├── skills-agent/           # 对外 Agent Skills 包（开放标准，v7.0.0）
 ├── muse/                   # 妙笔子包
 │   ├── agent.py            # MuseAgent 工具分发 + 版本硬切
 │   ├── workflow.py         # 四步写作状态机（WRITE_MAX_TOKENS）
@@ -309,6 +250,13 @@ InkWeaver-CLI/
 │   ├── main.py             # 应用实例 + 静态托管 + 健康检查
 │   ├── state.py / sse.py   # 全局状态 / SSE 推送
 │   └── router/             # books/chat/muse/knowledge/sessions/settings/stats
+├── mcp_server/             # MCP Server（v7.0.0 新增）
+│   ├── context.py          # 配置加载 + 工作区解析
+│   ├── tasks.py            # 异步任务注册表（TaskManager）
+│   ├── tools_read.py       # 16 个只读工具
+│   ├── tools_write.py      # 6 个写操作工具
+│   ├── tools_agent.py      # 3 个子智能体任务 + 6 个任务管理工具
+│   └── server.py           # FastMCP 组装 + 传输启动
 ├── api.py                  # LLMClient（chat/chat_stream，支持 max_tokens）
 ├── Jianzhi.py              # 鉴知 Agent
 └── pyproject.toml          # 包定义 + entry_points
@@ -327,10 +275,13 @@ InkWeaver-CLI/
 | v6.2 | FastAPI 后端迁移（HTTP API、SSE 流式） |
 | v6.3 | Code Review 全量修复 + 安全加固 |
 | v6.5.x | 前后端联动迭代：确认卡片、实时评分、token 按会话隔离、知识准备两步视图、写作链路质量加固、事件风暴治理、修改标注 |
+| **v7.0.0** | **MCP 服务器改造**：31 个 MCP 工具（只读/写/子智能体三层）+ 异步任务模型 + 4 个标准 Agent Skills 包；README 拆分为 CLI/API/MCP 三版（原 API.md 内容融入 README-API.md） |
 
 ---
 
 ## 相关项目
 
 - [InkWeaver-GUI](../InkWeaver-GUI) — 墨笔桌面端 / Web 界面（青花瓷·水墨风），基于本仓库 FastAPI 后端
-- [API 文档](API.md) — HTTP 接口完整参考
+- [README-CLI.md](README-CLI.md) — CLI 完整使用手册
+- [README-API.md](README-API.md) — HTTP API 接口完整参考（含原 API.md 全部内容）
+- [README-MCP.md](README-MCP.md) — MCP Server 接入指南与工具清单

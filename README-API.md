@@ -1,8 +1,10 @@
-# InkWeaver-CLI HTTP API 接口文档
+# InkWeaver-CLI HTTP API 接口文档（API 版 README）
 
-> **版本**: v6.5.8  
-> **基础路径**: `http://localhost:8000`  
+> **版本**: v7.0.0 ｜ 通路：**HTTP API** ｜ 其他通路：[CLI](README-CLI.md) · [MCP Server](README-MCP.md)
+> **基础路径**: `http://localhost:8000`
 > **启动方式**: `inkweaver serve`（或 `python -m server.main`）
+
+> 本文档由原 `API.md` 融入升级而来，是 HTTP API 的唯一权威参考。
 
 ---
 
@@ -22,6 +24,7 @@
 - [SSE 事件流](#sse-事件流)
 - [常见报错](#常见报错)
 - [数据模型速查](#数据模型速查)
+- [快速调用示例](#附录快速调用示例)
 
 ---
 
@@ -526,13 +529,13 @@ POST /api/chat/compact?session_id=sess_xxx
 GET /api/chat/context?session_id=sess_xxx
 ```
 
-**Query 参数** (v6.5.4+):
+**Query 参数**:
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `session_id` | string | 否 | 指定会话（默认当前会话）；无会话时返回基础统计 |
 
-**响应示例**（v6.5.4+，含会话级 token 统计）:
+**响应示例**（含会话级 token 统计）:
 
 ```json
 {
@@ -646,7 +649,7 @@ GET /api/books/{book}/wiki/{name}
 }
 ```
 
-词条不存在时返回 `{}`（v6.5.x：未命中时自动回退查询规则/剧情卡片，供详情页复用）。
+词条不存在时返回 `{}`（未命中时自动回退查询规则/剧情卡片，供详情页复用）。
 
 ---
 
@@ -920,7 +923,7 @@ Content-Type: application/json
 POST /api/muse/stop
 ```
 
-立即终止当前妙笔任务（v6.5.6+）：流式循环即时打断 + 挂起的确认请求立即唤醒并拒绝。
+立即终止当前妙笔任务：流式循环即时打断 + 挂起的确认请求立即唤醒并拒绝。
 
 **响应示例**:
 
@@ -1282,11 +1285,11 @@ data: {"type":"token","data":{"data":{"id":123,"text":"林"}},"source":"jianzhi"
 | `tool_call` | 工具调用 | `{"name": "read_wiki", "args": {...}}` |
 | `tool_result` | 工具结果 | `{"name": "read_wiki", "result": {...}}` |
 | `step_change` | 妙笔步骤切换 | `{"step": 2, "name": "知识准备"}` |
-| `muse_edits` | 妙笔修改轮编辑标注（v6.5.8+） | `{"edits": [{"tool": "rewrite_paragraph", "old_text": "...", "new_text": "..."}]}` |
+| `muse_edits` | 妙笔修改轮编辑标注 | `{"edits": [{"tool": "rewrite_paragraph", "old_text": "...", "new_text": "..."}]}` |
 | `plan_ready` | 提取计划生成 | `{"plan": [...]}` |
 | `confirm_request` | 需要用户确认 | `{"confirm_id": "uuid", "confirm_type": "plan", "payload": {...}}` |
 | `confirm_resolved` | 确认已响应 | `{"confirm_id": "uuid"}` |
-| `token_stats` | Token 用量更新（v6.5.4+ 带会话与任务增量） | `{"input": 100, "output": 50, "session_id": "sess_xxx", "delta": {"input": 30, "output": 10, "total": 40}}` |
+| `token_stats` | Token 用量更新（带会话与任务增量） | `{"input": 100, "output": 50, "session_id": "sess_xxx", "delta": {"input": 30, "output": 10, "total": 40}}` |
 | `task_start` | 任务开始 | `{}` |
 | `task_done` | 任务完成 | `{"session_id": "sess_xxx"}` |
 | `error` | 错误 | `{"text": "错误描述"}` |
@@ -1468,4 +1471,6 @@ curl http://localhost:8000/api/settings/workspace/size
 
 ---
 
-*文档生成时间: 2026-08-03*
+*文档更新时间: 2026-08-04（v7.0.0，由原 API.md 融入升级）*
+
+

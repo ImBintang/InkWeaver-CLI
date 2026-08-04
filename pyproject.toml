@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"  # v6.3.1: 原值 setuptools.backends._l
 
 [project]
 name = "inkweaver-cli"
-version = "6.3.1"
+version = "7.0.0"
 description = "InkWeaver-CLI 小说知识库与写作辅助工具"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",
+    "mcp>=1.9,<2.0",
 ]
 
 [project.scripts]

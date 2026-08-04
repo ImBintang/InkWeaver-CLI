@@ -12,6 +12,7 @@ from commands.ask import ask
 from commands.extract import extract
 from commands.muse_cmd import muse
 from commands.serve import serve
+from commands.mcp_cmd import mcp
 
 app = typer.Typer(
     name="inkweaver",
@@ -31,6 +32,7 @@ app.command(name="ask")(ask)
 app.command(name="extract")(extract)
 app.command(name="muse")(muse)
 app.command(name="serve")(serve)
+app.command(name="mcp")(mcp)
 
 
 def app_entry():

@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="InkWeaver Server", version="6.3.1", lifespan=lifespan)
+app = FastAPI(title="InkWeaver Server", version="7.0.0", lifespan=lifespan)
 
 
 # ─── 领域异常 → HTTP 响应 ────────────────────────────────────────
