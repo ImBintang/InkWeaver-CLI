@@ -1,11 +1,12 @@
 # InkWeaver-CLI MCP Server 接入指南（MCP 版 README）
 
-> **版本**: v7.0.0 ｜ 通路：**MCP Server** ｜ 其他通路：[CLI](README-CLI.md) · [HTTP API](README-API.md)
+> **版本**: v7.1.0 ｜ 通路：**MCP Server** ｜ 其他通路：[CLI](README-CLI.md) · [HTTP API](README-API.md)
 
-InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理、鉴知问答、
-知识提取、妙笔写作）以 **Model Context Protocol** 工具的形式暴露，
-任何支持 MCP 的 Agent 应用（Qoder、Claude Desktop、Cursor 等）都能即插即用，
-把 InkWeaver 当作"小说知识库 + 写作子智能体"接入自己的工作流。
+InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理、知识写入、
+鉴知问答、知识提取、妙笔写作）以 **Model Context Protocol** 工具的形式暴露，
+任何支持 MCP 的 Agent 应用（Qoder、Claude Desktop、Cursor 等）都能即插即用。
+支持双模式：**外部编排模式**（宿主编排 LLM 自己推理，经知识写工具落库，
+不依赖内置 api_key）与**内部任务模式**（鉴知/妙笔子智能体代劳，需内置 api_key）。
 
 ---
 
@@ -14,7 +15,8 @@ InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理�
 - [快速接入（Qoder）](#快速接入qoder)
 - [其他客户端接入](#其他客户端接入)
 - [启动参数](#启动参数)
-- [工具清单（31 个）](#工具清单31-个)
+- [工具清单（40 个）](#工具清单40-个)
+- [知识写工具与持久化契约](#知识写工具与持久化契约)
 - [异步任务协议](#异步任务协议)
 - [确认机制](#确认机制)
 - [Agent Skills 技能包](#agent-skills-技能包)
@@ -45,7 +47,7 @@ InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理�
      客户端会报 `transport error: context deadline exceeded`）；
      或将 `args` 中的 `main.py` 改为绝对路径作为双保险
 
-2. 重启 Qoder（或在 MCP 设置页启用 `inkweaver`），工具列表出现 31 个
+2. 重启 Qoder（或在 MCP 设置页启用 `inkweaver`），工具列表出现 40 个
    `inkweaver` 前缀工具即接入成功。
 
 3. 直接在对话中使用，例如：
@@ -107,13 +109,13 @@ inkweaver mcp [-w 工作区] [-t stdio|streamable-http] [--host H] [--port P]
 
 ---
 
-## 工具清单（31 个）
+## 工具清单（40 个）
 
 ### 第 1 层：只读查询（16 个，同步，零 LLM 成本）
 
 | 工具 | 说明 |
 |------|------|
-| `server_info` | 服务器版本、绑定工作区、传输信息 |
+| `server_info` | 服务器版本、绑定工作区、**llm_ready**（内置 LLM 可用性，决定子智能体任务能否使用） |
 | `list_workspaces` | 列出所有书籍工作区 |
 | `chapter_list(n)` | 章节清单（默认最新 50 章） |
 | `chapter_status` | 章节处理状态（已导入/已提取进度） |
@@ -141,7 +143,21 @@ inkweaver mcp [-w 工作区] [-t stdio|streamable-http] [--host H] [--port P]
 | `memory_write` | 写入作者记忆（偏好/风格等） |
 | `memory_forget` | 软删除记忆 |
 
-### 第 3 层：子智能体任务（3 个启动 + 6 个任务管理，异步）
+### 第 3 层：知识写工具（9 个，外部编排模式核心，同步）
+
+宿主编排 LLM 自己做提取/写作推理后经这组工具落库，不依赖内置 api_key。
+
+| 工具 | 说明 |
+|------|------|
+| `category_create(name, description, writing_guide, has_state)` | 建词条类别（立即生效，无需 commit） |
+| `kb_create(category, name, content, ...)` | 新建 wiki 词条（暂存缓存） |
+| `kb_edit(name, ...)` | 编辑词条（字段级更新，暂存缓存） |
+| `rule_create(name, content)` / `rule_edit` | 世界观规则文档（暂存缓存） |
+| `plot_create(name, chapters, ...)` / `plot_edit` | 剧情卡片/伏笔（暂存缓存） |
+| `plot_end(name, end_notes)` | 结束剧情卡片 |
+| `kb_commit(chapters)` | 【关键】统一提交：校验+版本快照落库+标记章节已处理+lint |
+
+### 第 4 层：子智能体任务（3 个启动 + 6 个任务管理，异步，依赖内置 api_key）
 
 | 工具 | 说明 |
 |------|------|
@@ -156,6 +172,23 @@ inkweaver mcp [-w 工作区] [-t stdio|streamable-http] [--host H] [--port P]
 | `task_list` | 全部任务总览 |
 
 所有需要工作区的工具都带可选 `workspace` 参数，缺省走解析优先级。
+
+---
+
+## 知识写工具与持久化契约
+
+知识写工具采用与内部鉴知一致的两段式持久化：
+
+1. **暂存**：`kb_create`/`kb_edit`/`rule_*`/`plot_*`/`plot_end` 只写 proxy 缓存，
+   对 `kb_show` 等读工具已可见，但尚未写入 DB 版本。
+2. **提交**：一批写入完成后调 `kb_commit(chapters)`：
+   - finish_task 校验条目存在性 + 写 log.json + 标记章节已处理
+   - proxy.flush 版本快照 + wikilink 关系解析
+   - lint 体检（自动修复）
+3. **失败保留**：commit 校验失败时缓存保留，修复后重新 commit 即可。
+
+外部编排模式下，计划审批由宿主 LLM 自己的用户确认能力承担，
+不再套内部 permission 审批门。
 
 ---
 
@@ -228,16 +261,20 @@ running ──► awaiting_confirmation ──► running ──► done
 ## Agent Skills 技能包
 
 `skills-agent/` 目录提供 4 个符合开放标准（agentskills.io）的 Agent Skills 包，
-把上面的工具编排成开箱即用的工作流知识：
+把上面的工具编排成开箱即用的工作流知识。每个技能均为**双模式剧本**
+（外部编排 + 内部任务），并随包附带 `GUIDE.md` 工具手册：
 
 | 技能 | 定位 |
 |------|------|
-| `inkweaver-novel-studio` | 总控入口：心智模型 + 异步任务协议 + 4 个典型工作流 |
+| `inkweaver-novel-studio` | 总控入口：双模式决策树 + 心智模型 + 持久化契约 |
 | `inkweaver-kb-query` | 只读检索：检索路径表 + wiki/rule/plot 语义（零 LLM 成本） |
-| `inkweaver-knowledge-extract` | 知识沉淀：标准流程 + forced_debt 审核 + 批量初始化 |
-| `inkweaver-muse-writing` | 章节创作：标准流程 6 步 + 半自动模式 + 失败重试 |
+| `inkweaver-knowledge-extract` | 知识沉淀：外部编排剧本（读→抽→SPEC→确认→落库→commit）+ 领域规范 |
+| `inkweaver-muse-writing` | 章节创作：外部编排剧本（知识准备→起草→审阅→chapter_write）+ 内部快捷 |
 
-**安装到 Qoder**：把 `skills-agent/<技能名>/` 复制到项目
+注意：外部技能（skills-agent/）与内部工作流技能（`skills/*.skill.md`，
+供鉴知/妙笔内部 LLM 使用）职责分离，互不混用。
+
+**安装到 Qoder**：把 `skills-agent/<技能名>/`（含 SKILL.md 与 GUIDE.md）复制到项目
 `.qoder/skills/<技能名>/`（项目级）或全局技能目录即可，
 Qoder 会按 SKILL.md frontmatter 的描述按需加载。
 
@@ -254,6 +291,8 @@ Qoder 会按 SKILL.md frontmatter 的描述按需加载。
 
 - 不抛协议级异常：错误信息可读、可自恢复（例如工作区不存在会引导先
   `list_workspaces` / `create_workspace`）。
+- api_key 占位符/缺失在 LLM 客户端初始化阶段即拦截，返回明确提示
+  （替代 httpx 的 UnicodeEncodeError 崩溃）；`server_info.llm_ready` 可提前探测。
 - `extract_knowledge` 启动前预校验章节范围（起始章 > 总章数直接报错），
   避免无效请求消耗 LLM token。
 - 取消语义：`task_cancel` 立即唤醒阻塞在确认上的工作流线程，
@@ -266,8 +305,8 @@ Qoder 会按 SKILL.md frontmatter 的描述按需加载。
 **模拟接入**（`test/test_mcp_server.py`，真实 stdio 协议握手）：
 
 ```bash
-python test/test_mcp_server.py              # 基础 31/31（握手/枚举/只读/写/错误/任务生命周期）
-python test/test_mcp_server.py --with-llm   # 含真实 LLM 38/38（鉴知问答/提取校验/妙笔启停）
+python test/test_mcp_server.py              # 基础全项（握手/枚举/只读/写/错误/任务生命周期）
+python test/test_mcp_server.py --with-llm   # 含真实 LLM（鉴知问答/提取校验/妙笔启停）
 ```
 
 **实际 e2e 接入（Qoder）**：

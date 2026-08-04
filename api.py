@@ -9,6 +9,31 @@ import httpx
 import openai
 from openai import OpenAI
 
+# api_key 占位符特征（小写匹配）——命中即视为未配置真实 key
+_PLACEHOLDER_MARKERS = (
+    "请替换", "替换为", "placeholder", "your-api", "your_api",
+    "sk-xxx", "example", "示例",
+)
+
+
+def validate_api_key(key) -> str | None:
+    """校验 api_key 是否可用。返回错误描述；None 表示通过。
+
+    v7.1.0：httpx 的 Authorization 头仅支持 ASCII，占位符（含中文）
+    会在请求编码阶段抛 UnicodeEncodeError，误导排错。
+    提前拦截并给出明确提示（issue 方案 C）。
+    """
+    if not key or not str(key).strip():
+        return "api_key 为空：请在 .env/config.yaml 中配置真实的 api_key"
+    k = str(key).strip()
+    if not k.isascii():
+        return ("api_key 含非 ASCII 字符（疑似占位符），无法用作 HTTP 认证头："
+                "请在 .env/config.yaml 中配置真实的 api_key")
+    low = k.lower()
+    if any(m in low for m in _PLACEHOLDER_MARKERS):
+        return ("api_key 疑似占位符：请在 .env/config.yaml 中配置真实的 api_key")
+    return None
+
 
 def _is_proxy_available(proxy: str) -> bool:
     """测试代理服务是否可用
@@ -109,6 +134,11 @@ class LLMClient:
         missing = [k for k in required_keys if k not in config or not config[k]]
         if missing:
             raise ValueError(f"LLMClient 配置缺少必填字段：{', '.join(missing)}")
+
+        # v7.1.0：占位符 key 提前拦截，替代后续 UnicodeEncodeError 崩溃
+        key_error = validate_api_key(config["key"])
+        if key_error:
+            raise ValueError(key_error)
 
         # 检测是否需要禁用代理（当代理不可用时）
         http_client = _create_http_client()

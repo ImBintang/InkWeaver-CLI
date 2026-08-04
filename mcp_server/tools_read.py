@@ -21,18 +21,35 @@ def register_read_tools(mcp, ctx: MCPContext):
 
     @mcp.tool()
     def server_info() -> dict:
-        """查看 InkWeaver MCP 服务器信息：版本、当前绑定工作区、工作区目录"""
+        """查看 InkWeaver MCP 服务器信息：版本、当前绑定工作区、工作区目录、
+        内置 LLM 可用性（决定子智能体任务工具能否使用）"""
         try:
+            from api import validate_api_key
             config = ctx.config()
             models = [{"id": m.get("id"), "model": m.get("model")}
                       for m in config.get("models", [])]
+            # v7.1.0：报告内置 LLM key 可用性，供编排者选择双模式
+            bad = [m.get("id", "?") for m in config.get("models", [])
+                   if validate_api_key(m.get("api_key", ""))]
+            llm_ready = bool(models) and not bad
+            if llm_ready:
+                llm_hint = "内置 LLM 已配置：可用 ask_jianzhi/extract_knowledge/muse_write 子智能体任务"
+            elif not models:
+                llm_hint = ("未配置任何模型：子智能体任务不可用，请用外部编排模式"
+                            "（chapter_read 读原文 + kb_create/rule_create/plot_create 落库 + kb_commit 提交）")
+            else:
+                llm_hint = (f"以下模型的 api_key 未配置或为占位符：{', '.join(bad)}。"
+                            "子智能体任务不可用，请改用外部编排模式，"
+                            "或在 .env/config.yaml 配置真实 key")
             return _ok(
-                app="InkWeaver", version="7.0.1",
+                app="InkWeaver", version="7.1.0",
                 bound_workspace=ctx.bound_workspace or "(未绑定，使用默认)",
                 current_workspace=ctx.current_workspace_name(),
                 workspaces_dir=str(ctx.workspaces_dir()),
                 models=models,
                 assignments=config.get("assignments", {}),
+                llm_ready=llm_ready,
+                llm_hint=llm_hint,
             )
         except Exception as e:
             return _err(e)

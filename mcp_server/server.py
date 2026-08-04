@@ -17,18 +17,27 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 INSTRUCTIONS = """InkWeaver 小说知识库与写作辅助系统（MCP 版）。
 
-能力分三层：
+能力分四层：
 1. 只读查询（同步）：list_workspaces / chapter_* / kb_* / lint_* / token_stats
 2. 写操作（同步，描述中标注副作用）：create_workspace / chapter_import / chapter_write 等
-3. 子智能体任务（异步）：ask_jianzhi（鉴知问答）、extract_knowledge（知识提取）、
-   muse_write（妙笔四步写作）。异步任务返回 task_id，用 task_wait/task_status 查询、
+3. 知识写工具（外部编排模式，同步）：category_create / kb_create / kb_edit /
+   rule_create / rule_edit / plot_create / plot_edit / plot_end / kb_commit。
+   宿主编排 LLM 自己做提取推理后经这组工具落库，不依赖内置 api_key。
+   契约：kb_create 等只暂存缓存，必须最后调 kb_commit(chapters) 才真正落库。
+4. 子智能体任务（异步，依赖内置 api_key）：ask_jianzhi（鉴知问答）、
+   extract_knowledge（知识提取）、muse_write（妙笔四步写作）。
+   异步任务返回 task_id，用 task_wait/task_status 查询、
    task_confirm 响应挂起确认、task_result 获取成果、task_cancel 取消。
+   先调 server_info 看 llm_ready 判断本层是否可用。
 
 推荐工作流：
 - 了解书籍：list_workspaces → chapter_status → kb_list
-- 设定考证：ask_jianzhi
-- 沉淀知识：extract_knowledge（auto_approve=false 时注意处理 awaiting_confirmation）
-- 续写章节：chapter_status（确认最新章节）→ muse_write(outline=本章大纲)
+- 外部编排沉淀知识：chapter_read 读原文 → 自行推理抽取 →
+  kb_create/rule_create/plot_create 写入 → kb_commit 提交 → lint_run 体检
+- 内置 LLM 沉淀知识：extract_knowledge（auto_approve=false 时注意处理 awaiting_confirmation）
+- 设定考证：ask_jianzhi（内置 LLM），或直接用 kb_*/chapter_* 只读工具自行检索
+- 续写章节：chapter_status（确认最新章节）→ muse_write(outline=本章大纲)，
+  或外部编排：自行起草 → chapter_write 落库
 """
 
 
@@ -40,6 +49,7 @@ def build_server(workspace: str = ""):
     from mcp_server.tasks import TaskManager
     from mcp_server.tools_read import register_read_tools
     from mcp_server.tools_write import register_write_tools
+    from mcp_server.tools_kb import register_kb_tools
     from mcp_server.tools_agent import register_agent_tools
 
     mcp = FastMCP(SERVER_NAME, instructions=INSTRUCTIONS)
@@ -48,6 +58,7 @@ def build_server(workspace: str = ""):
 
     register_read_tools(mcp, ctx)
     register_write_tools(mcp, ctx)
+    register_kb_tools(mcp, ctx)
     register_agent_tools(mcp, ctx, tasks)
     return mcp
 
