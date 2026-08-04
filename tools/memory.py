@@ -8,9 +8,14 @@ from pathlib import Path
 
 
 def _get_db(workspace: Path):
-    """获取工作区 DB 服务"""
-    from tools.db.service import SQLiteService
-    return SQLiteService(workspace / "wiki.db")
+    """获取工作区 DB 服务
+
+    P1-42：复用 editor 的共享代理连接（单例），避免每个工具调用新建独立
+    SQLite 连接与 agent flush 长事务并发触发 "database is locked" 丢记忆。
+    连接生命周期由代理管理，本模块不负责关闭。
+    """
+    from tools.editor import _get_proxy
+    return _get_proxy(workspace)._db
 
 
 # ── Agent 工具接口 ──
@@ -28,10 +33,7 @@ def memory_query(workspace: Path, category: str = None,
         格式化的记忆列表
     """
     db = _get_db(workspace)
-    try:
-        results = db.memory_query(category=category, keyword=keyword, limit=limit)
-    finally:
-        db.close()
+    results = db.memory_query(category=category, keyword=keyword, limit=limit)
 
     if not results:
         return "（无匹配记忆）"
@@ -64,11 +66,8 @@ def memory_write(workspace: Path, category: str, content: str,
         return "错误：content 不能为空"
 
     db = _get_db(workspace)
-    try:
-        memory_id = db.memory_create(category=category, content=content.strip(),
-                                     source=source, chapter=chapter)
-    finally:
-        db.close()
+    memory_id = db.memory_create(category=category, content=content.strip(),
+                                 source=source, chapter=chapter)
     return f"已写入记忆 #{memory_id}（{category}）"
 
 
@@ -83,17 +82,15 @@ def memory_update(workspace: Path, id: int, content: str = None) -> str:
         操作结果
     """
     db = _get_db(workspace)
-    try:
-        existing = db.memory_get(id)
-        if existing is None:
-            return f"错误：记忆 #{id} 不存在"
-        if not existing.get("is_active"):
-            return f"错误：记忆 #{id} 已被删除"
+    existing = db.memory_get(id)
+    if existing is None:
+        return f"错误：记忆 #{id} 不存在"
+    if not existing.get("is_active"):
+        return f"错误：记忆 #{id} 已被删除"
 
-        if content:
-            db.memory_update(id, content=content.strip())
-    finally:
-        db.close()
+    # content 为 None 表示不修改；空串可显式覆盖清空（v7.0.1 修复）
+    if content is not None:
+        db.memory_update(id, content=content.strip())
     return f"已更新记忆 #{id}"
 
 
@@ -107,14 +104,11 @@ def memory_forget(workspace: Path, id: int) -> str:
         操作结果
     """
     db = _get_db(workspace)
-    try:
-        existing = db.memory_get(id)
-        if existing is None:
-            return f"错误：记忆 #{id} 不存在"
+    existing = db.memory_get(id)
+    if existing is None:
+        return f"错误：记忆 #{id} 不存在"
 
-        db.memory_forget(id)
-    finally:
-        db.close()
+    db.memory_forget(id)
     return f"已删除记忆 #{id}"
 
 
@@ -132,13 +126,10 @@ def get_memories_for_prompt(workspace: Path, categories: list[str],
         格式化的记忆文本（为空时返回空字符串）
     """
     db = _get_db(workspace)
-    try:
-        all_memories = []
-        for cat in categories:
-            results = db.memory_query(category=cat, limit=limit)
-            all_memories.extend(results)
-    finally:
-        db.close()
+    all_memories = []
+    for cat in categories:
+        results = db.memory_query(category=cat, limit=limit)
+        all_memories.extend(results)
 
     if not all_memories:
         return ""
@@ -157,45 +148,38 @@ def read_memory(workspace: Path, name: str = None) -> str:
     v5.3: 改为从 DB 读取。name=None 时列出所有活跃记忆。
     """
     db = _get_db(workspace)
-    try:
-        if name is None or name.upper() == "MEMORY":
-            # 列出所有活跃记忆
-            results = db.memory_list_active()
-            if not results:
-                return "（暂无记忆）"
-            lines = ["# 记忆索引\n"]
-            for m in results:
-                lines.append(f"- [{m['category']}] #{m['id']}: {m['content'][:60]}")
-            return "\n".join(lines)
+    if name is None or name.upper() == "MEMORY":
+        # 列出所有活跃记忆
+        results = db.memory_list_active()
+        if not results:
+            return "（暂无记忆）"
+        lines = ["# 记忆索引\n"]
+        for m in results:
+            lines.append(f"- [{m['category']}] #{m['id']}: {m['content'][:60]}")
+        return "\n".join(lines)
 
-        # 按 ID 读取
-        try:
-            memory_id = int(name.lstrip("#"))
-            result = db.memory_get(memory_id)
-            if result is None:
-                return f"错误：记忆 #{memory_id} 不存在"
-            return (f"[{result['category']}] #{result['id']}\n"
-                    f"内容：{result['content']}\n"
-                    f"来源：{result.get('source', '未知')}\n"
-                    f"活跃：{'是' if result.get('is_active') else '否'}")
-        except ValueError:
-            # 按关键词搜索
-            results = db.memory_query(keyword=name, limit=10)
-            if not results:
-                return f"未找到匹配「{name}」的记忆"
-            lines = [f"搜索「{name}」结果："]
-            for m in results:
-                lines.append(f"- [{m['category']}] #{m['id']}: {m['content']}")
-            return "\n".join(lines)
-    finally:
-        db.close()
+    # 按 ID 读取
+    try:
+        memory_id = int(name.lstrip("#"))
+        result = db.memory_get(memory_id)
+        if result is None:
+            return f"错误：记忆 #{memory_id} 不存在"
+        return (f"[{result['category']}] #{result['id']}\n"
+                f"内容：{result['content']}\n"
+                f"来源：{result.get('source', '未知')}\n"
+                f"活跃：{'是' if result.get('is_active') else '否'}")
+    except ValueError:
+        # 按关键词搜索
+        results = db.memory_query(keyword=name, limit=10)
+        if not results:
+            return f"未找到匹配「{name}」的记忆"
+        lines = [f"搜索「{name}」结果："]
+        for m in results:
+            lines.append(f"- [{m['category']}] #{m['id']}: {m['content']}")
+        return "\n".join(lines)
 
 
 def list_memories(workspace: Path) -> list:
     """列出所有活跃记忆（向后兼容）"""
     db = _get_db(workspace)
-    try:
-        results = db.memory_list_active()
-    finally:
-        db.close()
-    return results
+    return db.memory_list_active()

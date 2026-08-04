@@ -47,6 +47,10 @@ class MuseWorkflow:
         self.workspaces_dir = workspaces_dir
         self.llm_config = config["api"]
         self.io = MuseIO(workspace)
+        # v7.0.1: P1-03 修复——CLI 传入的 IOChannel（带会话日志）此前被无视，
+        # 会话日志从未写入。保留为 self.cli 供交互输入/输出与 WritingWorkflow 日志使用；
+        # 文件落盘仍走 MuseIO（self.io）。server/MCP 场景 io=None，行为不变。
+        self.cli = io if (io is not None and hasattr(io, "logger")) else None
         # v6.5.3: 用户终止信号（服务层注入 threading.Event，步骤边界检查）
         self.stop_event = stop_event
         self.outline: str = outline_text
@@ -118,10 +122,10 @@ class MuseWorkflow:
         self._finish()
 
     def _cleanup_agents(self):
-        """停止所有已创建 Agent 的 drain 消费线程（P1-19：异常路径也必须执行）
+        """停止所有已创建 Agent 的 drain 消费线程并释放 LLM 连接（P1-19/P1-41）
 
         单个 agent 清理失败不静默：打印到 stderr（消费端：服务日志），
-        线程泄漏会导致进程句柄累积，必须可发现。
+        线程/连接泄漏会导致进程句柄累积，必须可发现。
         """
         import sys as _sys
         for agent in getattr(self, "_agents", []):
@@ -129,6 +133,12 @@ class MuseWorkflow:
                 self._stop_drain(agent)
             except Exception as e:
                 print(f"[muse] 停止 drain 线程失败（{agent}）：{e}",
+                      file=_sys.stderr)
+            # P1-41：同时释放 LLM 连接池（妙笔每轮 subagent 均新建 LLMClient）
+            try:
+                agent.close()
+            except Exception as e:
+                print(f"[muse] 关闭 Agent 连接失败（{agent}）：{e}",
                       file=_sys.stderr)
         self._agents = []
 
@@ -190,7 +200,13 @@ class MuseWorkflow:
                 raise RuntimeError(f"确认请求失败：{e}")
         print(prompt)
         try:
-            return input().strip().lower() == "y"
+            if self.cli is not None:
+                line = self.cli.read_line()
+                if line is None:
+                    raise RuntimeError("输入流已结束（EOF），无法进行人工确认，流程终止。")
+            else:
+                line = input()
+            return line.strip().lower() == "y"
         except EOFError:
             # 不静默：输入流结束不可当作“确认放行”（无 TTY 时终止流程而非自动通过）
             raise RuntimeError("输入流已结束（EOF），无法进行人工确认，流程终止。")
@@ -221,10 +237,16 @@ class MuseWorkflow:
         if prompt:
             print(prompt)
         try:
-            return input().strip()
+            if self.cli is not None:
+                line = self.cli.read_line()
+                if line is None:
+                    raise RuntimeError("输入流已结束（EOF），无法继续读取输入，流程终止。")
+            else:
+                line = input()
         except EOFError:
             # 不静默：输入流结束不可当作空输入继续（打回理由缺失会掩盖真实意图）
             raise RuntimeError("输入流已结束（EOF），无法继续读取输入，流程终止。")
+        return line.strip()
         # KeyboardInterrupt 不捕获：Ctrl+C 直接中断
 
     # ---- 工作区切换 ----
@@ -704,7 +726,8 @@ class MuseWorkflow:
             llm=LLMClient(self.llm_config),
             workspace=self.workspace,
             writer_skill_text=writer_skill_text,
-            cli=None,
+            # v7.0.1: P1-03——传入 CLI 会话通道，写作/修改轮的日志写入会话日志
+            cli=self.cli,
             bus=self.bus,  # GUI 模式注入总线：写作正文逐 token 推送前端实时展示
             # v6.5.6: 注入终止信号——写作流式循环内即时打断，不等 LLM 调用结束
             stop_event=self.stop_event,
@@ -951,18 +974,26 @@ class MuseWorkflow:
             thread.join(timeout=1.0)
 
     def _finish(self):
-        print(f"\n妙笔任务完成！")
-        print(f"输出目录：{self.io.task_dir}")
+        # v7.0.1: P1-03——json 模式下 print 污染结构化输出；走 CLI 通道时静默，
+        # 由命令层输出 JSON 摘要（workflow._token_total）
+        def _out(text: str):
+            if self.cli is not None:
+                self.cli.print_info(text)
+            else:
+                print(text)
+
+        _out(f"\n妙笔任务完成！")
+        _out(f"输出目录：{self.io.task_dir}")
         # 显示 token 统计
         if self._token_stats:
             sep = "-" * 40
-            print(f"\nToken 用量统计：")
-            print(sep)
+            _out(f"\nToken 用量统计：")
+            _out(sep)
             for step_name, stats in self._token_stats.items():
                 label = {
                     "knowledge_prep": "知识准备（先验知识）",
                     "plot_summary": "知识准备（前情提要）",
                 }.get(step_name, step_name)
-                print(f"  {label}: 输入={stats['input']}, 输出={stats['output']}, 总计={stats['total']}")
-            print(sep)
-            print(f"  总计: 输入={self._token_total['input']}, 输出={self._token_total['output']}, 总计={self._token_total['total']}")
+                _out(f"  {label}: 输入={stats['input']}, 输出={stats['output']}, 总计={stats['total']}")
+            _out(sep)
+            _out(f"  总计: 输入={self._token_total['input']}, 输出={self._token_total['output']}, 总计={self._token_total['total']}")

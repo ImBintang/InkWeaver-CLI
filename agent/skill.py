@@ -29,7 +29,13 @@ class SkillRegistry:
         if not self.skills_dir.exists():
             return
         for path in sorted(self.skills_dir.rglob("*.skill.md")):
-            meta, body = self._parse_frontmatter(path.read_text(encoding="utf-8"))
+            # v7.0.1: 非 UTF-8 技能文件不再让整个注册表加载失败，跳过并告警
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError) as e:
+                print(f"[WARN] 跳过技能文件（读取失败）{path}: {e}")
+                continue
+            meta, body = self._parse_frontmatter(text)
             name = meta.get("name", path.parent.name)
             description = meta.get("description", "No description")
             self.documents[name] = SkillDocument(

@@ -553,6 +553,7 @@ class MuseAgent(BaseAgent):
 
         if doc_type == "wiki":
             if not category:
+                db.close()
                 return "错误：wiki_list 需要提供 category 参数"
             cat = db.get_category_by_name(category)
             if cat is None:

@@ -2,9 +2,11 @@
 
 import os
 import socket
+import sys
 from urllib.parse import urlparse
 
 import httpx
+import openai
 from openai import OpenAI
 
 
@@ -121,6 +123,17 @@ class LLMClient:
         self.max_tokens = config.get("output_max_tokens", 128000)
         self.reasoning_effort = config.get("reasoning_effort", "high")
 
+    def close(self):
+        """关闭底层 HTTP 连接池，释放 socket/连接句柄
+
+        P1-41：LLMClient 持有 httpx.Client（含连接池），长期运行的服务（server/MCP）
+        频繁新建 agent 时若不关闭会持续泄漏连接句柄。关闭失败不静默。
+        """
+        try:
+            self.client.close()
+        except Exception as e:
+            print(f"[LLMClient] 关闭连接失败：{e}", file=sys.stderr)
+
     def chat(self, messages: list, system_prompt: str, tools: list = None,
               max_tokens: int | None = None, thinking: bool = True,
               reasoning_effort: str | None = None) -> dict:
@@ -165,20 +178,24 @@ class LLMClient:
             try:
                 response = self.client.chat.completions.create(**kwargs)
                 break
+            except openai.AuthenticationError as e:
+                # 认证错误：重试无意义，直接报错（按异常类型判断，避免字符串匹配误伤）
+                raise ValueError(f"API 认证失败，请检查 config.yaml 中的 key：{e}") from e
+            except (openai.BadRequestError, openai.UnprocessableEntityError) as e:
+                # 参数/格式错误：重试无意义
+                raise ValueError(f"API 请求参数错误：{e}") from e
             except Exception as e:
+                # 网络错误/服务端 5xx：可重试
                 last_error = e
-                error_msg = str(e)
-                # 认证错误、参数错误等不需要重试
-                if "api_key" in error_msg.lower() or "unauthorized" in error_msg.lower():
-                    raise ValueError(f"API 认证失败，请检查 config.yaml 中的 key：{e}") from e
-                if "invalid" in error_msg.lower() or "bad request" in error_msg.lower():
-                    raise ValueError(f"API 请求参数错误：{e}") from e
                 if attempt < self.MAX_RETRIES:
                     import time
                     time.sleep(1)
         else:
             raise ConnectionError(f"API 调用失败（已重试 {self.MAX_RETRIES} 次）：{last_error}") from last_error
 
+        if not response.choices:
+            # 内容过滤等场景 choices 可能为空，避免 IndexError 并给出可读错误
+            raise ConnectionError("API 返回空响应（无 choices，可能被内容过滤拦截）")
         msg = response.choices[0].message
         finish_reason = response.choices[0].finish_reason
 
@@ -260,46 +277,53 @@ class LLMClient:
         finish_reason = None
         usage = {}
 
-        for chunk in stream:
-            # usage 在最后一个 chunk 中返回（stream_options.include_usage）
-            if chunk.usage:
-                usage = dict(chunk.usage)
+        try:
+            for chunk in stream:
+                # usage 在最后一个 chunk 中返回（stream_options.include_usage）
+                if chunk.usage:
+                    usage = dict(chunk.usage)
 
-            if not chunk.choices:
-                continue
+                if not chunk.choices:
+                    continue
 
-            delta = chunk.choices[0].delta
-            finish_reason = chunk.choices[0].finish_reason or finish_reason
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason or finish_reason
 
-            # 文本 token
-            if delta.content:
-                content_buf.append(delta.content)
-                yield {"type": "token", "text": delta.content}
+                # 文本 token
+                if delta.content:
+                    content_buf.append(delta.content)
+                    yield {"type": "token", "text": delta.content}
 
-            # 思考 token（DeepSeek reasoning_content）
-            reasoning_piece = getattr(delta, "reasoning_content", None)
-            if reasoning_piece:
-                reasoning_buf.append(reasoning_piece)
-                yield {"type": "reasoning", "text": reasoning_piece}
+                # 思考 token（DeepSeek reasoning_content）
+                reasoning_piece = getattr(delta, "reasoning_content", None)
+                if reasoning_piece:
+                    reasoning_buf.append(reasoning_piece)
+                    yield {"type": "reasoning", "text": reasoning_piece}
 
-            # 工具调用（流式中分片到达，需累积）
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_calls_buf:
-                        tool_calls_buf[idx] = {
-                            "id": tc_delta.id or "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        }
-                    entry = tool_calls_buf[idx]
-                    if tc_delta.id:
-                        entry["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            entry["function"]["name"] += tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            entry["function"]["arguments"] += tc_delta.function.arguments
+                # 工具调用（流式中分片到达，需累积）
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_calls_buf:
+                            tool_calls_buf[idx] = {
+                                "id": tc_delta.id or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        entry = tool_calls_buf[idx]
+                        if tc_delta.id:
+                            entry["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                entry["function"]["name"] += tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                entry["function"]["arguments"] += tc_delta.function.arguments
+        finally:
+            # 流结束/异常/生成器被提前关闭（如 MuseStopped 打断）时显式释放底层连接
+            try:
+                stream.close()
+            except Exception:
+                pass
 
         # 流结束，产出汇总结果
         tool_calls = None

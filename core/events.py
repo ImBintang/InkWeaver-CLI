@@ -122,9 +122,19 @@ class EventBus:
         self._confirm_results: dict[str, dict] = {}
         self._lock = threading.Lock()
 
+    # v7.0.1: 无界队列是设计决策（Agent 线程不可被阻塞）；当积压超过阈值时
+    # 丢弃普通流事件、只保留关键事件，防止消费者崩溃后内存无限增长
+    _MAX_BACKLOG = 50000
+    _CRITICAL_TYPES = (EventType.CONFIRM_REQUEST, EventType.TASK_DONE, EventType.ERROR)
+
     def emit(self, event_type: EventType, data: dict, source: str = ""):
         """非阻塞发射事件（Agent 线程调用）"""
-        self._queue.put_nowait(Event(type=event_type, data=data, source=source))
+        if event_type not in self._CRITICAL_TYPES and self._queue.qsize() > self._MAX_BACKLOG:
+            return  # 消费者积压过深：丢弃普通事件，保住关键事件通路
+        try:
+            self._queue.put_nowait(Event(type=event_type, data=data, source=source))
+        except queue.Full:
+            pass  # 无界队列理论上不会 Full；防御性兜底，不阻塞主流程
 
     def request_confirm(self, confirm_type: str, data: dict, source: str = "",
                          timeout: float = 300.0) -> dict:

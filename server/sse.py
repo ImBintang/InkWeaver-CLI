@@ -22,6 +22,7 @@ _buf_lock = threading.Lock()
 _subscribers: set[queue.Queue] = set()
 _subs_lock = threading.Lock()
 _stop_consumer = threading.Event()
+_consumer_lock = threading.Lock()  # v7.0.1: 消费者启动互斥锁
 # v6.5.7: 订阅队列容量与消费间隔——原 2000 容量 + 50ms 消费间隔在妙笔
 # 逐 token 事件风暴下会被填满并丢弃后续事件（含确认请求，弹窗不出现/卡死）。
 # 批量发射治理（见 core.events.StreamBatcher）后事件量降为 1/16~1/64，
@@ -126,12 +127,14 @@ def _consumer_loop():
 
 def _ensure_consumer():
     """确保后台消费者已启动（幂等；单例守护线程）"""
-    if not getattr(state, "_sse_consumer_started", False):
-        state._sse_consumer_started = True
-        state._sse_consumer_thread = threading.Thread(
-            target=_consumer_loop, daemon=True, name="sse-consumer"
-        )
-        state._sse_consumer_thread.start()
+    # v7.0.1: 加锁防并发请求同时启动两个消费者（双消费者会竞争抢事件）
+    with _consumer_lock:
+        if not getattr(state, "_sse_consumer_started", False):
+            state._sse_consumer_started = True
+            state._sse_consumer_thread = threading.Thread(
+                target=_consumer_loop, daemon=True, name="sse-consumer"
+            )
+            state._sse_consumer_thread.start()
 
 
 @router.get("/api/events/stream")

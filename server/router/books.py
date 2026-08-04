@@ -263,6 +263,17 @@ async def get_chapter(book: str, num: int) -> dict:
 @router.post("/api/books/{book}/chapters/import")
 async def import_chapter(book: str, req: ChapterImportReq) -> dict:
     """导入章节文件"""
+    # v7.0.1: 与 MCP chapter_import 对齐——仅接受 .txt，限制 20MB，防止任意文件读取/超大文件
+    src = Path(req.file_path)
+    if src.suffix.lower() != ".txt":
+        raise HTTPException(400, detail="仅支持 .txt 文件导入")
+    try:
+        if not src.exists() or not src.is_file():
+            raise HTTPException(400, detail=f"文件不存在：{req.file_path}")
+        if src.stat().st_size > 20 * 1024 * 1024:
+            raise HTTPException(400, detail="文件超过 20MB 限制，请拆分后导入")
+    except OSError as e:
+        raise HTTPException(400, detail=f"文件读取失败：{e}")
     try:
         ws_path = _safe_book_path(book)
         result = workspace_tools.import_novel(ws_path, req.file_path)

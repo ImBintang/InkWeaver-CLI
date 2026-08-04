@@ -20,6 +20,9 @@ def _resolve_relation_names(db: SQLiteService, rel_ids: list) -> list[str]:
     """将 relations 中的 main_id 列表解析为名称列表（复用 tools/relation.py 逻辑）"""
     names: list[str] = []
     for rid in rel_ids:
+        # v7.0.1: 跳过非 int/str 的脏数据（防 DB 脏 JSON 触发异常）
+        if not isinstance(rid, (int, str)):
+            continue
         for getter in (db.wiki_get_main, db.plot_get_main, db.rule_get_main):
             try:
                 m = getter(rid)

@@ -1,4 +1,4 @@
-"""mcp 命令 — 启动 InkWeaver MCP Server（v7.0.0）
+"""mcp 命令 — 启动 InkWeaver MCP Server（v7.0.1）
 
 用法：
   inkweaver mcp                              # stdio 模式（Qoder/Claude Desktop 等接入）

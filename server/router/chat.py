@@ -61,6 +61,11 @@ async def chat_send(req: ChatSendReq, session_id: str | None = Query(default=Non
     return {"ok": True, "session_id": target}
 
 
+def _agent_running() -> bool:
+    """v7.0.1: Agent 线程是否在运行（供修改类接口并发防护）"""
+    return state.agent_thread is not None and state.agent_thread.is_alive()
+
+
 def _run_jianzhi(text: str, session_id: str | None = None):
     """在独立线程中运行鉴知对话（复用持久化实例保持多轮上下文）
 
@@ -143,6 +148,9 @@ async def chat_resolve_confirm(confirm_id: str, req: ConfirmResReq) -> dict:
 @router.post("/api/chat/compact")
 async def chat_compact(session_id: str | None = Query(default=None)) -> dict:
     """压缩鉴知对话上下文"""
+    # v7.0.1: Agent 运行中压缩会并发改写 messages，拒绝并在完成后重试
+    if _agent_running():
+        raise HTTPException(409, detail="Agent 正在运行中，请等待完成后再压缩")
     target = session_id or state.current_session_id
     try:
         if state.jianzhi is not None:
@@ -205,6 +213,9 @@ async def chat_context_report(session_id: str | None = Query(default=None)) -> d
 @router.post("/api/chat/clear")
 async def chat_clear(session_id: str | None = Query(default=None)) -> dict:
     """清空对话历史（保留 meta，重置 message_count=0）"""
+    # v7.0.1: Agent 运行中清空上下文会破坏正在执行的任务，拒绝并在完成后重试
+    if _agent_running():
+        raise HTTPException(409, detail="Agent 正在运行中，请等待完成后再清空")
     target = session_id or state.current_session_id
     try:
         if state.jianzhi is not None:

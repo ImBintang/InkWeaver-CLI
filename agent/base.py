@@ -67,7 +67,10 @@ class BaseAgent(ABC):
         """清理消息列表（OpenAI 格式）"""
         cleaned = []
         for msg in messages:
-            clean = {"role": msg["role"]}
+            # 外部构造的坏消息（缺 role 键）不崩溃，按 user 兜底
+            if not isinstance(msg, dict):
+                continue
+            clean = {"role": msg.get("role", "user")}
             content = msg.get("content")
             if content is not None:
                 clean["content"] = content
@@ -193,6 +196,24 @@ class BaseAgent(ABC):
         return "\n".join(lines)
 
     def clear_context(self):
-        """清空上下文"""
+        """清空上下文
+
+        token 累计口径同步重置：token_report 的"本次会话"统计与清空后的
+        新会话一致（宿主下次任务开始时会重新快照 _token_base）。
+        """
         self.messages = []
+        self._token_accum = {"input": 0, "output": 0, "total": 0}
+        self._token_base = dict(self._token_accum)
         self.bus.emit(EventType.INFO, {"text": "上下文已清空。"}, source="system")
+
+    def close(self):
+        """释放持有的 LLM 连接池（P1-41，幂等）
+
+        子类 close() 中应调用 super().close() 后再关闭自身资源。
+        """
+        llm = getattr(self, "llm", None)
+        if llm is not None:
+            try:
+                llm.close()
+            except Exception as e:
+                print(f"[base] LLM 连接关闭失败：{e}", file=sys.stderr)

@@ -2,6 +2,7 @@
 
 import json
 import sys
+import threading
 import time
 import secrets
 from pathlib import Path
@@ -28,6 +29,9 @@ class SessionManager:
         self.sessions_dir = sessions_dir
         self.index_path = sessions_dir / "index.json"
         self.default_cap = default_cap
+        # v7.0.1: SSE 消费者线程 + Agent 线程 + HTTP 请求线程并发写同一会话文件
+        # （JSONL 追加 / meta 行重写 / index 原子替换）——用 RLock 串行化写路径，防互相覆盖
+        self._lock = threading.RLock()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -164,107 +168,117 @@ class SessionManager:
                 "message_count": meta.get("message_count", 0)}
 
     def create_session(self, name: str, cap: int | None = None) -> str:
-        sid = self.generate_id()
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        meta = {"type": "meta", "id": sid, "name": name, "created_at": now, "updated_at": now,
-                "archived": False, "compact_summary": "", "pending_confirm": None,
-                "message_count": 0, "first_user_message": "", "cap": cap or self.default_cap}
-        fpath = self.sess_file_path(sid)
-        fpath.write_text(json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8")
-        idx = self.load_index()
-        idx["current_session_id"] = sid
-        idx["sessions"].insert(0, self._meta_summary(meta))
-        self._save_index(idx)
-        return sid
+        with self._lock:
+            sid = self.generate_id()
+            now = time.strftime("%Y-%m-%dT%H:%M:%S")
+            meta = {"type": "meta", "id": sid, "name": name, "created_at": now, "updated_at": now,
+                    "archived": False, "compact_summary": "", "pending_confirm": None,
+                    "message_count": 0, "first_user_message": "", "cap": cap or self.default_cap}
+            fpath = self.sess_file_path(sid)
+            fpath.write_text(json.dumps(meta, ensure_ascii=False) + "\n", encoding="utf-8")
+            idx = self.load_index()
+            idx["current_session_id"] = sid
+            idx["sessions"].insert(0, self._meta_summary(meta))
+            self._save_index(idx)
+            return sid
 
     def activate(self, sid: str, clear_pending_confirm: bool = True) -> dict:
-        idx = self.load_index()
-        if not any(s["id"] == sid for s in idx["sessions"]):
-            raise SessionNotFound(sid)
-        idx["current_session_id"] = sid
-        self._save_index(idx)
-        sess = self.get_session(sid)
-        if clear_pending_confirm:
-            sess["pending_confirm"] = None
-            self.save_pending_confirm(sid, None)
-        return sess
+        with self._lock:
+            idx = self.load_index()
+            if not any(s["id"] == sid for s in idx["sessions"]):
+                raise SessionNotFound(sid)
+            idx["current_session_id"] = sid
+            self._save_index(idx)
+            sess = self.get_session(sid)
+            if clear_pending_confirm:
+                sess["pending_confirm"] = None
+                self.save_pending_confirm(sid, None)
+            return sess
 
     def add_message(self, sid: str, msg: dict):
-        fpath = self.sess_file_path(sid)
-        # P1-21：轻量读取 meta（仅首行），避免每消息全量解析 O(n²)
-        meta = self._read_meta_only(fpath)
-        if meta is None:
-            raise SessionNotFound(sid)
-        if meta.get("message_count", 0) >= meta.get("cap", self.default_cap):
-            raise SessionFullError(sid)
-        with open(fpath, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "message", **msg}, ensure_ascii=False) + "\n")
-        new_meta = {**meta, "type": "meta",
-                    "message_count": meta.get("message_count", 0) + 1,
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-        if not meta.get("first_user_message") and msg.get("role") == "user":
-            first_text = (msg.get("content") or "").strip()
-            new_meta["first_user_message"] = first_text[:100]
-            # 自动命名：当会话名仍为默认「新会话」时，用首条用户消息截断作为标题
-            if first_text and meta.get("name", "") in ("", "新会话"):
-                new_meta["name"] = first_text[:20] + ("…" if len(first_text) > 20 else "")
-        self._rewrite_meta_line(fpath, new_meta)
-        self._update_index_summary(sid, name=new_meta.get("name", meta.get("name", "")),
-                                    count=new_meta["message_count"],
-                                    updated=new_meta["updated_at"])
+        with self._lock:
+            fpath = self.sess_file_path(sid)
+            # P1-21：轻量读取 meta（仅首行），避免每消息全量解析 O(n²)
+            meta = self._read_meta_only(fpath)
+            if meta is None:
+                raise SessionNotFound(sid)
+            if meta.get("message_count", 0) >= meta.get("cap", self.default_cap):
+                raise SessionFullError(sid)
+            with open(fpath, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"type": "message", **msg}, ensure_ascii=False) + "\n")
+            new_meta = {**meta, "type": "meta",
+                        "message_count": meta.get("message_count", 0) + 1,
+                        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            if not meta.get("first_user_message") and msg.get("role") == "user":
+                first_text = (msg.get("content") or "").strip()
+                new_meta["first_user_message"] = first_text[:100]
+                # 自动命名：当会话名仍为默认「新会话」时，用首条用户消息截断作为标题
+                if first_text and meta.get("name", "") in ("", "新会话"):
+                    new_meta["name"] = first_text[:20] + ("…" if len(first_text) > 20 else "")
+            self._rewrite_meta_line(fpath, new_meta)
+            self._update_index_summary(sid, name=new_meta.get("name", meta.get("name", "")),
+                                        count=new_meta["message_count"],
+                                        updated=new_meta["updated_at"])
 
     def _update_index_summary(self, sid: str, name=None, count=None, archived=None, updated=None):
-        idx = self.load_index()
-        for s in idx["sessions"]:
-            if s["id"] == sid:
-                if name is not None: s["name"] = name
-                if count is not None: s["message_count"] = count
-                if archived is not None: s["archived"] = archived
-                if updated is not None: s["updated_at"] = updated
-        self._save_index(idx)
+        with self._lock:
+            idx = self.load_index()
+            for s in idx["sessions"]:
+                if s["id"] == sid:
+                    if name is not None: s["name"] = name
+                    if count is not None: s["message_count"] = count
+                    if archived is not None: s["archived"] = archived
+                    if updated is not None: s["updated_at"] = updated
+            self._save_index(idx)
 
     def rename(self, sid: str, new_name: str):
-        sess = self.get_session(sid)
-        self._rewrite_meta_line(self.sess_file_path(sid), {**sess, "type": "meta", "name": new_name})
-        self._update_index_summary(sid, name=new_name)
+        with self._lock:
+            sess = self.get_session(sid)
+            self._rewrite_meta_line(self.sess_file_path(sid), {**sess, "type": "meta", "name": new_name})
+            self._update_index_summary(sid, name=new_name)
 
     def archive(self, sid: str, archived: bool = True):
-        sess = self.get_session(sid)
-        self._rewrite_meta_line(self.sess_file_path(sid), {**sess, "type": "meta", "archived": archived})
-        self._update_index_summary(sid, archived=archived)
+        with self._lock:
+            sess = self.get_session(sid)
+            self._rewrite_meta_line(self.sess_file_path(sid), {**sess, "type": "meta", "archived": archived})
+            self._update_index_summary(sid, archived=archived)
 
     def delete_session(self, sid: str):
-        fpath = self.sess_file_path(sid)
-        if fpath.exists(): fpath.unlink()
-        idx = self.load_index()
-        idx["sessions"] = [s for s in idx["sessions"] if s["id"] != sid]
-        if idx["current_session_id"] == sid:
-            idx["current_session_id"] = idx["sessions"][0]["id"] if idx["sessions"] else None
-        self._save_index(idx)
+        with self._lock:
+            fpath = self.sess_file_path(sid)
+            if fpath.exists(): fpath.unlink()
+            idx = self.load_index()
+            idx["sessions"] = [s for s in idx["sessions"] if s["id"] != sid]
+            if idx["current_session_id"] == sid:
+                idx["current_session_id"] = idx["sessions"][0]["id"] if idx["sessions"] else None
+            self._save_index(idx)
 
     def update_compact_summary(self, sid: str, summary: str) -> dict:
-        sess = self.get_session(sid)
-        result = {**sess, "type": "meta", "compact_summary": summary}
-        self._rewrite_meta_line(self.sess_file_path(sid), result)
-        return result
+        with self._lock:
+            sess = self.get_session(sid)
+            result = {**sess, "type": "meta", "compact_summary": summary}
+            self._rewrite_meta_line(self.sess_file_path(sid), result)
+            return result
 
     def save_pending_confirm(self, sid: str, confirm: dict | None):
-        fpath = self.sess_file_path(sid)
-        # P1-21：轻量读取 meta（仅首行），SSE 确认路径高频调用，避免全量解析
-        meta = self._read_meta_only(fpath)
-        if meta is None:
-            raise SessionNotFound(sid)
-        self._rewrite_meta_line(fpath, {**meta, "type": "meta", "pending_confirm": confirm})
+        with self._lock:
+            fpath = self.sess_file_path(sid)
+            # P1-21：轻量读取 meta（仅首行），SSE 确认路径高频调用，避免全量解析
+            meta = self._read_meta_only(fpath)
+            if meta is None:
+                raise SessionNotFound(sid)
+            self._rewrite_meta_line(fpath, {**meta, "type": "meta", "pending_confirm": confirm})
 
     def load_pending_confirm(self, sid: str) -> dict | None:
         return self.get_session(sid).get("pending_confirm")
 
     def save_usage(self, sid: str, input_tokens: int, output_tokens: int, model: str = ""):
-        fpath = self.sess_file_path(sid)
-        obj = {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens,
-               "model": model, "timestamp": time.time()}
-        with open(fpath, "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+        with self._lock:
+            fpath = self.sess_file_path(sid)
+            obj = {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens,
+                   "model": model, "timestamp": time.time()}
+            with open(fpath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     def get_stats(self, sid: str) -> dict:
         sess = self.get_session(sid)
@@ -294,34 +308,37 @@ class SessionManager:
                 "model_usage": model_usage}
 
     def recover_index(self) -> dict:
-        sessions = []
-        for f in sorted(self.sessions_dir.glob("sess_*.jsonl"), reverse=True):
-            meta, _ = self._parse_jsonl(f)
-            if meta:
-                sessions.append(self._meta_summary(meta))
-        cur = next((s["id"] for s in sessions if not s.get("archived")), sessions[0]["id"] if sessions else None)
-        idx = {"current_session_id": cur, "sessions": sessions}
-        self._save_index(idx)
-        return idx
+        with self._lock:
+            sessions = []
+            for f in sorted(self.sessions_dir.glob("sess_*.jsonl"), reverse=True):
+                meta, _ = self._parse_jsonl(f)
+                if meta:
+                    sessions.append(self._meta_summary(meta))
+            cur = next((s["id"] for s in sessions if not s.get("archived")), sessions[0]["id"] if sessions else None)
+            idx = {"current_session_id": cur, "sessions": sessions}
+            self._save_index(idx)
+            return idx
 
     def set_current_in_index(self, sid: str | None):
         """公开方法：更新 index 中的 current_session_id"""
-        idx = self.load_index()
-        idx["current_session_id"] = sid
-        self._save_index(idx)
+        with self._lock:
+            idx = self.load_index()
+            idx["current_session_id"] = sid
+            self._save_index(idx)
 
     def clear_session(self, sid: str) -> dict:
         """清空会话消息（保留 meta，重置 message_count=0）"""
-        sess = self.get_session(sid)
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        new_meta = {
-            "type": "meta", "id": sess["id"], "name": sess.get("name", "新会话"),
-            "created_at": sess.get("created_at", ""), "updated_at": now,
-            "archived": False, "compact_summary": sess.get("compact_summary", ""),
-            "pending_confirm": None, "message_count": 0, "first_user_message": "",
-            "cap": sess.get("cap", self.default_cap),
-        }
-        fpath = self.sess_file_path(sid)
-        fpath.write_text(json.dumps(new_meta, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._update_index_summary(sid, count=0, updated=now)
-        return new_meta
+        with self._lock:
+            sess = self.get_session(sid)
+            now = time.strftime("%Y-%m-%dT%H:%M:%S")
+            new_meta = {
+                "type": "meta", "id": sess["id"], "name": sess.get("name", "新会话"),
+                "created_at": sess.get("created_at", ""), "updated_at": now,
+                "archived": False, "compact_summary": sess.get("compact_summary", ""),
+                "pending_confirm": None, "message_count": 0, "first_user_message": "",
+                "cap": sess.get("cap", self.default_cap),
+            }
+            fpath = self.sess_file_path(sid)
+            fpath.write_text(json.dumps(new_meta, ensure_ascii=False) + "\n", encoding="utf-8")
+            self._update_index_summary(sid, count=0, updated=now)
+            return new_meta

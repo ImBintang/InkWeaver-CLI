@@ -7,6 +7,7 @@ InkWeaver 内部用自己的 LLM 配置（config.yaml 角色分配）驱动子 A
 """
 
 import threading
+import time
 
 from mcp_server.context import MCPContext
 from mcp_server.tasks import TaskManager, TaskRecord
@@ -296,6 +297,8 @@ def register_agent_tools(mcp, ctx: MCPContext, tasks: TaskManager):
         task = tasks.get(task_id)
         if task is None:
             return _err(KeyError(f"任务不存在：{task_id}"))
+        # v7.0.1: progress_tail 限幅到 [1, 100]，防御负值/超大值切片异常
+        progress_tail = max(1, min(int(progress_tail), 100))
         snap = task.snapshot(progress_tail=progress_tail)
         if task.status == "awaiting_confirmation" and task.pending_confirm:
             snap["hint"] = ("任务正在等待确认：请查看 pending_confirm.payload，"
@@ -317,12 +320,11 @@ def register_agent_tools(mcp, ctx: MCPContext, tasks: TaskManager):
         if task is None:
             return _err(KeyError(f"任务不存在：{task_id}"))
         timeout = max(5, min(int(timeout), WAIT_CAP))
-        deadline = __import__("time").time() + timeout
-        import time as _time
-        while _time.time() < deadline:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             if task.status in ("done", "error", "cancelled", "awaiting_confirmation"):
                 break
-            _time.sleep(1.0)
+            time.sleep(1.0)
         snap = task.snapshot()
         if task.status == "running":
             snap["wait_timeout"] = True

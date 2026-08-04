@@ -9,9 +9,25 @@ from pathlib import Path
 _VALID_NAME_RE = re.compile(r"^[\w\u4e00-\u9fff.-]+$")
 
 
+def is_valid_name(name: str) -> bool:
+    """v7.0.1: 统一名称校验——字符白名单 + 拒绝路径穿越形态
+
+    - ".." 可整体通过字符白名单（点字符合法），若直接用于路径拼接会
+      穿越到工作区目录之外，必须显式排除；
+    - 首尾点 / 连续点同样拒绝（避免 "."、"..."、"a..b" 等歧义形态）。
+    """
+    if not name or not isinstance(name, str):
+        return False
+    if not _VALID_NAME_RE.match(name):
+        return False
+    if name.startswith(".") or name.endswith(".") or ".." in name:
+        return False
+    return True
+
+
 def _validate_name(name: str) -> str | None:
     """校验工作区名称，非法时返回错误信息"""
-    if not name or not _VALID_NAME_RE.match(name):
+    if not is_valid_name(name):
         return "错误：工作区名称包含非法字符"
     return None
 
@@ -31,7 +47,7 @@ def list_workspaces(workspaces_dir: Path) -> str:
 
 def switch_workspace(workspaces_dir: Path, name: str) -> Path | None:
     """切换工作区，返回 Path 或 None（不存在/非法）"""
-    if not _VALID_NAME_RE.match(name):
+    if not is_valid_name(name):
         return None
     target = workspaces_dir / name
     if not target.exists() or not target.is_dir():
@@ -41,7 +57,7 @@ def switch_workspace(workspaces_dir: Path, name: str) -> Path | None:
 
 def create_workspace(workspaces_dir: Path, name: str) -> Path | None:
     """创建工作区目录结构，返回 Path 或 None（名称非法/已存在）"""
-    if not _VALID_NAME_RE.match(name):
+    if not is_valid_name(name):
         return None
     target = workspaces_dir / name
     if target.exists():
@@ -150,11 +166,18 @@ def strip_chapter_prefix(title: str) -> str:
     return _CHAPTER_PREFIX_RE.sub("", title).strip()
 
 
-def import_novel(workspace_path: Path, file_path: str) -> str:
+def import_novel(workspace_path: Path, file_path: str, start_num: int = 1) -> str:
     """导入小说，按章节拆分，写入 DB
+
+    Args:
+        workspace_path: 工作区路径
+        file_path: 小说 txt 文件路径
+        start_num: 起始章节号（增量导入时传现有章节数+1，避免覆盖已有章节）
 
     返回格式: "成功导入 12 章" 或 "错误：..."
     """
+    if start_num < 1:
+        return "错误：起始章节号必须为正整数"
     src = Path(file_path)
     if not src.exists():
         return f"错误：文件不存在 - {file_path}"
@@ -198,7 +221,7 @@ def import_novel(workspace_path: Path, file_path: str) -> str:
     from tools.editor import _get_proxy
     db = _get_proxy(workspace_path)._db
 
-    for i, (title, content_lines) in enumerate(chapters, 1):
+    for i, (title, content_lines) in enumerate(chapters, start_num):
         body = "\n".join(content_lines).strip()
         db.chapter_upsert(i, strip_chapter_prefix(title), body)
 

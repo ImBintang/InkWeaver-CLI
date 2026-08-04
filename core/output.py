@@ -45,5 +45,6 @@ class OutputFormatter:
         else:
             print(answer)
             if tokens:
-                print(f"\n--- Token: 输入={tokens['input']} 输出={tokens['output']} "
-                      f"总计={tokens['total']} | 耗时 {elapsed:.1f}s ---")
+                # v7.0.1: tokens 字典可能缺部分字段（如仅 total），用 get 兜底避免 KeyError
+                print(f"\n--- Token: 输入={tokens.get('input', 0)} 输出={tokens.get('output', 0)} "
+                      f"总计={tokens.get('total', 0)} | 耗时 {elapsed:.1f}s ---")

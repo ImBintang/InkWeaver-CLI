@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from core.events import EventBus, EventType
 
 PROGRESS_MAX = 200  # 进度轨迹环形上限
+# v7.0.1: 终态任务保留上限——超出后惰性清理最老的终态任务（防长会话内存增长）
+TASK_RETENTION = 200
 
 
 @dataclass
@@ -84,6 +86,7 @@ class TaskManager:
     # ---- 任务生命周期 ----
 
     def create(self, kind: str, params: dict, workspace: str) -> TaskRecord:
+        self._prune()  # v7.0.1: 创建时清理历史终态任务
         task = TaskRecord(id=uuid.uuid4().hex[:12], kind=kind, params=params, workspace=workspace)
         with self._lock:
             self._tasks[task.id] = task
@@ -98,15 +101,28 @@ class TaskManager:
             tasks = list(self._tasks.values())
         return [t.snapshot(with_progress=False) for t in tasks]
 
+    def _prune(self):
+        """v7.0.1: 惰性清理最老的终态任务（done/error/cancelled），保留最近 TASK_RETENTION 个"""
+        with self._lock:
+            terminal = [t for t in self._tasks.values()
+                        if t.status in ("done", "error", "cancelled")]
+            if len(terminal) <= TASK_RETENTION:
+                return
+            # 终态任务按创建时间升序，删除超出上限的最老部分
+            terminal.sort(key=lambda t: t.created_at)
+            for t in terminal[:len(terminal) - TASK_RETENTION]:
+                self._tasks.pop(t.id, None)
+
     def cancel(self, task_id: str) -> dict:
         task = self.get(task_id)
         if task is None:
             return {"status": "error", "message": f"任务不存在：{task_id}"}
-        if task.status in ("done", "error", "cancelled"):
-            return {"status": "error", "message": f"任务已结束（{task.status}），无需取消"}
-        task.stop_event.set()
-        # 立即唤醒阻塞在确认上的工作流线程（走终止路径）
-        task.bus.cancel_confirms({"action": "reject", "_stopped": True})
+        with task._lock:
+            if task.status in ("done", "error", "cancelled"):
+                return {"status": "error", "message": f"任务已结束（{task.status}），无需取消"}
+            task.stop_event.set()
+            # 立即唤醒阻塞在确认上的工作流线程（走终止路径）
+            task.bus.cancel_confirms({"action": "reject", "_stopped": True})
         task.add_progress("cancel", "收到取消请求")
         return {"status": "success", "message": f"已请求取消任务 {task_id}（在下一个检查点生效）"}
 
@@ -135,9 +151,14 @@ class TaskManager:
         else:
             return {"status": "error", "message": f"未知 action：{action}（可选 approve/reject/approve_all）"}
 
-        task.bus.resolve_confirm(pc["confirm_id"], response)
-        task.pending_confirm = None
-        task.status = "running"
+        # v7.0.1: 挂起确认的读取/清除加锁——并发 confirm 时防止重复 resolve
+        with task._lock:
+            if task.pending_confirm is not pc:
+                return {"status": "error",
+                        "message": f"任务 {task_id} 的挂起确认已被其他请求处理"}
+            task.bus.resolve_confirm(pc["confirm_id"], response)
+            task.pending_confirm = None
+            task.status = "running"
         task.add_progress("confirm", f"确认已响应：{action}")
         return {"status": "success", "message": f"已响应确认（{action}），任务继续执行"}
 
@@ -153,11 +174,12 @@ class TaskManager:
                 try:
                     self._handle_event(task, event, auto_approve)
                 except Exception as e:
-                    # 兜底：确认事件处理异常时自动放行，避免 Agent 线程永久阻塞
+                    # 兜底：确认事件处理异常时按 fail-safe 拒绝（P1-18 原则），
+                    # 避免 Agent 线程永久阻塞；拒绝后由 Agent 降级处理
                     if event.type == EventType.CONFIRM_REQUEST:
                         cid = event.data.get("confirm_id", "")
                         if cid:
-                            task.bus.resolve_confirm(cid, {"action": "approve"})
+                            task.bus.resolve_confirm(cid, {"action": "reject", "_error": True})
                     task.add_progress("warn", f"事件处理异常：{e}")
         task.consumer_thread = threading.Thread(target=_consume, daemon=True)
         task.consumer_thread.start()
@@ -167,6 +189,10 @@ class TaskManager:
         data = event.data
 
         if etype == EventType.CONFIRM_REQUEST:
+            # v7.0.1: 任务已取消后不再挂起新确认——直接拒绝，防止取消后残留挂起
+            if task.stop_event.is_set():
+                task.bus.resolve_confirm(data["confirm_id"], {"action": "reject", "_stopped": True})
+                return
             if auto_approve:
                 # 按确认类型给出安全的默认响应
                 ctype = data["confirm_type"]
@@ -174,13 +200,14 @@ class TaskManager:
                 task.bus.resolve_confirm(data["confirm_id"], default)
                 task.add_progress("confirm", f"自动确认（auto_approve）：{ctype}")
             else:
-                # 挂起等待外部 task_confirm
-                task.pending_confirm = {
-                    "confirm_id": data["confirm_id"],
-                    "confirm_type": data["confirm_type"],
-                    "payload": data.get("payload", {}),
-                }
-                task.status = "awaiting_confirmation"
+                # 挂起等待外部 task_confirm（v7.0.1: 写入加锁，与 confirm() 并发安全）
+                with task._lock:
+                    task.pending_confirm = {
+                        "confirm_id": data["confirm_id"],
+                        "confirm_type": data["confirm_type"],
+                        "payload": data.get("payload", {}),
+                    }
+                    task.status = "awaiting_confirmation"
                 task.add_progress("confirm_request",
                                   f"等待确认：{data['confirm_type']}")
         elif etype == EventType.OUTPUT:

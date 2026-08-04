@@ -546,6 +546,19 @@ _MD_BAD_WIKILINK_PATTERN = re.compile(r"\[\[([^\[\]\n]+?)\](?!\])")
 _MD_UNCLOSED_WIKILINK_PATTERN = re.compile(r"\[\[[^\[\]\n]+$")
 
 
+def _collapse_blank_lines_outside_fences(text: str) -> str:
+    """仅压缩代码围栏外的连续空行（围栏内的空行是代码内容，不得修改）"""
+    parts = []
+    in_fence = False
+    for chunk in text.split("```"):
+        if in_fence:
+            parts.append(chunk)
+        else:
+            parts.append(re.sub(r"\n{3,}", "\n\n", chunk))
+        in_fence = not in_fence
+    return "```".join(parts)
+
+
 def _fix_markdown_text(text: str) -> tuple[str, list[str]]:
     """对单个文档正文执行 markdown 语法自动修复
 
@@ -554,11 +567,11 @@ def _fix_markdown_text(text: str) -> tuple[str, list[str]]:
 
     修复项（均为保守修复，不改语义）：
     1. 标题 # 后缺空格（##标题 → ## 标题）
-    2. 列表标记后缺空格（-项目 → - 项目，含有序列表）
+    2. 列表标记后缺空格（-项目 → - 项目；排除小数/负数/水平分割线，避免误伤数值语义）
     3. 行尾空白
-    4. 未闭合加粗 **（奇数个时在行尾补闭合）
+    4. 未闭合加粗 **（仅行首未闭合时在行尾补闭合，避免误伤数学写法与跨行加粗）
     5. 畸形 wikilink（[[目标] → [[目标]]）
-    6. 连续多个空行压缩为一个空行
+    6. 连续多个空行压缩为一个空行（仅围栏外）
     7. 代码块围栏未闭合（文档末尾补 ```）
     """
     applied: list[str] = []
@@ -576,44 +589,43 @@ def _fix_markdown_text(text: str) -> tuple[str, list[str]]:
             out_lines.append(line.rstrip())
             continue
 
+        old_line = line
+
         # 1. 标题 # 后缺空格
         line = re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", line)
-        # 2. 列表标记后缺空格（排除水平分割线）
+        # 2. 列表标记后缺空格（排除水平分割线；(?!\d) 排除小数 3.14 与负数 -40 的数值语义）
         if not _MD_HR_PATTERN.match(line):
-            line = re.sub(r"^(\s*[-+])([^\s])", r"\1 \2", line)
-            line = re.sub(r"^(\s*\d+\.)([^\s])", r"\1 \2", line)
+            line = re.sub(r"^(\s*[-+])(?!\d)([^\s])", r"\1 \2", line)
+            line = re.sub(r"^(\s*\d+\.)(?!\d)([^\s])", r"\1 \2", line)
         # 3. 行尾空白
         line = line.rstrip()
-        # 4. 未闭合加粗：屏蔽行内代码后统计 ** 个数为奇数则行尾补闭合
+        # 4. 未闭合加粗：仅当行以 ** 开头且（屏蔽行内代码后）为奇数时补闭合，
+        #    避免误伤 2**3 数学写法与跨行加粗的闭合端
         masked = re.sub(r"`[^`]*`", "", line)
-        if len(re.findall(r"\*\*", masked)) % 2 == 1:
+        if masked.strip().startswith("**") and len(re.findall(r"\*\*", masked)) % 2 == 1:
             line = line + "**"
         # 5. 畸形 wikilink 补全右括号
         line = _MD_BAD_WIKILINK_PATTERN.sub(r"[[\1]]", line)
+
+        if line != old_line:
+            # 逐行实时统计修复类型（避免后续空行压缩导致行数错位）
+            if re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", old_line) != old_line:
+                applied.append("标题#后补空格")
+            elif _MD_BAD_WIKILINK_PATTERN.search(old_line):
+                applied.append("wikilink补全括号")
+            elif line.endswith("**") and not old_line.endswith("**"):
+                applied.append("补闭合加粗标记")
+            elif old_line != old_line.rstrip():
+                applied.append("移除行尾空白")
+            else:
+                applied.append("列表标记后补空格")
 
         out_lines.append(line)
 
     new_text = "\n".join(out_lines)
 
-    # 逐项统计修复类型（用于报告展示）
-    orig_lines = text.split("\n")
-    fixed_pairs = list(zip(orig_lines, new_text.split("\n")))
-    for old_l, new_l in fixed_pairs:
-        if old_l == new_l:
-            continue
-        if re.sub(r"^(#{1,6})([^\s#])", r"\1 \2", old_l) != old_l:
-            applied.append("标题#后补空格")
-        elif _MD_BAD_WIKILINK_PATTERN.search(old_l):
-            applied.append("wikilink补全括号")
-        elif new_l.endswith("**") and not old_l.endswith("**"):
-            applied.append("补闭合加粗标记")
-        elif old_l != old_l.rstrip():
-            applied.append("移除行尾空白")
-        else:
-            applied.append("列表标记后补空格")
-
-    # 6. 连续多个空行压缩
-    collapsed = re.sub(r"\n{3,}", "\n\n", new_text)
+    # 6. 连续多个空行压缩（仅围栏外，围栏内的空行是代码内容不得修改）
+    collapsed = _collapse_blank_lines_outside_fences(new_text)
     if collapsed != new_text:
         applied.append("压缩多余空行")
         new_text = collapsed

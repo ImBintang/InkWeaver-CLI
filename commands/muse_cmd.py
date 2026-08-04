@@ -89,12 +89,23 @@ def muse(
         fmt.error("请先指定一个有效工作区")
         raise typer.Exit(1)
 
-    # 读取大纲文件
+    # 读取大纲文件（v7.0.1: GBK/其他编码或 IO 异常时给出明确错误而非崩溃）
     outline_path = Path(outline_file)
     if not outline_path.exists():
         fmt.error(f"大纲文件不存在：{outline_file}")
         raise typer.Exit(1)
-    outline_text = outline_path.read_text(encoding="utf-8").strip()
+    try:
+        outline_text = outline_path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        # Windows 下用户常用 GBK 编码保存文档，尝试回退
+        try:
+            outline_text = outline_path.read_text(encoding="gbk").strip()
+        except UnicodeDecodeError:
+            fmt.error(f"大纲文件编码无法识别（既非 UTF-8 也非 GBK）：{outline_file}")
+            raise typer.Exit(1)
+    except OSError as e:
+        fmt.error(f"读取大纲文件失败：{outline_file}（{e}）")
+        raise typer.Exit(1)
     if not outline_text:
         fmt.error("大纲文件为空")
         raise typer.Exit(1)

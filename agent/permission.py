@@ -62,27 +62,46 @@ class Whitelist:
 
     def build(self, plan: dict):
         """从 plan JSON 构建所有白名单集合"""
-        for item in plan.get("new_wiki", []):
-            self.new_wiki.add((item["category"], item["name"]))
-            self.read_wiki.add((item["category"], item["name"]))
-        for item in plan.get("edit_wiki", []):
-            self.edit_wiki.add((item["category"], item["name"]))
-            self.read_wiki.add((item["category"], item["name"]))
-        for item in plan.get("new_rule", []):
-            self.new_rule.add(item["name"])
-        for item in plan.get("edit_rule", []):
-            self.edit_rule.add(item["name"])
-        for item in plan.get("new_plot", []):
-            self.new_plot.add(item["name"])
-            self.read_plot.add(item["name"])
-        for item in plan.get("edit_plot", []):
-            self.edit_plot.add(item["name"])
-            self.read_plot.add(item["name"])
-        for item in plan.get("new_category", []):
-            self.new_category.add(item["name"])
-        for item in plan.get("edit_category", []):
-            self.edit_category.add(item["name"])
-        self.read_chapters.update(parse_chapter_spec(plan.get("scope", "")))
+        if not isinstance(plan, dict):
+            return
+        # v7.0.1: 列表字段显式 null / 非 dict 条目时安全降级（否则 for item in None 抛 TypeError）
+        for item in plan.get("new_wiki") or []:
+            if not isinstance(item, dict):
+                continue
+            self.new_wiki.add((item.get("category"), item.get("name")))
+            self.read_wiki.add((item.get("category"), item.get("name")))
+        for item in plan.get("edit_wiki") or []:
+            if not isinstance(item, dict):
+                continue
+            self.edit_wiki.add((item.get("category"), item.get("name")))
+            self.read_wiki.add((item.get("category"), item.get("name")))
+        for item in plan.get("new_rule") or []:
+            if not isinstance(item, dict):
+                continue
+            self.new_rule.add(item.get("name"))
+        for item in plan.get("edit_rule") or []:
+            if not isinstance(item, dict):
+                continue
+            self.edit_rule.add(item.get("name"))
+        for item in plan.get("new_plot") or []:
+            if not isinstance(item, dict):
+                continue
+            self.new_plot.add(item.get("name"))
+            self.read_plot.add(item.get("name"))
+        for item in plan.get("edit_plot") or []:
+            if not isinstance(item, dict):
+                continue
+            self.edit_plot.add(item.get("name"))
+            self.read_plot.add(item.get("name"))
+        for item in plan.get("new_category") or []:
+            if not isinstance(item, dict):
+                continue
+            self.new_category.add(item.get("name"))
+        for item in plan.get("edit_category") or []:
+            if not isinstance(item, dict):
+                continue
+            self.edit_category.add(item.get("name"))
+        self.read_chapters.update(parse_chapter_spec(plan.get("scope") or ""))
 
     def merge(self, other: "Whitelist"):
         """合并两个白名单（提取计划 ∪ review 修改计划）"""
@@ -220,6 +239,8 @@ class PermissionManager:
         # 将 new_* 同步到 edit_*：能创建就应该能编辑（如 batch_create 后补内容）
         self.whitelist.allow_review_edits()
         self.phase = "executing"
+        # v7.0.1: 结构化计划生效后撤销 Knowledge 全放行标志，恢复白名单约束
+        self._unlocked = False
         return "OK"
 
     def submit_review_plan(self, plan_json: dict) -> str:
@@ -238,7 +259,7 @@ class PermissionManager:
                 return f"补充计划条目缺少字段「{key}」：{json.dumps(item, ensure_ascii=False)}"
             return None
 
-        for item in plan_json.get("new_wiki", []):
+        for item in plan_json.get("new_wiki") or []:
             err = _check(item, "category") or _check(item, "name")
             if err:
                 return f"错误：{err}"
@@ -246,42 +267,42 @@ class PermissionManager:
             self.whitelist.new_wiki.add(key)
             self.whitelist.edit_wiki.add(key)  # 创建后需能编辑补内容
             self.whitelist.read_wiki.add(key)
-        for item in plan_json.get("edit_wiki", []):
+        for item in plan_json.get("edit_wiki") or []:
             err = _check(item, "category") or _check(item, "name")
             if err:
                 return f"错误：{err}"
             key = (item["category"], item["name"])
             self.whitelist.edit_wiki.add(key)
             self.whitelist.read_wiki.add(key)
-        for item in plan_json.get("new_rule", []):
+        for item in plan_json.get("new_rule") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
             self.whitelist.new_rule.add(item["name"])
-        for item in plan_json.get("edit_rule", []):
+        for item in plan_json.get("edit_rule") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
             self.whitelist.edit_rule.add(item["name"])
-        for item in plan_json.get("new_plot", []):
+        for item in plan_json.get("new_plot") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
             self.whitelist.new_plot.add(item["name"])
             self.whitelist.read_plot.add(item["name"])
-        for item in plan_json.get("edit_plot", []):
+        for item in plan_json.get("edit_plot") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
             self.whitelist.edit_plot.add(item["name"])
             self.whitelist.read_plot.add(item["name"])
         # v5.4.2：支持审核阶段申请创建类别
-        for item in plan_json.get("new_category", []):
+        for item in plan_json.get("new_category") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
             self.whitelist.new_category.add(item["name"])
-        for item in plan_json.get("edit_category", []):
+        for item in plan_json.get("edit_category") or []:
             err = _check(item, "name")
             if err:
                 return f"错误：{err}"
@@ -295,6 +316,8 @@ class PermissionManager:
         """切换到 review 模式"""
         self.mode = "review"
         self.phase = "planning"
+        # v7.0.1: 重置 Knowledge 全放行标志——否则 _unlocked 永久短路白名单检查
+        self._unlocked = False
         # 允许编辑新建的条目（lint 修复需要）
         self.whitelist.allow_review_edits()
 

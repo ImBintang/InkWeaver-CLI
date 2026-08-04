@@ -29,6 +29,15 @@ def _mask_key(key: str) -> str:
     return "***"
 
 
+def _masked_models(models: list[dict]) -> list[dict]:
+    """返回 api_key 已脱敏的模型列表副本（JSON 输出安全）"""
+    import copy
+    out = copy.deepcopy(models)
+    for m in out:
+        m["api_key"] = _mask_key(m.get("api_key", ""))
+    return out
+
+
 def _find_model(config: dict, model_id: str) -> dict | None:
     return next((m for m in config.get("models", []) if m.get("id") == model_id), None)
 
@@ -54,9 +63,10 @@ def settings_show(
     config = load_config()
     fmt = OutputFormatter(json_mode=json_mode)
     if json_mode:
+        # P1-42 安全：JSON 输出同样脱敏 api_key，防止明文泄露到日志/管道
         print(json.dumps({
             "status": "success",
-            "models": config.get("models", []),
+            "models": _masked_models(config.get("models", [])),
             "assignments": config.get("assignments", {}),
         }, ensure_ascii=False, indent=2))
         return
@@ -133,7 +143,8 @@ def settings_models(
     fmt = OutputFormatter(json_mode=json_mode)
     models = config.get("models", [])
     if json_mode:
-        print(json.dumps({"status": "success", "models": models},
+        # P1-42 安全：JSON 输出同样脱敏 api_key
+        print(json.dumps({"status": "success", "models": _masked_models(models)},
                          ensure_ascii=False, indent=2))
         return
     _render_models(fmt, models)
@@ -222,6 +233,11 @@ def models_delete(
     if len(config["models"]) == original_len:
         fmt.error(f"模型不存在：{model_id}")
         raise typer.Exit(1)
+    # 同步清理 assignments 中指向该模型的悬空引用（避免静默回退到第一个模型）
+    assignments = config.get("assignments", {})
+    for role, mid in list(assignments.items()):
+        if mid == model_id:
+            assignments.pop(role, None)
     save_config(config)
     if json_mode:
         print(json.dumps({"status": "success", "id": model_id}, ensure_ascii=False))
@@ -249,11 +265,14 @@ def models_test(
             "model": model.get("model", ""),
             "output_max_tokens": 16,
         })
-        client.client.chat.completions.create(
-            model=client.model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=5,
-        )
+        try:
+            client.client.chat.completions.create(
+                model=client.model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=5,
+            )
+        finally:
+            client.close()
         if json_mode:
             print(json.dumps({"status": "success", "message": "连接成功"}, ensure_ascii=False))
         else:

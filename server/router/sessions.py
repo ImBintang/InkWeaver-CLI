@@ -42,7 +42,11 @@ async def list_sessions(book: str) -> dict:
 @router.post("/api/books/{book}/sessions")
 async def create_session(book: str, req: SessionCreate) -> dict:
     mgr = _mgr(book)
-    sid = mgr.create_session(req.name, req.cap)
+    # v7.0.1: cap 限幅（1~10000），防负数/超大值破坏会话计数
+    cap = req.cap
+    if cap is not None:
+        cap = max(1, min(int(cap), 10000))
+    sid = mgr.create_session(req.name, cap)
     sess = mgr.activate(sid, clear_pending_confirm=True)
     state.current_session_id = sid
     return {"session_id": sid, "session": sess}

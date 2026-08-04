@@ -23,6 +23,7 @@ v5.0 改造：底层实现从文件读写改为调 db/proxy.py 的 ProxyService�
 import json
 import re
 import sys
+import threading
 from pathlib import Path
 
 from typing import TYPE_CHECKING
@@ -33,11 +34,15 @@ if TYPE_CHECKING:
 # ── Proxy 注册表 ──
 
 _proxy_instances: dict[str, "ProxyService"] = {}
+# P1-42：代理实例注册表的全局锁——GUI 请求线程与 agent flush 线程并发
+# 时，检查-重建-写入必须原子，否则同一工作区会漂移出双连接互相覆盖缓存
+_proxy_lock = threading.Lock()
 
 
 def register_proxy(workspace: Path, proxy: "ProxyService"):
     """由 JianzhiAgent 初始化时调用"""
-    _proxy_instances[str(workspace.resolve())] = proxy
+    with _proxy_lock:
+        _proxy_instances[str(workspace.resolve())] = proxy
 
 
 def unregister_proxy(workspace: Path):
@@ -47,8 +52,9 @@ def unregister_proxy(workspace: Path):
     Windows 下 rmtree 常因句柄占用失败；close 幂等，重复调用安全。
     关闭失败不静默：打印到 stderr，让后续 rmtree 失败的原因可排查。
     """
-    key = str(workspace.resolve())
-    proxy = _proxy_instances.pop(key, None)
+    with _proxy_lock:
+        key = str(workspace.resolve())
+        proxy = _proxy_instances.pop(key, None)
     if proxy is not None:
         db = getattr(proxy, "_db", None)
         if db is not None:
@@ -63,21 +69,23 @@ def unregister_proxy(workspace: Path):
 
 def _get_proxy(workspace: Path):
     ws_key = str(workspace.resolve())
-    existing = _proxy_instances.get(ws_key)
-    if existing is not None:
-        # 健康检查：检测 DB 连接是否已关闭
-        try:
-            existing._db.conn.execute("SELECT 1")
-            return existing
-        except Exception:
-            # DB 已关闭，移除旧实例并重建
-            _proxy_instances.pop(ws_key, None)
-    # 兜底：独立使用场景（如 db_migrate）或重建
-    from tools.db.service import SQLiteService
-    from tools.db.proxy import ProxyService
-    db = SQLiteService(workspace / "wiki.db")
-    _proxy_instances[ws_key] = ProxyService(db)
-    return _proxy_instances[ws_key]
+    with _proxy_lock:
+        existing = _proxy_instances.get(ws_key)
+        if existing is not None:
+            # 健康检查：检测 DB 连接是否已关闭
+            try:
+                existing._db.conn.execute("SELECT 1")
+                return existing
+            except Exception:
+                # DB 已关闭，移除旧实例并重建
+                _proxy_instances.pop(ws_key, None)
+        # 兜底：独立使用场景（如 db_migrate）或重建
+        from tools.db.service import SQLiteService
+        from tools.db.proxy import ProxyService
+        db = SQLiteService(workspace / "wiki.db")
+        proxy = ProxyService(db)
+        _proxy_instances[ws_key] = proxy
+        return proxy
 
 
 # ── 目录映射 ──────────────────────────────────────────────────────────────────

@@ -58,27 +58,42 @@ def agent_loop(agent, messages: list) -> list:
         # v6.5.6: 妙笔任务终止时即时打断——宿主注入 stop_event，
         # 每次收到 chunk 都检查，不等当前 LLM 调用自然结束（"直接打断"）
         _stop_event = getattr(agent, "stop_event", None)
-        for chunk in agent.llm.chat_stream(
-            messages=agent._normalize_messages(messages),
-            system_prompt=agent.system_prompt,
-            tools=agent.tool_defs,
-        ):
-            if _stop_event is not None and _stop_event.is_set():
-                token_batcher.flush()
-                reason_batcher.flush()
-                from muse.workflow import MuseStopped
-                raise MuseStopped("妙笔任务已终止")
-            if chunk["type"] == "token":
-                token_batcher.add(chunk["text"])
-            elif chunk["type"] == "reasoning":
-                # v6.5.5: 思考过程实时流式发射，前端实时展示思考过程
-                # （修复审阅/写作长时间无任何界面反馈，误以为卡死）
-                text = chunk.get("text", "")
-                if text:
-                    received_reasoning = True
-                    reason_batcher.add(text)
-            elif chunk["type"] == "done":
-                response = chunk
+        # v7.0.1: 流开始前补一次终止检查——流挂起/迟迟不吐 chunk 时也能即时打断
+        if _stop_event is not None and _stop_event.is_set():
+            from muse.workflow import MuseStopped
+            raise MuseStopped("妙笔任务已终止")
+        # v7.0.1: LLM 网络/协议错误不再让整轮直接崩溃传播——
+        # 发射错误事件后以无响应结束本轮，由上层决定重试或结束会话
+        try:
+            for chunk in agent.llm.chat_stream(
+                messages=agent._normalize_messages(messages),
+                system_prompt=agent.system_prompt,
+                tools=agent.tool_defs,
+            ):
+                if _stop_event is not None and _stop_event.is_set():
+                    token_batcher.flush()
+                    reason_batcher.flush()
+                    from muse.workflow import MuseStopped
+                    raise MuseStopped("妙笔任务已终止")
+                if chunk["type"] == "token":
+                    token_batcher.add(chunk["text"])
+                elif chunk["type"] == "reasoning":
+                    # v6.5.5: 思考过程实时流式发射，前端实时展示思考过程
+                    # （修复审阅/写作长时间无任何界面反馈，误以为卡死）
+                    text = chunk.get("text", "")
+                    if text:
+                        received_reasoning = True
+                        reason_batcher.add(text)
+                elif chunk["type"] == "done":
+                    response = chunk
+        except MuseStopped:
+            raise  # 控制流异常（用户终止），不得被通用 except 吞掉
+        except Exception as e:
+            token_batcher.flush()
+            reason_batcher.flush()
+            print(f"[WARN] LLM 流式调用异常: {e}")
+            bus.emit(EventType.ERROR, {"text": f"LLM 调用失败：{e}"}, source=source)
+            break
         # 流结束：冲掉剩余缓冲
         token_batcher.flush()
         reason_batcher.flush()
@@ -104,7 +119,11 @@ def agent_loop(agent, messages: list) -> list:
             bus.emit(EventType.REASONING, {"text": reasoning}, source=source)
 
         # --- 构建 assistant 消息（OpenAI 原生格式） ---
-        assistant_msg = {"role": "assistant", "content": response.get("content")}
+        content = response.get("content")
+        # v7.0.1: 无正文且无工具调用的空响应兜底为空串（content=None 会导致下游拼接/解析异常）
+        if not content and not response.get("tool_calls"):
+            content = ""
+        assistant_msg = {"role": "assistant", "content": content}
         if response.get("tool_calls"):
             assistant_msg["tool_calls"] = response["tool_calls"]
         messages.append(assistant_msg)
@@ -159,8 +178,8 @@ def agent_loop(agent, messages: list) -> list:
                     print(f"[WARN] 工具调度异常 (tool={tool_name}): {e}")
                     result = f"错误：工具调度异常 {e}"
 
-                # 发射工具结果事件
-                bus.emit(EventType.TOOL_RESULT, {"name": tool_name, "msg": result[:60]}, source=source)
+                # 发射工具结果事件（v7.0.1: result 可能非 str，先转字符串再截断）
+                bus.emit(EventType.TOOL_RESULT, {"name": tool_name, "msg": str(result)[:60]}, source=source)
 
             tool_results.append({
                 "role": "tool",

@@ -210,6 +210,15 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
                         matches.append(f"[{cat['name']}] {m['name']}")
                         break  # 命中一个变体即可
 
+        # v7.0.1: 任务内新词条（仅存在于 proxy 缓存，未落库）同样参与匹配
+        for (doc_type, _), doc in proxy._cache.items():
+            if doc_type != "wiki" or doc.is_deleted:
+                continue
+            for variant in get_search_names(doc.name):
+                if variant in text:
+                    matches.append(f"[{doc.category or '新类别'}] {doc.name}")
+                    break
+
         if not matches:
             return "未在文本中匹配到已知实体。"
         return "文本中匹配到以下实体：\n" + "\n".join(matches)
@@ -219,7 +228,9 @@ def check_wiki(workspace: Path, name: str = None, chapters: str = None, text: st
         return "错误：请提供 name+chapters（查章节匹配）或 text（查文本匹配）"
 
     # v5.4: 解析别名 → 规范名 → 搜索变体集
-    canonical = resolve_name(workspace, name)
+    # v7.0.1: 传入任务内 proxy——新建词条的别名也能解析（原 DB 直读缺失）
+    from tools.editor import _get_proxy
+    canonical = resolve_name(workspace, name, proxy=_get_proxy(workspace))
     if canonical:
         search_names = get_search_names(canonical)
         display_name = canonical

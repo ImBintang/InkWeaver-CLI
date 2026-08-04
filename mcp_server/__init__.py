@@ -1,4 +1,4 @@
-# mcp_server package — v7.0.0 MCP 协议外壳
+# mcp_server package — v7.0.1 MCP 协议外壳
 #
 # 设计原则（与 v6 解耦规范一致）：
 # - 本包是 CLI/GUI 之外的第三条接入通路，不改动 agent/tools/muse 任何核心逻辑

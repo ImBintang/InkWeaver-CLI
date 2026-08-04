@@ -21,6 +21,11 @@ from tools.session_manager import SessionFullError, SessionNotFound
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动时恢复上次打开的工作区（工作区记忆）"""
+    # v7.0.1: 工作区根目录与 config 对齐（GUI 与 CLI/MCP 保持一致）
+    try:
+        state.sync_workspaces_dir()
+    except Exception as e:
+        print(f"[server] [警告] 同步工作区目录失败: {e}")
     try:
         from commands.common import load_config
         from server.router.books import BookOpenReq, open_book
@@ -35,7 +40,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="InkWeaver Server", version="7.0.0", lifespan=lifespan)
+app = FastAPI(title="InkWeaver Server", version="7.0.1", lifespan=lifespan)
 
 
 # ─── 领域异常 → HTTP 响应 ────────────────────────────────────────

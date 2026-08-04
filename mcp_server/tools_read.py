@@ -27,7 +27,7 @@ def register_read_tools(mcp, ctx: MCPContext):
             models = [{"id": m.get("id"), "model": m.get("model")}
                       for m in config.get("models", [])]
             return _ok(
-                app="InkWeaver", version="7.0.0",
+                app="InkWeaver", version="7.0.1",
                 bound_workspace=ctx.bound_workspace or "(未绑定，使用默认)",
                 current_workspace=ctx.current_workspace_name(),
                 workspaces_dir=str(ctx.workspaces_dir()),
@@ -59,6 +59,8 @@ def register_read_tools(mcp, ctx: MCPContext):
         try:
             from tools.workspace import list_latest_chapters
             ws = ctx.resolve_ws(workspace)
+            # v7.0.1: 限幅防御负数/超大值
+            n = max(1, min(int(n), 500))
             return _ok(answer=list_latest_chapters(ws, n))
         except Exception as e:
             return _err(e)
@@ -250,6 +252,8 @@ def register_read_tools(mcp, ctx: MCPContext):
             from tools.db.token_stats import TokenStatsService
             svc = TokenStatsService()
             try:
+                # v7.0.1: limit 限幅防超大值拖垮查询
+                limit = max(1, min(int(limit), 200))
                 summary = svc.get_summary(book=book or None, agent=agent or None)
                 history = svc.get_history(limit=limit)
             finally:

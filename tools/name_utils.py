@@ -62,7 +62,7 @@ def get_search_names(title: str) -> list[str]:
     return [title]
 
 
-def build_alias_map(workspace: Path) -> dict[str, str]:
+def build_alias_map(workspace: Path, proxy=None) -> dict[str, str]:
     """从 DB 构建 alias→canonical_name 反查表
 
     遍历 wiki_main 表所有词条，对每个词条名调用 get_search_names，
@@ -78,18 +78,31 @@ def build_alias_map(workspace: Path) -> dict[str, str]:
 
     Args:
         workspace: 工作区路径
+        proxy: v7.0.1 可选——任务内已加载的 ProxyService。传入时把缓存中
+            未落库的新词条（is_new）也合并进别名表，否则 knowledge/plot
+            任务中新建词条通过别名无法解析到规范名。
 
     Returns:
         alias→canonical_name 字典
     """
     from tools.db.service import SQLiteService
 
+    alias_map: dict[str, str] = {}
+
+    # v7.0.1: 先合并任务内缓存中的 wiki 条目（含未落库新词条）
+    if proxy is not None:
+        for (doc_type, _), doc in proxy._cache.items():
+            if doc_type != "wiki" or doc.is_deleted:
+                continue
+            alias_map[doc.name] = doc.name
+            for variant in get_search_names(doc.name):
+                alias_map.setdefault(variant, doc.name)
+
     db_path = workspace / "wiki.db"
     if not db_path.exists():
-        return {}
+        return alias_map
 
     db = SQLiteService(db_path)
-    alias_map: dict[str, str] = {}
 
     try:
         # 遍历所有类别下的 wiki 词条
@@ -111,17 +124,18 @@ def build_alias_map(workspace: Path) -> dict[str, str]:
     return alias_map
 
 
-def resolve_name(workspace: Path, query: str) -> str | None:
+def resolve_name(workspace: Path, query: str, proxy=None) -> str | None:
     """将任意查询名解析为规范名（wiki_main 中的全名）
 
     Args:
         workspace: 工作区路径
         query: 用户查询名（可能是别名、本体、或规范名）
+        proxy: v7.0.1 可选——任务内 ProxyService，见 build_alias_map
 
     Returns:
         规范名，未找到返回 None
     """
-    alias_map = build_alias_map(workspace)
+    alias_map = build_alias_map(workspace, proxy=proxy)
     return alias_map.get(query.strip())
 
 

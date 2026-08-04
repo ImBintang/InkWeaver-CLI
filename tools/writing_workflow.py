@@ -69,7 +69,9 @@ class WritingWorkflow:
         if last_chapter:
             sections.append(f"## 上一章全文\n{last_chapter}")
 
-        sections.append(f"## 大纲/草稿\n{outline}")
+        # v7.0.1: outline 为 None 时不再注入字面量 "None" 误导模型
+        if outline:
+            sections.append(f"## 大纲/草稿\n{outline}")
 
         if prior_knowledge:
             sections.append(f"## 先验知识\n{prior_knowledge}")
@@ -328,7 +330,12 @@ class WritingWorkflow:
         # 解析 LLM 输出
         edits, mode = parse_edits_response(raw_output)
 
-        if mode == "edits" and edits:
+        if mode == "edits":
+            # v7.0.1: LLM 输出了合法 edits JSON 但列表为空 → 意味着审阅意见
+            # 无需实质修改（如原文已符合要求），保留原稿返回；
+            # 原逻辑落入 fallback 全文重写分支，误把原稿当新稿走 diff。
+            if not edits:
+                return draft, ["[无修改] 审阅意见无需修改（edits 为空），保留原稿"]
             # 手术刀模式：应用编辑指令
             new_draft, changes, applied = apply_writer_edits(draft, edits)
             # v6.5.6: 修改轮的流式 token 是 edits JSON（前端正文区看不到），

@@ -40,31 +40,44 @@ def register_write_tools(mcp, ctx: MCPContext):
         """导入小说文件（按章节标题自动拆分入库）。【写操作·高危】
 
         Args:
-            file_path: 小说 txt 文件的绝对路径
-            append: True=增量导入（不覆盖已有章节）；False=全量导入
+            file_path: 小说 txt 文件的绝对路径（仅支持 .txt，大小 ≤ 20MB）
+            append: True=增量导入（从现有章节数之后追加，不覆盖已有章节）；False=全量导入
             overwrite: 全量导入时，若已有章节必须显式传 True 确认清空重导
             workspace: 工作区名
         """
         try:
+            from pathlib import Path
             from tools import workspace as workspace_tools
             from tools.editor import _get_proxy
             ws = ctx.resolve_ws(workspace)
+
+            # 安全限制：仅 .txt + 大小上限，防止将 MCP 工具用作任意文件读取原语
+            p = Path(file_path)
+            if p.suffix.lower() != ".txt":
+                return _err(ValueError(f"仅支持 .txt 文件：{file_path}"))
+            try:
+                if p.stat().st_size > 20 * 1024 * 1024:
+                    return _err(ValueError(f"文件过大（>20MB），拒绝导入：{file_path}"))
+            except OSError as e:
+                return _err(ValueError(f"无法读取文件：{file_path}（{e}）"))
 
             err = workspace_tools.check_novel_file(file_path)
             if err:
                 return _err(ValueError(f"无法导入：{file_path}（{err}）"))
 
-            existing = _get_proxy(ws)._db.chapter_count()
+            proxy = _get_proxy(ws)
+            existing = proxy._db.chapter_count()
             if existing > 0 and not append:
                 if not overwrite:
                     return _err(ValueError(
                         f"工作区已有 {existing} 章，全量导入将清空重导。"
                         f"确认后请重新调用并传 overwrite=true，或改用 append=true"))
-                with _get_proxy(ws)._db.transaction():
-                    _get_proxy(ws)._db.chapter_delete_all()
+                with proxy._db.transaction():
+                    proxy._db.chapter_delete_all()
                     result = workspace_tools.import_novel(ws, file_path)
             else:
-                result = workspace_tools.import_novel(ws, file_path)
+                # append=True：从现有章节数之后追加编号，避免增量文件覆盖已有章节
+                result = workspace_tools.import_novel(ws, file_path, start_num=existing + 1)
 
             if result.startswith("错误"):
                 return _err(ValueError(result))
@@ -106,7 +119,13 @@ def register_write_tools(mcp, ctx: MCPContext):
         try:
             from tools.chapter import write_chapter
             ws = ctx.resolve_ws(workspace)
-            result = write_chapter(ws, num, content)
+            # v7.0.1: 内容大小上限——防误调用把超大文本（如整本书）一次性写入单章
+            if len(content) > 1_000_000:
+                return _err(ValueError(
+                    f"内容过大（{len(content)} 字符，上限 100 万），拒绝写入；"
+                    f"如需导入整本书请用 chapter_import"))
+            # has_title=False：契约声明内容不含标题行，首段不再被误当作标题剥离
+            result = write_chapter(ws, num, content, has_title=False)
             if result.startswith("错误"):
                 return _err(ValueError(result))
             return _ok(message=result)

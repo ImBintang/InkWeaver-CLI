@@ -69,22 +69,24 @@ def get_unprocessed_chapters(workspace: Path, limit: int = 10) -> list[int]:
         return []
 
     db = SQLiteService(db_path)
-    all_chapters = db.chapter_list_all()  # [{"num": 1, "title": "..."}]
-    if not all_chapters:
+    try:
+        all_chapters = db.chapter_list_all()  # [{"num": 1, "title": "..."}]
+        if not all_chapters:
+            return []
+
+        # 从 log.json 获取已处理范围
+        log = _ensure_log(workspace)
+        processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
+        processed_nums = set()
+        for r in processed_ranges:
+            processed_nums.update(parse_chapter_spec(r))
+
+        # 过滤未处理的
+        unprocessed = [ch["chapter_num"] for ch in all_chapters if ch["chapter_num"] not in processed_nums]
+        return sorted(unprocessed)[:limit]
+    finally:
+        # v7.0.1: log.json 损坏（_ensure_log 抛异常）时也确保连接关闭，防泄漏
         db.close()
-        return []
-
-    # 从 log.json 获取已处理范围
-    log = _ensure_log(workspace)
-    processed_ranges = log.get("processed", {}).get("chapter_ranges", [])
-    processed_nums = set()
-    for r in processed_ranges:
-        processed_nums.update(parse_chapter_spec(r))
-
-    # 过滤未处理的
-    unprocessed = [ch["chapter_num"] for ch in all_chapters if ch["chapter_num"] not in processed_nums]
-    db.close()
-    return sorted(unprocessed)[:limit]
 
 
 def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
@@ -156,7 +158,8 @@ def finish_task(workspace, chapters, new_wiki=None, updated_wiki=None,
             m = re.search(r"### 自动修复（(\d+) 项）", line)
             if m:
                 fix_count = int(m.group(1))
-            m = re.search(r"待处理债务 (\d+) 项", line)
+            # v7.0.1: 与 lint.py 实际输出对齐（原正则漏写全角括号，债务数恒为 0）
+            m = re.search(r"### 需人工处理的债务（(\d+) 项）", line)
             if m:
                 debt_count = int(m.group(1))
         lint_note = f" | lint: 自动修复 {fix_count} 处，剩余债务 {debt_count} 项"

@@ -69,13 +69,18 @@ class SQLiteService:
 
         flush 等批量写入必须使用本上下文，避免与其它线程的写操作
         交错提交导致半事务状态。
+
+        v7.0.1: 整个事务边界（_tx_depth 增减 + with conn）纳入 _lock——
+        此前仅单条 SQL 加锁，跨线程并发 transaction() 时后退出者会
+        提前 COMMIT 前者的未完成写入（半事务/静默丢写）。
         """
-        self._tx_depth += 1
-        try:
-            with self.conn:
-                yield
-        finally:
-            self._tx_depth -= 1
+        with self._lock:  # RLock：同线程嵌套可重入，跨线程整个事务串行化
+            self._tx_depth += 1
+            try:
+                with self.conn:
+                    yield
+            finally:
+                self._tx_depth -= 1
 
     def _init_schema(self):
         from tools.db.schema import ALL_TABLES

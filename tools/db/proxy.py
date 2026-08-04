@@ -264,7 +264,14 @@ class ProxyService:
     # ── 读取方法（缓存优先 → DB 兜底）──
 
     def _build_frontmatter(self, doc: CachedDoc) -> str:
-        """构建与 v4 文件格式兼容的 frontmatter 字符串"""
+        """构建与 v4 文件格式兼容的 frontmatter 字符串
+
+        v7.0.1: 多行值（description/keywords 等）转义换行为 \\n——
+        否则生成的 YAML 被注入新行，read 时解析错位/字段丢失。
+        """
+        def _one_line(value: str) -> str:
+            return str(value).replace("\r\n", "\n").replace("\n", "\\n")
+
         lines = ["---"]
         lines.append(f"title: {doc.name}")
         if doc.category:
@@ -275,21 +282,23 @@ class ProxyService:
                     cat_name = cat["name"]
             lines.append(f"type: {cat_name}")
         if doc.description:
-            lines.append(f"description: {doc.description}")
+            lines.append(f"description: {_one_line(doc.description)}")
         if doc.state:
-            lines.append(f"state: {doc.state}")
+            lines.append(f"state: {_one_line(doc.state)}")
         if doc.keywords:
-            lines.append(f"keywords: {doc.keywords}")
+            lines.append(f"keywords: {_one_line(doc.keywords)}")
         if doc.chapter:
             lines.append(f"chapter: {doc.chapter}")
         if doc.chapters:
-            lines.append(f"chapters: {doc.chapters}")
+            lines.append(f"chapters: {_one_line(doc.chapters)}")
         if doc.tags:
-            lines.append(f"tags: [{', '.join(doc.tags)}]")
+            # v7.0.1: tag 内的 ] 与逗号转义，防 YAML 行内列表解析错位
+            esc_tags = [str(t).replace("\\]", "]").replace("]", "\\]").replace(",", "\\,") for t in doc.tags]
+            lines.append(f"tags: [{', '.join(esc_tags)}]")
         if doc.ended:
             lines.append("ended: true")
             if doc.end_notes:
-                lines.append(f"end_notes: {doc.end_notes}")
+                lines.append(f"end_notes: {_one_line(doc.end_notes)}")
         lines.append("---")
         return "\n".join(lines)
 
@@ -313,14 +322,6 @@ class ProxyService:
     def read_doc_version(self, doc_type: str, name: str,
                          version_chapter: int,
                          yaml_only: bool = True) -> str:
-        """读取指定历史版本（不影响缓存，纯只读）
-
-        Args:
-            doc_type: "wiki" | "plot" | "rule"
-            name: 词条名
-            version_chapter: 版本的 updated_chapter 值
-            yaml_only: 是否只返回 frontmatter
-        """
         """读取指定历史版本（不影响缓存，纯只读）
     
         Args:
@@ -722,7 +723,6 @@ class ProxyService:
         """审核完成后从磁盘恢复缓存"""
         data = json.loads(path.read_text(encoding="utf-8"))
         self._cache = {}
-        max_main_id = -1
         for d in data:
             key = tuple(d["key"])
             doc = CachedDoc(
@@ -748,9 +748,11 @@ class ProxyService:
                 write_mode=d.get("write_mode", "insert"),
             )
             self._cache[key] = doc
-            if d["main_id"] and d["main_id"] < max_main_id:
-                max_main_id = d["main_id"]
-        self._next_temp_id = max_main_id - 1 if max_main_id < 0 else -1
+        # v7.0.1: 修复临时 ID 恢复——原逻辑把初始 -1 无条件再减一，
+        # 快照中无新增条目时下一个临时 ID 应为 -1 而非 -2（-1 从未被占用）
+        neg_ids = [d["main_id"] for d in data
+                   if d.get("main_id") and d["main_id"] < 0]
+        self._next_temp_id = (min(neg_ids) - 1) if neg_ids else -1
         self._snapshot_path = path
 
     # ── 关系解析 ──

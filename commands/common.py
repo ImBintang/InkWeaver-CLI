@@ -88,8 +88,9 @@ def resolve_workspace(config: dict, workspace_name: str = "") -> Path | None:
 
     if workspace_name:
         # P0-2：显式名称必须通过合法名称校验（拒绝 ..、/、\ 等路径穿越）
-        from tools.workspace import _VALID_NAME_RE
-        if not _VALID_NAME_RE.match(workspace_name):
+        # v7.0.1：改用 is_valid_name 统一校验（额外拒绝 ".."/"a..b" 等歧义形态）
+        from tools.workspace import is_valid_name
+        if not is_valid_name(workspace_name):
             return None
         target = ws_dir / workspace_name
         if target.exists():
@@ -100,8 +101,8 @@ def resolve_workspace(config: dict, workspace_name: str = "") -> Path | None:
     last = config.get("workspace", {}).get("last", "")
     if last:
         # P0-2：配置中的 last 同样校验，防止配置被篡改后穿越
-        from tools.workspace import _VALID_NAME_RE
-        if _VALID_NAME_RE.match(last):
+        from tools.workspace import is_valid_name
+        if is_valid_name(last):
             target = ws_dir / last
             if target.exists():
                 return target

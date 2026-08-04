@@ -2,7 +2,7 @@
 
 import copy
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from commands.common import load_config, save_config, get_workspaces_dir
 
@@ -13,7 +13,7 @@ router = APIRouter()
 
 class SettingsReq(BaseModel):
     """保存配置的请求体（完整配置对象）"""
-    __pydantic_config__ = {"extra": "allow"}
+    model_config = ConfigDict(extra="allow")
 
 
 class ModelReq(BaseModel):
@@ -28,7 +28,7 @@ class ModelReq(BaseModel):
 
 class ModelUpdateReq(BaseModel):
     """模型更新请求（允许部分字段）"""
-    __pydantic_config__ = {"extra": "allow"}
+    model_config = ConfigDict(extra="allow")
 
 
 class AssignmentReq(BaseModel):
@@ -63,8 +63,14 @@ async def get_settings() -> dict:
 async def save_settings(req: SettingsReq) -> dict:
     """保存配置"""
     try:
-        save_config(req.model_dump())
+        data = req.model_dump()
+        if not data:
+            # 防御：空配置说明请求体解析异常，禁止用空配置覆盖整个 config.yaml
+            raise HTTPException(400, detail="请求体为空，已拒绝保存（防止清空配置）")
+        save_config(data)
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, detail=str(e))
 
@@ -168,13 +174,16 @@ def test_model(model_id: str) -> dict:
     try:
         from api import LLMClient
         client = LLMClient(api_cfg)
-        # 最小请求（不带 thinking 参数，兼容所有 OpenAI 兼容供应商）
-        client.client.chat.completions.create(
-            model=client.model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=5,
-        )
-        return {"ok": True, "message": "连接成功", "model": client.model}
+        try:
+            # 最小请求（不带 thinking 参数，兼容所有 OpenAI 兼容供应商）
+            client.client.chat.completions.create(
+                model=client.model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=5,
+            )
+            return {"ok": True, "message": "连接成功", "model": client.model}
+        finally:
+            client.close()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -214,8 +223,11 @@ async def set_model_assignment(role: str, req: AssignmentReq) -> dict:
 # ─── 工作区存储 ────────────────────────────────────────────────────
 
 @router.get("/api/settings/workspace/size")
-async def workspace_size() -> dict:
-    """计算工作区根目录总大小（字节）"""
+def workspace_size() -> dict:
+    """计算工作区根目录总大小（字节）
+
+    使用同步 def 合 FastAPI 线程池执行，避免阻塞事件循环（大目录 rglob 耗时）。
+    """
     try:
         config = load_config()
         ws_dir = get_workspaces_dir(config)

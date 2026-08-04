@@ -17,6 +17,7 @@ _TIKTOKEN_URL = "https://openaipublic.blob.core.windows.net/encodings/cl100k_bas
 _TIKTOKEN_TIMEOUT = 10.0  # 秒；仅首次无缓存下载时最多等待时长
 
 _ENCODER = None
+_ENCODER_FAILED = False  # P1-42：已尝试加载但失败（离线/超时），不再重复阻塞式重试
 _ENCODER_LOCK = threading.Lock()
 
 
@@ -36,13 +37,19 @@ def _load_encoder():
 
 
 def _get_encoder():
-    """带超时的懒加载；不可用返回 None（调用方降级为字符粗估）"""
-    global _ENCODER
-    if _ENCODER is not None:
+    """带超时的懒加载；不可用返回 None（调用方降级为字符粗估）
+
+    P1-42：首次加载失败（下载超时/离线）后置失败标志，后续调用直接返回 None，
+    避免每次估算都再次阻塞 _TIKTOKEN_TIMEOUT 秒（对话/妙笔流程周期性卡死）。
+    """
+    global _ENCODER, _ENCODER_FAILED
+    if _ENCODER is not None or _ENCODER_FAILED:
         return _ENCODER
     with _ENCODER_LOCK:
         if _ENCODER is not None:
             return _ENCODER
+        if _ENCODER_FAILED:
+            return None
         result = {}
 
         def worker():
@@ -56,9 +63,11 @@ def _get_encoder():
             # 注意：不能用 ⚠ 等 GBK 无法编码的符号，Windows 控制台会抛 UnicodeEncodeError
             print("[compact] tiktoken 词表下载超时，Token 估算降级为字符粗估")
             _ENCODER = None
+            _ENCODER_FAILED = True
         else:
             _ENCODER = result.get("enc")
             if _ENCODER is None:
+                _ENCODER_FAILED = True
                 print("[compact] tiktoken 不可用，Token 估算降级为字符粗估")
     return _ENCODER
 
@@ -249,12 +258,17 @@ class CompactWorkflow:
             compressed = self._format_as_summary(history)
         else:
             summary_prompt = self._build_summary_prompt(history)
-            resp = self.llm.chat(
-                messages=[{"role": "user", "content": summary_prompt}],
-                system_prompt="你是一个上下文压缩助手。",
-                tools=None,
-            )
-            compressed = resp.get("content", "").strip()
+            try:
+                resp = self.llm.chat(
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    system_prompt="你是一个上下文压缩助手。",
+                    tools=None,
+                )
+                compressed = resp.get("content", "").strip()
+            except Exception as e:
+                # P1-11：LLM 压缩失败不中断会话，降级为拼接摘要（不静默：打印 stderr）
+                print(f"[compact] LLM 压缩失败，降级为拼接摘要：{e}")
+                compressed = ""
             if not compressed:
                 compressed = self._format_as_summary(history)
 
@@ -324,28 +338,40 @@ class PersistCache:
     def __init__(self, workspace: Path):
         self.cache_path = workspace / "session" / "compact_cache.json"
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # P1-42：进程内锁，防多任务（server/MCP 并发）交错写坏缓存文件
+        self._lock = threading.Lock()
         if not self.cache_path.exists():
             self.cache_path.write_text("{}", encoding="utf-8")
 
+    def _read_cache(self) -> dict:
+        """读取缓存；JSON 损坏/文件不可读时返回空字典（不中断工具执行）"""
+        try:
+            if not self.cache_path.exists():
+                return {}
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[compact] 缓存文件读取失败（{self.cache_path.name}）：{e}")
+            return {}
+
     def save(self, tool_call_id: str, data: dict):
-        """保存数据到缓存 JSON 文件"""
-        # 确保文件存在（可能被外部删除）
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.cache_path.exists():
-            self.cache_path.write_text("{}", encoding="utf-8")
-        cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        cache[tool_call_id] = data
-        self.cache_path.write_text(
-            json.dumps(cache, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        """保存数据到缓存 JSON 文件（加锁 + 临时文件原子替换）"""
+        with self._lock:
+            # 确保文件存在（可能被外部删除）
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache = self._read_cache()
+            cache[tool_call_id] = data
+            tmp = self.cache_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(cache, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(self.cache_path)
 
     def load(self, tool_call_id: str) -> dict | None:
         """从缓存 JSON 文件加载指定条目"""
-        if not self.cache_path.exists():
-            return None
-        cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
-        return cache.get(tool_call_id)
+        with self._lock:
+            return self._read_cache().get(tool_call_id)
 
     def get_preview(self, tool_call_id: str) -> str:
         """获取缓存条目的预览文本"""

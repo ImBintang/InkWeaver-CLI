@@ -37,6 +37,28 @@ class ServerState:
         self.session_manager = SessionManager(self.workspace_path, self.workspace_path / "chat_sessions")
         return self.session_manager
 
+    def sync_workspaces_dir(self):
+        """v7.0.1: 与 config.yaml 的 workspace.dir 对齐（启动时调用）
+
+        此前硬编码指向 CLI 目录上级的 workingArea，若用户在配置中修改了
+        workspace.dir，GUI 与 CLI/MCP 会看到不同的工作区集合。
+        """
+        try:
+            from commands.common import get_workspaces_dir
+            cfg_dir = get_workspaces_dir(self._load_config_quiet())
+            if cfg_dir != self.workspaces_dir:
+                self.workspaces_dir = cfg_dir
+        except Exception as e:
+            print(f"[server] [警告] 同步工作区目录失败（沿用默认）: {e}")
+
+    @staticmethod
+    def _load_config_quiet() -> dict:
+        try:
+            from commands.common import load_config
+            return load_config()
+        except Exception:
+            return {}
+
     def load_or_create_session(self) -> dict:
         mgr = self.session_manager or self.bind_session_manager()
         idx = mgr.load_index()

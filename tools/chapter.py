@@ -293,12 +293,13 @@ def parse_chapter_title(line: str) -> tuple[int | None, str | None]:
     return num, stripped
 
 
-def write_chapter(workspace_path: Path, num: int, content: str) -> str:
+def write_chapter(workspace_path: Path, num: int, content: str, has_title: bool = True) -> str:
     """写入单个章节到 DB
 
     Args:
         num: 章节号
-        content: 全文内容（含标题行，自动拆分 title/body）
+        content: 全文内容
+        has_title: True=内容首行为标题行（自动拆分 title/body）；False=纯正文（标题留空）
 
     Returns:
         操作结果消息
@@ -311,13 +312,18 @@ def write_chapter(workspace_path: Path, num: int, content: str) -> str:
     if not content:
         return "错误：内容为空，拒绝写入（如需清空章节请使用明确操作）"
 
-    lines = content.splitlines()
-    raw_title = lines[0].strip() if lines else ""
-    body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
+    if has_title:
+        lines = content.splitlines()
+        raw_title = lines[0].strip() if lines else ""
+        body = "\n".join(lines[1:]).strip() if len(lines) > 1 else ""
 
-    # 剥离章节号前缀，只存纯标题
-    from tools.workspace import strip_chapter_prefix
-    title = strip_chapter_prefix(raw_title) if raw_title else ""
+        # 剥离章节号前缀，只存纯标题
+        from tools.workspace import strip_chapter_prefix
+        title = strip_chapter_prefix(raw_title) if raw_title else ""
+    else:
+        # 纯正文模式：MCP chapter_write 契约（内容不含标题行），标题留空由系统按章节号维护
+        title = ""
+        body = content
 
     db = _get_db(workspace_path)
     db.chapter_upsert(num, title, body)

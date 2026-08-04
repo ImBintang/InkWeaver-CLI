@@ -1,6 +1,7 @@
 """鉴知 Agent — 组装 system prompt、tool defs、工具路由"""
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -126,7 +127,9 @@ class JianzhiAgent(BaseAgent):
         self.tool_defs = self.build_tool_defs()
 
     def close(self):
-        """关闭持有的 DB 连接（幂等；切书/进程退出时调用，P1-37）"""
+        """关闭持有的 DB/LLM 连接（幂等；切书/进程退出时调用，P1-37/P1-41）"""
+        # P1-41：先释放 LLM 连接池，避免长跑服务下 httpx 句柄泄漏
+        super().close()
         if getattr(self, '_db_service', None) is not None:
             try:
                 self._db_service.close()
@@ -1462,6 +1465,11 @@ class JianzhiAgent(BaseAgent):
         return self.todo.update(items)
 
     def _handle_tools_log_check(self, tool_use_id: str) -> str:
+        # P1-42 安全：tool_use_id 来自 LLM（prompt injection 面），仅允许安全
+        # 字符集，防止路径穿越（如 ../../../config.yaml）读取工作区外文件
+        if not tool_use_id or not re.fullmatch(r"[A-Za-z0-9_\-]+", tool_use_id):
+            return ("错误：tool_use_id 含非法字符（仅允许字母/数字/下划线/连字符），"
+                    "请使用工具调用返回的准确 ID")
         # 先查 TOOL_RESULTS_DIR（精确 tool_call_id 匹配）
         path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"
         if path.exists():
