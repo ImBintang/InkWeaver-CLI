@@ -19,6 +19,10 @@ from mcp_server.context_cache import (
     KIND_PRIOR_KNOWLEDGE,
 )
 
+# kb_staging 单条详情的字段截断长度（摘要视图；截断时返回 truncated 标记与全文指引）
+DETAIL_MAX_CHARS = 500
+
+
 # 审阅检查项（固定文本，与内部 muse_reviewer skill 对齐）
 REVIEW_CHECKLIST = """审阅检查项：
 1. 设定矛盾：对比规则文档与人物词条，检查言行/能力是否越界
@@ -121,41 +125,63 @@ def register_context_tools(mcp, ctx: MCPContext):
             character_limit = max(1, min(int(character_limit), 30))
             chapter = max(0, int(chapter))
 
-            # 1) 规则文档全文（数量通常少，全量）
+            # v7.2.1: 读工具统一缓存优先——暂存（未 kb_commit）的新增/修改
+            # 规则与词条对 review_context 也可见，与 kb_show 契约一致
+            has_state_cats = {c["id"] for c in proxy.list_categories()
+                              if c.get("spec", {}).get("state_required")}
+            cat_by_name = {c["name"]: c["id"] for c in proxy.list_categories()}
+
+            # 1) 规则文档全文（DB 全量 + 缓存暂存合并；read_doc 缓存优先）
+            rule_names = {m["name"] for m in proxy._db.rule_list_main()}
+            staged_rules = {
+                d.name for (dt, _), d in proxy._cache.items()
+                if dt == "rule" and (d.is_new or d.is_dirty) and not d.is_deleted
+            }
             rule_lines = []
-            for m in proxy._db.rule_list_main():
-                cur = proxy._db.rule_get_current(m["id"])
-                rule_lines.append(f"## 规则：{m['name']}")
-                if cur:
-                    rule_lines.append(cur.get("content", ""))
+            for rname in sorted(rule_names | staged_rules):
+                full = proxy.read_doc("rule", rname, yaml_only=False)
+                if full.startswith("错误"):
+                    continue
+                rule_lines.append(f"## 规则：{rname}")
+                rule_lines.append(full)
                 rule_lines.append("")
             rules_text = "\n".join(rule_lines).strip() or "（无规则文档）"
 
             # 2) 人物/势力词条（state_required 类别的 wiki，含 state）
-            has_state_cats = {c["id"] for c in proxy.list_categories()
-                              if c.get("spec", {}).get("state_required")}
-            char_lines = []
-            candidates = []
+            #    DB 列表 + 缓存暂存合并；chapter 过滤后按更新时间倒序
+            char_map: dict = {}   # name -> (cat_name, updated_chapter)
             for cat in proxy.list_categories():
                 if cat["id"] not in has_state_cats:
                     continue
                 for m in proxy._db.wiki_list_main(cat["id"]):
-                    candidates.append((cat["name"], m))
+                    char_map[m["name"]] = (cat["name"],
+                                            m.get("updated_chapter", 0) or 0)
+            for (dt, _), d in proxy._cache.items():
+                if dt != "wiki" or d.is_deleted:
+                    continue
+                if not (d.is_new or d.is_dirty):
+                    continue
+                cid = cat_by_name.get(d.category or "")
+                if cid is not None and cid in has_state_cats:
+                    char_map[d.name] = (d.category, d.chapter or 0)
             if chapter > 0:
-                candidates = [c for c in candidates
-                              if c[1].get("updated_chapter", 0) and
-                              c[1]["updated_chapter"] <= chapter]
-            candidates.sort(key=lambda c: c[1].get("updated_chapter", 0) or 0,
-                            reverse=True)
-            for cat_name, m in candidates[:character_limit]:
-                cur = proxy._db.wiki_get_current(m["id"])
-                state = (cur or {}).get("state", "")
-                desc = (cur or {}).get("description", "")
-                line = f"- [{cat_name}] {m['name']}"
-                if desc:
-                    line += f"\n  简介：{desc}"
-                if state:
-                    line += f"\n  状态：{state}"
+                char_map = {k: v for k, v in char_map.items()
+                            if v[1] and v[1] <= chapter}
+            candidates = sorted(char_map.items(), key=lambda kv: kv[1][1],
+                                reverse=True)[:character_limit]
+            char_lines = []
+            for cname, (cat_name, _ch) in candidates:
+                doc = proxy._find_in_cache("wiki", cname)
+                if doc is None:
+                    proxy.read_doc("wiki", cname, category=cat_name, yaml_only=False)
+                    doc = proxy._find_in_cache("wiki", cname)
+                if doc is None:
+                    continue
+                line = f"- [{cat_name}] {cname}"
+                if doc.description:
+                    line += f"\n  简介：{doc.description}"
+                if doc.state:
+                    line += f"\n  状态：{doc.state}"
                 char_lines.append(line)
             chars_text = "\n".join(char_lines) if char_lines else "（无人物词条）"
 
@@ -167,12 +193,12 @@ def register_context_tools(mcp, ctx: MCPContext):
                 f"## 审阅上下文（{ws.name}）\n\n"
                 f"{REVIEW_CHECKLIST}\n\n"
                 f"## 规则文档\n{rules_text}\n\n"
-                f"## 人物词条（{len(candidates[:character_limit])} 条）\n{chars_text}\n\n"
+                f"## 人物词条（{len(candidates)} 条）\n{chars_text}\n\n"
                 f"## Lint 债务\n{debts_text}"
             )
             return _ok(answer=answer, summary={
-                "rules": len(rule_lines) // 3,
-                "characters": len(candidates[:character_limit]),
+                "rules": len(rule_names | staged_rules),
+                "characters": len(candidates),
                 "chapter_filter": chapter,
             })
         except Exception as e:
@@ -257,7 +283,8 @@ def register_context_tools(mcp, ctx: MCPContext):
 
         Args:
             workspace: 工作区名
-            name: 指定条目名查看详情（含正文/简介/状态/关键词前 500 字），空=仅清单
+            name: 指定条目名查看详情（正文/简介/状态/关键词，超过 500 字截断
+                并返回 truncated 标记与全文获取指引），空=仅清单
         """
         try:
             from tools.editor import _get_proxy
@@ -303,11 +330,22 @@ def register_context_tools(mcp, ctx: MCPContext):
                         "name": doc.name,
                         "action": ("删除" if doc.is_deleted else
                                    "新增" if doc.is_new else "修改"),
-                        "description": (doc.description or "")[:500],
-                        "state": (doc.state or "")[:500],
-                        "keywords": (doc.keywords or "")[:500],
-                        "content": (doc.content or "")[:500],
                     }
+                    # v7.2.1: 截断必须显式告知并给出全文获取通道——
+                    # 宿主拿到截断内容时能直接续调 kb_show 取全文，不再"摸黑"
+                    truncated = []
+                    for field in ("description", "state", "keywords", "content"):
+                        val = getattr(doc, field, "") or ""
+                        if len(val) > DETAIL_MAX_CHARS:
+                            truncated.append(field)
+                        detail[field] = val[:DETAIL_MAX_CHARS]
+                    if truncated:
+                        detail["truncated"] = truncated
+                        detail["truncated_hint"] = (
+                            f"以下字段超过 {DETAIL_MAX_CHARS} 字已被截断："
+                            f"{', '.join(truncated)}。需要全文请调 "
+                            f"kb_show(name, workspace)（缓存优先，暂存内容可见全文）"
+                        )
                     return _ok(item=detail)
                 return _err(KeyError(f"暂存区中没有条目「{name}」"))
 

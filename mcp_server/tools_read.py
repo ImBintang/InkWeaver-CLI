@@ -170,27 +170,65 @@ def register_read_tools(mcp, ctx: MCPContext):
             return _err(e)
 
     @mcp.tool()
-    def kb_show(name: str, workspace: str = "") -> dict:
-        """查看知识库条目详情（自动遍历 wiki/plot/rule 定位）
+    def kb_show(name: str, version: int = 0, workspace: str = "") -> dict:
+        """查看知识库条目详情（自动遍历 wiki/plot/rule 定位），wiki/rule/plot 均返回全文。
+
+        当前版本（version=0，默认）：缓存优先，暂存未提交（未 kb_commit）的
+        新增/修改内容同样可见，用于合并更新等需要最新内容的场景。
+        历史版本（version=N）：读取该条目 updated_chapter=N 的历史版本快照
+        （仅已 kb_commit 落库的内容有历史版本；传错版本会返回可用版本列表）。
 
         Args:
             name: 条目名称
+            version: 历史版本章节号（即该版本的 updated_chapter），0=当前版本
             workspace: 工作区名
         """
         try:
             from tools.editor import _get_proxy
-            from tools.rules import read_rule
             ws = ctx.resolve_ws(workspace)
+            version = max(0, int(version))
             proxy = _get_proxy(ws)
+
+            def _kb_read(doc_type: str, name: str, version: int,
+                         category: str = None) -> tuple:
+                """读取一类条目：返回 (result, found)
+
+                found=True 表示已命中（成功，或条目存在但版本不存在——
+                后者错误消息已含可用版本列表，直接透传给宿主）。
+                """
+                if version > 0:
+                    result = proxy.read_doc_version(doc_type, name, version,
+                                                    yaml_only=False)
+                    if result.startswith("错误"):
+                        if "可用版本" in result:
+                            return result, True   # 条目存在、版本不对 → 透传
+                        return result, False      # 条目不存在 → 继续遍历其他类型
+                    return result, True
+                if doc_type == "wiki":
+                    result = proxy.read_doc(doc_type, name, category=category,
+                                            yaml_only=False)
+                else:
+                    result = proxy.read_doc(doc_type, name, yaml_only=False)
+                return result, not result.startswith("错误")
+
             for cat in proxy.list_categories():
-                result = proxy.read_doc("wiki", name, category=cat["name"], yaml_only=False)
-                if not result.startswith("错误"):
+                result, found = _kb_read("wiki", name, version, category=cat["name"])
+                if found:
+                    if result.startswith("错误"):
+                        return _err(ValueError(result))
                     return _ok(type="wiki", category=cat["name"], answer=result)
-            result = proxy.read_doc("plot", name, yaml_only=False)
-            if not result.startswith("错误"):
+            result, found = _kb_read("plot", name, version)
+            if found:
+                if result.startswith("错误"):
+                    return _err(ValueError(result))
                 return _ok(type="plot", answer=result)
-            result = read_rule(ws, name)
-            if not result.startswith("错误"):
+            # v7.2.0: rule 分支必须 yaml_only=False 返回全文，与 wiki/plot 一致；
+            # 否则外部编排 LLM 无法拿到规则全文（MCP 无独立 read_rule 工具，
+            # kb_show 又不暴露 yaml_only），rule_edit 合并更新会卡死。
+            result, found = _kb_read("rule", name, version)
+            if found:
+                if result.startswith("错误"):
+                    return _err(ValueError(result))
                 return _ok(type="rule", answer=result)
             return _err(KeyError(f"条目「{name}」不存在（已遍历 wiki/plot/rule）"))
         except Exception as e:

@@ -16,7 +16,7 @@
 | `list_workspaces` | 列出所有书 |
 | `chapter_list(n)` / `chapter_status` | 章节清单 / 处理进度（含已提取标记） |
 | `chapter_show(num)` / `chapter_read(spec)` | 单章全文 / 按范围批量读原文（spec 如 "1-3"、"1,3,5"） |
-| `kb_categories` / `kb_list` / `kb_show` | 类别体系 / 条目浏览 / 条目详情（自动遍历 wiki/plot/rule） |
+| `kb_categories` / `kb_list` / `kb_show` | 类别体系 / 条目浏览 / 条目详情（自动遍历 wiki/plot/rule，均返回全文；`kb_show(name, version=章节号)` 可读历史版本） |
 | `kb_relation(name)` / `kb_memory(category)` | 词条关联 / 作者偏好与文风记忆 |
 | `lint_run` / `lint_debt` | 知识库体检 / 未解决问题清单 |
 | `token_stats` / `list_skills` / `read_skill` | 用量统计 / 内部技能清单（一般不用） |
