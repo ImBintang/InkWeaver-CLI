@@ -5,6 +5,45 @@ description: >
   词条关联与章节原文。要求已接入 inkweaver MCP Server。
   Use when: 用户询问小说设定/人物/规则/伏笔/某章内容，且只需检索不需推理时优先用本技能
   （比 ask_jianzhi 更快、零内置 LLM 成本，也不要求 server_info.llm_ready）。
+tools_allowed:  # v7.2.0: 显式声明工具范围（宿主可做 tool filtering）
+  - server_info
+  - list_workspaces
+  - chapter_list
+  - chapter_status
+  - chapter_show
+  - chapter_read
+  - kb_categories
+  - kb_list
+  - kb_show
+  - kb_relation
+  - kb_memory
+  - lint_run
+  - lint_debt
+  - token_stats
+  - list_skills
+  - read_skill
+tools_forbidden: # 本技能纯只读：禁止一切写操作
+  - create_workspace
+  - chapter_import
+  - chapter_export
+  - chapter_write
+  - memory_write
+  - memory_forget
+  - category_create
+  - kb_create
+  - kb_edit
+  - rule_create
+  - rule_edit
+  - plot_create
+  - plot_edit
+  - plot_end
+  - kb_commit
+  - ask_jianzhi
+  - extract_knowledge
+  - muse_write
+  - task_confirm
+  - task_cancel
+  - studio_*
 ---
 
 # InkWeaver 知识库查询

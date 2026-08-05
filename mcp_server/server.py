@@ -29,15 +29,20 @@ INSTRUCTIONS = """InkWeaver 小说知识库与写作辅助系统（MCP 版）。
    异步任务返回 task_id，用 task_wait/task_status 查询、
    task_confirm 响应挂起确认、task_result 获取成果、task_cancel 取消。
    先调 server_info 看 llm_ready 判断本层是否可用。
+5. 上下文工具（外部编排增强，同步）：muse_context（写作 LLM 产物包，
+   先验知识+前情提要，单章快照用完即丢）/ review_context（审阅包：规则+人物+债务）/
+   extract_context（提取包：范围+类别+词条清单）/ kb_staging（暂存区自检）。
+   宿主调度子智能体时一键调出，不必自己准备上下文。
 
 推荐工作流：
 - 了解书籍：list_workspaces → chapter_status → kb_list
-- 外部编排沉淀知识：chapter_read 读原文 → 自行推理抽取 →
-  kb_create/rule_create/plot_create 写入 → kb_commit 提交 → lint_run 体检
+- 外部编排沉淀知识：extract_context 取上下文 → chapter_read 读原文 → 自行推理抽取 →
+  kb_create/rule_create/plot_create 写入 → kb_staging 自检 → kb_commit 提交 → lint_run 体检
 - 内置 LLM 沉淀知识：extract_knowledge（auto_approve=false 时注意处理 awaiting_confirmation）
 - 设定考证：ask_jianzhi（内置 LLM），或直接用 kb_*/chapter_* 只读工具自行检索
 - 续写章节：chapter_status（确认最新章节）→ muse_write(outline=本章大纲)，
-  或外部编排：自行起草 → chapter_write 落库
+  或外部编排：muse_context 取产物 → 自行起草（可派子智能体，配 review_context 审阅）→
+  chapter_write 落库
 """
 
 
@@ -51,6 +56,7 @@ def build_server(workspace: str = ""):
     from mcp_server.tools_write import register_write_tools
     from mcp_server.tools_kb import register_kb_tools
     from mcp_server.tools_agent import register_agent_tools
+    from mcp_server.tools_context import register_context_tools
 
     mcp = FastMCP(SERVER_NAME, instructions=INSTRUCTIONS)
     ctx = MCPContext(workspace_name=workspace)
@@ -60,6 +66,7 @@ def build_server(workspace: str = ""):
     register_write_tools(mcp, ctx)
     register_kb_tools(mcp, ctx)
     register_agent_tools(mcp, ctx, tasks)
+    register_context_tools(mcp, ctx)
     return mcp
 
 

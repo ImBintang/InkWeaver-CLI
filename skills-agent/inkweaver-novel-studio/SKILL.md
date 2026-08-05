@@ -3,8 +3,35 @@ name: inkweaver-novel-studio
 description: >
   InkWeaver 小说创作工作室总控技能。当用户需要管理小说项目、查询小说设定、
   沉淀章节知识、续写章节、审阅正文时使用。要求已接入 inkweaver MCP Server
-  （提供 40 个工具：只读查询/章节与知识写操作/知识写工具组/子智能体任务）。
+  （提供 44 个工具：只读查询/章节与知识写操作/知识写工具组/子智能体任务/上下文工具）。
   Use when: 用户提到"小说/章节/设定/词条/伏笔/续写/知识提取/妙笔/鉴知"等创作相关需求。
+tools_allowed:  # v7.2.0: 总控技能，全部工具可用（含上下文工具组）
+  - server_info
+  - list_workspaces
+  - chapter_*
+  - kb_*
+  - lint_*
+  - token_stats
+  - list_skills
+  - read_skill
+  - create_workspace
+  - memory_*
+  - category_create
+  - rule_create
+  - rule_edit
+  - plot_create
+  - plot_edit
+  - plot_end
+  - kb_commit
+  - muse_context
+  - review_context
+  - extract_context
+  - kb_staging
+  - ask_jianzhi
+  - extract_knowledge
+  - muse_write
+  - task_*
+tools_forbidden: [] # 总控技能无禁止项；写操作仍须按工具描述确认
 ---
 
 # InkWeaver 小说创作工作室（总控）

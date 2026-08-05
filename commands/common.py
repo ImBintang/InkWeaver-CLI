@@ -1,5 +1,6 @@
 """子命令公共工具 — 配置加载、工作区解析"""
 
+import os
 import sys
 import yaml
 from pathlib import Path
@@ -67,9 +68,21 @@ def save_config(config: dict):
 
 
 def get_workspaces_dir(config: dict) -> Path:
-    """获取工作区根目录"""
-    ws_dir_str = config.get("workspace", {}).get("dir", "../workingArea")
-    ws_dir = Path(ws_dir_str).resolve()
+    """获取工作区根目录
+
+    v7.2.0: 跨平台路径支持——dir 支持三种写法：
+    1. 相对路径（相对当前 cwd，server 启动时已 chdir 到项目根）
+    2. 绝对路径（Windows/macOS/Linux 均可）
+    3. ~ 开头（用户主目录，经 expanduser 展开）
+    留空或 auto 时使用系统标准目录 ~/.inkweaver/workings。
+    """
+    ws_dir_str = config.get("workspace", {}).get("dir", "")
+    if not ws_dir_str or str(ws_dir_str).strip().lower() in ("auto", "~"):
+        ws_dir = Path.home() / ".inkweaver" / "workings"
+    else:
+        ws_dir = Path(os.path.expanduser(str(ws_dir_str)))
+        if not ws_dir.is_absolute():
+            ws_dir = Path(ws_dir_str).resolve()
     ws_dir.mkdir(parents=True, exist_ok=True)
     return ws_dir
 

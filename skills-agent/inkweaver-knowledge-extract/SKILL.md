@@ -5,6 +5,45 @@ description: >
   plot 剧情卡片）。支持外部编排模式（你亲自推理 + kb 写工具落库，不依赖内置 api_key）
   与内部任务模式（extract_knowledge 子智能体）。要求已接入 inkweaver MCP Server。
   Use when: 用户导入了新章节、续写完成后、或说"提取知识/沉淀设定/更新知识库"。
+tools_allowed:  # v7.2.0: 显式声明工具范围（宿主可做 tool filtering）
+  - server_info
+  - list_workspaces
+  - chapter_list
+  - chapter_status
+  - chapter_show
+  - chapter_read
+  - kb_categories
+  - kb_list
+  - kb_show
+  - kb_relation
+  - kb_memory
+  - lint_run
+  - lint_debt
+  - category_create
+  - kb_create
+  - kb_edit
+  - rule_create
+  - rule_edit
+  - plot_create
+  - plot_edit
+  - plot_end
+  - kb_commit
+  - extract_context
+  - kb_staging
+  - extract_knowledge
+  - task_status
+  - task_wait
+  - task_result
+tools_forbidden: # 本技能负责知识沉淀：禁止改章节正文
+  - chapter_import
+  - chapter_export
+  - chapter_write
+  - memory_write
+  - memory_forget
+  - ask_jianzhi
+  - muse_write
+  - task_confirm
+  - task_cancel
 ---
 
 # InkWeaver 知识提取流程（双模式剧本）

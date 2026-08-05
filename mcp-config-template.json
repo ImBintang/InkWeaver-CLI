@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "inkweaver": {
+      "command": "<本机 python 解释器绝对路径，venv 内为 .../.venv/Scripts/python.exe（Windows）或 .../.venv/bin/python（Linux/macOS）>",
+      "args": ["main.py", "mcp"],
+      "cwd": "<InkWeaver-CLI 仓库绝对路径>"
+    }
+  }
+}

@@ -15,7 +15,7 @@ InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理�
 - [快速接入（Qoder）](#快速接入qoder)
 - [其他客户端接入](#其他客户端接入)
 - [启动参数](#启动参数)
-- [工具清单（40 个）](#工具清单40-个)
+- [工具清单（44 个）](#工具清单44-个)
 - [知识写工具与持久化契约](#知识写工具与持久化契约)
 - [异步任务协议](#异步任务协议)
 - [确认机制](#确认机制)
@@ -26,6 +26,14 @@ InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理�
 ---
 
 ## 快速接入（Qoder）
+
+> v7.2.0 起提供一键安装脚本，自动完成：检测 Python → 创建 .venv → 安装依赖与本包 →
+> 写入宿主 MCP 配置（自动注入 .venv 内 Python 绝对路径与项目根 cwd）→ 可选握手验证：
+>
+> - Windows：`./install.ps1 -Host qoder -Test`
+> - Linux/macOS：`./install.sh --host qoder --test`
+>
+> 手动接入步骤如下（或直接用上面的脚本）：
 
 1. 打开 Qoder 的 MCP 配置文件 `%APPDATA%\QoderCN\SharedClientCache\mcp.json`
    （或在 Qoder 设置页的 MCP 管理中新增），注册：
@@ -47,7 +55,7 @@ InkWeaver MCP Server 把墨笔的全部能力（知识库查询、章节管理�
      客户端会报 `transport error: context deadline exceeded`）；
      或将 `args` 中的 `main.py` 改为绝对路径作为双保险
 
-2. 重启 Qoder（或在 MCP 设置页启用 `inkweaver`），工具列表出现 40 个
+2. 重启 Qoder（或在 MCP 设置页启用 `inkweaver`），工具列表出现 44 个
    `inkweaver` 前缀工具即接入成功。
 
 3. 直接在对话中使用，例如：
@@ -109,7 +117,7 @@ inkweaver mcp [-w 工作区] [-t stdio|streamable-http] [--host H] [--port P]
 
 ---
 
-## 工具清单（40 个）
+## 工具清单（44 个）
 
 ### 第 1 层：只读查询（16 个，同步，零 LLM 成本）
 
@@ -170,6 +178,15 @@ inkweaver mcp [-w 工作区] [-t stdio|streamable-http] [--host H] [--port P]
 | `task_confirm(task_id, action, reason, rejected_indices)` | 响应挂起确认 |
 | `task_cancel(task_id)` | 请求取消 |
 | `task_list` | 全部任务总览 |
+
+### 第 5 层：上下文工具（4 个，同步，外部编排增强，v7.2.0 新增）
+
+| 工具 | 说明 |
+|------|------|
+| `muse_context(workspace, chapter=0)` | 写作 LLM 产物包：先验知识+前情提要（单章快照·用完即丢；传 chapter 校验过期返回 stale） |
+| `review_context(workspace, chapter=0)` | 审阅包：规则全文+人物词条（含 state，按 chapter 过滤）+债务清单+审阅检查项 |
+| `extract_context(workspace, chapters="")` | 提取包：章节范围（空=自动算下一批）+类别体系+已有词条清单（不含原文） |
+| `kb_staging(workspace, name="")` | 暂存区自检：未 kb_commit 的增/改/删清单（纯只读；name 查看单条详情） |
 
 所有需要工作区的工具都带可选 `workspace` 参数，缺省走解析优先级。
 

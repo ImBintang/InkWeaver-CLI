@@ -1,0 +1,28 @@
+# InkWeaver 配置模板 — 复制为 .env/config.yaml 后按需填写
+#
+# 两种模式：
+#   外部编排模式（默认）：宿主 AI 自己推理，用 kb_create/rule_create/plot_create 落库，
+#     不需要真实 api_key（可留 sk-xxx 占位），读/写工具全部可用。
+#   内部任务模式（ask_jianzhi / extract_knowledge / muse_write）：需要真实 api_key。
+#   启动后先调 server_info 看 llm_ready 判断走哪种模式。
+models:
+  - id: "model_001"
+    name: "你的模型"
+    provider: "openai"          # 或 deepseek 等；示例按需修改
+    api_key: sk-xxx             # 内部子智能体模式才需要；外部编排可留占位
+    model: gpt-4o
+    base_url: https://api.openai.com
+    output_max_tokens: 128000
+assignments:
+  chat: "model_001"
+  extract: "model_001"
+  write: "model_001"
+  review: "model_001"
+workspace:
+  # dir 支持三种写法：
+  #   1. 相对路径（相对项目根，默认）：../workingArea
+  #   2. 绝对路径：D:\works\books 或 /home/user/books
+  #   3. ~ 开头（用户主目录，跨平台推荐）：~/.inkweaver/workings
+  #   留空或 auto：自动使用 ~/.inkweaver/workings
+  dir: "../workingArea"
+  last: ""

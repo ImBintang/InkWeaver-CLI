@@ -123,6 +123,14 @@ def _run_muse(task: TaskRecord, config: dict, ws, outline: str,
     from Muse import MuseWorkflow
     from commands.common import SKILLS_DIR
     from muse.workflow import MuseStopped
+    from mcp_server.context_cache import (
+        KIND_PLOT_SUMMARY,
+        KIND_PRIOR_KNOWLEDGE,
+        get_default_cache,
+    )
+
+    # v7.2.0: 单章快照·用完即丢 —— 新任务启动即清除旧章产物
+    get_default_cache().clear_workspace(getattr(ws, "name", ""))
 
     workflow = MuseWorkflow(
         config=config,
@@ -147,6 +155,12 @@ def _run_muse(task: TaskRecord, config: dict, ws, outline: str,
                        "total": tokens.get("total", 0)} if tokens else None,
         }
         task.status = "done"
+        # v7.2.0: 任务结束抓取 LLM 产物（先验知识 + 前情提要）写入上下文缓存
+        ws_name = getattr(ws, "name", "")
+        cache = get_default_cache()
+        meta = {"chapter": workflow.target_chapter, "task_id": task.id}
+        cache.put(ws_name, KIND_PRIOR_KNOWLEDGE, workflow.prior_knowledge, meta)
+        cache.put(ws_name, KIND_PLOT_SUMMARY, workflow.plot_summary, meta)
     except MuseStopped:
         task.status = "cancelled"
         task.error = "妙笔任务已终止（用户取消）"

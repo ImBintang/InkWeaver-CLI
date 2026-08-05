@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"  # v6.3.1: 原值 setuptools.backends._l
 
 [project]
 name = "inkweaver-cli"
-version = "7.1.0"
+version = "7.2.0"
 description = "InkWeaver-CLI 小说知识库与写作辅助工具"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -22,3 +22,21 @@ dependencies = [
 
 [project.scripts]
 inkweaver = "main:app_entry"
+
+# v7.2.0: 显式声明包与顶层模块，修复 flat-layout 自动发现歧义
+# （9 个顶层包 + 5 个根模块并存时 setuptools 拒绝构建，pip install -e . 失败）
+[tool.setuptools.packages.find]
+include = [
+    "agent*",
+    "auto*",
+    "commands*",
+    "core*",
+    "mcp_server*",
+    "muse*",
+    "server*",
+    "skills*",
+    "tools*",
+]
+
+[tool.setuptools]
+py-modules = ["main", "api", "cli", "Jianzhi", "Muse"]

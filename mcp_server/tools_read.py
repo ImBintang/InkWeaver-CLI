@@ -42,7 +42,7 @@ def register_read_tools(mcp, ctx: MCPContext):
                             "子智能体任务不可用，请改用外部编排模式，"
                             "或在 .env/config.yaml 配置真实 key")
             return _ok(
-                app="InkWeaver", version="7.1.0",
+                app="InkWeaver", version="7.2.0",
                 bound_workspace=ctx.bound_workspace or "(未绑定，使用默认)",
                 current_workspace=ctx.current_workspace_name(),
                 workspaces_dir=str(ctx.workspaces_dir()),

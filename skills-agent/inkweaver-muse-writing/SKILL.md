@@ -5,6 +5,45 @@ description: >
   知识准备→起草→审阅→修订，用 chapter_write 落库，不依赖内置 api_key）与
   内部任务模式（muse_write 四步写作子智能体）。要求已接入 inkweaver MCP Server。
   Use when: 用户要求"写一章/续写/按大纲创作"，且目标是 InkWeaver 管理的小说。
+tools_allowed:  # v7.2.0: 显式声明工具范围（宿主可做 tool filtering）
+  - server_info
+  - list_workspaces
+  - chapter_list
+  - chapter_status
+  - chapter_show
+  - chapter_read
+  - kb_categories
+  - kb_list
+  - kb_show
+  - kb_relation
+  - kb_memory
+  - lint_run
+  - lint_debt
+  - chapter_write
+  - muse_context
+  - review_context
+  - muse_write
+  - task_status
+  - task_wait
+  - task_result
+tools_forbidden: # 本技能负责正文写作：知识沉淀走 extract 流程，禁止知识写工具
+  - chapter_import
+  - chapter_export
+  - category_create
+  - kb_create
+  - kb_edit
+  - rule_create
+  - rule_edit
+  - plot_create
+  - plot_edit
+  - plot_end
+  - kb_commit
+  - memory_write
+  - memory_forget
+  - ask_jianzhi
+  - extract_knowledge
+  - task_confirm
+  - task_cancel
 ---
 
 # InkWeaver 章节写作流程（双模式剧本）

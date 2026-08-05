@@ -1,6 +1,6 @@
 # InkWeaver MCP 工具使用指南（LLM 编排者手册）
 
-本手册面向接入 inkweaver MCP Server 的编排 LLM。40 个工具分四组，
+本手册面向接入 inkweaver MCP Server 的编排 LLM。44 个工具分五组，
 配合「双模式」使用：**外部编排模式**（你自己推理 + 工具落库，不需要内置 api_key）
 与**内部任务模式**（把认知工作交给 InkWeaver 内置子智能体，需要内置 api_key）。
 
@@ -76,6 +76,15 @@
      └─ error/cancelled → 读 error/message 字段汇报
 ```
 
+### 5. 上下文工具（外部编排增强，同步）
+
+| 工具 | 用途 |
+|---|---|
+| `muse_context(workspace, chapter=0)` | 写作 LLM 产物包：先验知识+前情提要（单章快照·用完即丢；传 chapter 校验过期返回 stale） |
+| `review_context(workspace, chapter=0)` | 审阅包：规则全文+人物词条（含 state）+债务清单+审阅检查项 |
+| `extract_context(workspace, chapters="")` | 提取包：章节范围+类别体系+已有词条清单（**不含原文**，原文用 chapter_read 自取） |
+| `kb_staging(workspace, name="")` | 暂存区自检：未 kb_commit 的增/改/删清单（纯只读，不提供丢弃） |
+
 ## 二、双模式选择指引
 
 | 场景 | 推荐模式 |
@@ -88,7 +97,34 @@
 
 约束：同一本书同一时刻只跑一个写任务（子智能体任务与手工写操作都算）。
 
-## 三、常见错误排查表
+### 子智能体调度纪律（宿主必须遵守）
+
+1. **子智能体只做只读推理**：所有 `kb_*` / `chapter_write` / `kb_commit` 等写操作
+   必须由宿主串行收口执行——并行写会冲撞全局暂存区。
+2. **同一本书同一时刻只跑一个写任务**（含宿主派生的写子智能体）。
+3. **子智能体必须继承同一工作区与只读工具**，不跨书操作。
+4. **调度阈值**：≤5 章串行（逐个派发）；6~20 章分段并行（每段约 5 章，只读推理可并行，
+   写操作仍收口宿主）；>20 章分批确认（先向用户确认批次范围再执行）。
+
+## 三、子智能体 prompt 模板
+
+### 审稿人（Reviewer）— 配 review_context
+
+```
+你是一名网络小说审稿人。以下是审阅材料与草稿，请逐项检查并打分：
+- 设定矛盾 / 人物 OOC / 伏笔回收 / 节奏（每章 3000-4000 字）/ 信息堆砌
+- 输出：总分（0-100）+ 逐项问题列表（每条给定位与修改建议）+ 是否建议打回
+```
+
+### 写手（Draft Writer）— 配 muse_context + chapter_read
+
+```
+你是一名网络小说写手。基于提供的先验知识、前情提要、上一章原文与大纲，
+起草本章正文（3000-4000 字）。要求：叙事展现设定而非罗列；结尾留钩子；
+正文不含标题行。输出：仅正文。
+```
+
+## 四、常见错误排查表
 
 | 现象 | 原因与处理 |
 |---|---|
@@ -102,13 +138,17 @@
 | task 卡在 awaiting_confirmation | 读 pending_confirm.payload 并 task_confirm，任务不会自己往下走 |
 | muse_write 报 outline 为空 | 先与用户敲定大纲再启动 |
 | 章节导入报「已有 N 章」 | 传 append=true 增量，或 overwrite=true 确认清空重导 |
+| muse_context 返回 empty | 暂无妙笔产物：先跑 muse_write（知识准备完成后才有），或改用 review_context 取审阅材料 |
+| muse_context 返回 stale=true | 产物对应旧章：先 muse_write 生成新产物，或自行组装本章材料 |
+| kb_staging 返回 empty | 暂存区无未提交变更：先 kb_create/kb_edit 等写入，commit 前可见 |
 
-## 四、工作流速查
+## 五、工作流速查
 
 - **了解一本书**：`list_workspaces` → `chapter_status` → `kb_categories` → `kb_list`
-- **外部编排沉淀知识**：`chapter_read` → 推理抽取（可派子智能体）→ 计划给用户确认 →
-  `kb_create`/`rule_create`/`plot_create` 批量写入 → `kb_commit` → `lint_run`
-- **外部编排续写**：敲定大纲 → kb_*/chapter_read 知识准备 → 起草（可派子智能体）→
-  独立视角审阅修订 → `chapter_write` 落库 → 沉淀新设定
+- **外部编排沉淀知识**：`extract_context` 取提取包 → `chapter_read` 读原文 →
+  推理抽取（可派只读子智能体）→ `kb_create`/`rule_create`/`plot_create` 批量写入 →
+  `kb_staging` 自检 → `kb_commit` → `lint_run`
+- **外部编排续写**：敲定大纲 → `muse_context` 取产物包 → 起草（可派写手子智能体）→
+  `review_context` 取审阅包（可派审稿子智能体）→ 修订 → `chapter_write` 落库 → 沉淀新设定
 - **内置 LLM 沉淀知识**：`extract_knowledge(auto_approve=false)` → 处理确认 → `task_result`
 - **内置 LLM 续写**：`muse_write(outline)` → `task_wait`(长) → `task_result`

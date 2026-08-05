@@ -17,6 +17,9 @@ class MCPContext:
     def __init__(self, workspace_name: str = ""):
         self.bound_workspace = workspace_name
         self._config_cache: dict | None = None
+        # v7.2.0: 上下文缓存（工作流产物/组装上下文的进程级内存缓存）
+        from mcp_server.context_cache import get_default_cache
+        self.cache = get_default_cache()
 
     # ---- 配置 ----
 
